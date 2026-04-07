@@ -1,0 +1,37 @@
+{
+  "name": "@example/monorepo",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "vitest run",
+    "lint": "eslint 'packages/*/src/**/*.ts'",
+    "lint:unused": "knip",
+    "lint:deps": "syncpack lint",
+    "lint:packages": "bash scripts/publint-all.sh",
+    "prettier:check": "prettier --check '**/*.{ts,js,json,md,yml}'",
+    "prettier:fix": "prettier --write '**/*.{ts,js,json,md,yml}'",
+    "prepare": "lefthook install"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx,mjs,cjs,json,md,css,html,yml,yaml}": "prettier --write"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.0.0",
+    "@commitlint/config-conventional": "^19.0.0",
+    "eslint": "^9.0.0",
+    "eslint-config-prettier": "^10.0.0",
+    "eslint-plugin-boundaries": "^5.0.0",
+    "knip": "^5.0.0",
+    "lefthook": "^2.0.0",
+    "lint-staged": "^15.0.0",
+    "prettier": "^3.0.0",
+    "publint": "^0.3.0",
+    "syncpack": "^14.0.0",
+    "turbo": "^2.0.0",
+    "typescript": "^5.0.0",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^3.0.0"
+  }
+}

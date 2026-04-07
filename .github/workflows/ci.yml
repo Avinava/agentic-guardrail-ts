@@ -1,0 +1,41 @@
+# .github/workflows/ci.yml — CI Pipeline template
+# Copy this to your project's .github/workflows/ci.yml
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - run: npm ci
+
+      # ── Static checks (no build required) ──
+      - run: npm run prettier:check
+      - run: npm run lint:unused
+      - run: npm run lint:deps
+
+      # ── Build (required for publint + downstream checks) ──
+      - run: npm run build
+
+      # ── Post-build checks ──
+      - run: npm run lint:packages       # publint (needs dist/)
+      - run: npm run lint                # ESLint + boundaries
+      - run: npm test                    # Full test suite
+
+      # ── Security ──
+      - run: npm audit --audit-level=high

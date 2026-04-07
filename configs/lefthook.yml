@@ -1,0 +1,32 @@
+# lefthook.yml — Pre-commit hook orchestration
+# All jobs run in parallel (~3s total). If any fails, the commit is rejected.
+# AI agents see the error output, fix the issue, and retry automatically.
+
+pre-commit:
+  parallel: true
+  jobs:
+    - name: prettier
+      run: npx lint-staged
+
+    - name: lint-unused
+      run: npx knip
+
+    - name: lint-deps
+      run: npx syncpack lint
+
+    - name: lint
+      glob: "*.{ts,tsx}"
+      run: npx eslint {staged_files}
+
+    - name: typecheck
+      glob: "packages/*/src/**/*.ts"
+      run: bash scripts/typecheck-staged.sh
+
+    - name: test-related
+      glob: "packages/*/src/**/*.ts"
+      run: npx vitest related {staged_files} --run --passWithNoTests
+
+commit-msg:
+  jobs:
+    - name: commitlint
+      run: npx commitlint --edit {1}

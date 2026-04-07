@@ -1,0 +1,38 @@
+# === agentic-guardrail-ts .gitignore template ===
+# Copy this to your project root
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Test
+coverage/
+
+# Turborepo
+.turbo/
+
+# TypeScript
+*.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.*.local

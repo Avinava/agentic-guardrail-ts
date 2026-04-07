@@ -1,0 +1,32 @@
+{
+  "name": "agentic-guardrail-ts",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Automated guardrails for AI-assisted TypeScript development. A self-correcting loop that catches architecture violations, dead code, type errors, and more — before AI-generated code reaches your main branch.",
+  "keywords": [
+    "ai",
+    "guardrails",
+    "typescript",
+    "eslint",
+    "prettier",
+    "monorepo",
+    "code-quality",
+    "ai-coding",
+    "claude",
+    "copilot",
+    "cursor",
+    "gemini",
+    "pre-commit",
+    "static-analysis"
+  ],
+  "license": "MIT",
+  "author": "Avinava Maiti",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Avinava/agentic-guardrail-ts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Avinava/agentic-guardrail-ts/issues"
+  },
+  "homepage": "https://github.com/Avinava/agentic-guardrail-ts#readme"
+}
