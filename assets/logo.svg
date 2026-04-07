@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 240" width="800" height="240">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#1e293b" />
+    </linearGradient>
+
+    <!-- Shield/Guardrail Gradient -->
+    <linearGradient id="shieldGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#818cf8" />
+    </linearGradient>
+
+    <!-- TS Accent Gradient -->
+    <linearGradient id="tsGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#60a5fa" />
+      <stop offset="100%" stop-color="#c084fc" />
+    </linearGradient>
+
+    <!-- Drop Shadow -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.4"/>
+    </filter>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="800" height="240" rx="24" fill="url(#bgGradient)" />
+  
+  <!-- Subtle Grid Pattern -->
+  <g stroke="#ffffff" stroke-opacity="0.03" stroke-width="1">
+    <path d="M0,40 L800,40 M0,80 L800,80 M0,120 L800,120 M0,160 L800,160 M0,200 L800,200" />
+    <path d="M80,0 L80,240 M160,0 L160,240 M240,0 L240,240 M320,0 L320,240 M400,0 L400,240 M480,0 L480,240 M560,0 L560,240 M640,0 L640,240 M720,0 L720,240" />
+  </g>
+
+  <g transform="translate(60, 50)" filter="url(#glow)">
+    <!-- Shield/Logo Icon -->
+    <g transform="translate(0, 0)">
+      <!-- Outer Shield -->
+      <path d="M70,10 L130,30 L130,80 C130,120 100,150 70,170 C40,150 10,120 10,80 L10,30 Z" fill="none" stroke="url(#shieldGradient)" stroke-width="8" stroke-linejoin="round"/>
+      <!-- Inner Node Symbol (Agentic) -->
+      <circle cx="70" cy="75" r="15" fill="url(#tsGradient)" />
+      <circle cx="45" cy="45" r="8" fill="#e2e8f0" />
+      <circle cx="95" cy="45" r="8" fill="#e2e8f0" />
+      <path d="M45,45 L70,75 L95,45" fill="none" stroke="#e2e8f0" stroke-width="4" stroke-linecap="round"/>
+      <!-- TS Lettering small -->
+      <text x="70" y="125" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="24" font-weight="900" fill="#e2e8f0" text-anchor="middle">TS</text>
+    </g>
+    
+    <!-- Text Section -->
+    <g transform="translate(170, 75)">
+      <text x="0" y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="52" font-weight="800" fill="#ffffff" letter-spacing="-1">
+        agentic<tspan fill="url(#tsGradient)">-guardrail-ts</tspan>
+      </text>
+      <text x="5" y="40" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="20" font-weight="500" fill="#94a3b8" letter-spacing="1">
+        AI-ASSISTED TYPESCRIPT DEV
+      </text>
+    </g>
+  </g>
+</svg>

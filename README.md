@@ -1,6 +1,16 @@
-# 🛡️ agentic-guardrail-ts
+<p align="center">
+  <img src="assets/logo.svg" alt="Agentic-Guardrail-TS" width="600" />
+</p>
 
-**Automated guardrails for AI-assisted TypeScript development.**
+<p align="center">
+  <a href="https://github.com/Avinava/agentic-guardrail-ts/actions"><img src="https://img.shields.io/github/actions/workflow/status/Avinava/agentic-guardrail-ts/ci.yml?style=flat-square&color=38bdf8" alt="CI" /></a>
+  <a href="https://github.com/Avinava/agentic-guardrail-ts/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Avinava/agentic-guardrail-ts?style=flat-square&color=818cf8" alt="License" /></a>
+  <a href="https://github.com/Avinava/agentic-guardrail-ts"><img src="https://img.shields.io/github/stars/Avinava/agentic-guardrail-ts?style=flat-square&color=fbbf24" alt="Stars" /></a>
+</p>
+
+<p align="center">
+  <strong>Automated guardrails for AI-assisted TypeScript development.</strong>
+</p>
 
 A set of agent-readable skills and pre-configured tools that enforce code quality, architecture boundaries, and dependency hygiene — via a self-correcting feedback loop that runs on every `git commit`.
 
