@@ -7,6 +7,7 @@
 
 import tseslint from 'typescript-eslint';
 import boundaries from 'eslint-plugin-boundaries';
+import importX from 'eslint-plugin-import-x';
 import eslintConfigPrettier from 'eslint-config-prettier';
 
 // ────────────────────────────────────────────────────────────────
@@ -122,6 +123,23 @@ export default tseslint.config(
     ignores: ['**/logger/src/**', '**/__tests__/**'],
     rules: {
       'no-console': 'error',
+    },
+  },
+
+  // ── Import organization: builtins → external → internal → relative ──
+  {
+    files: ['packages/*/src/**/*.ts', 'apps/*/src/**/*.ts'],
+    plugins: { 'import-x': importX },
+    rules: {
+      'import-x/order': [
+        'error',
+        {
+          groups: ['builtin', 'external', 'internal', 'parent', 'sibling', 'index'],
+          'newlines-between': 'always',
+          alphabetize: { order: 'asc', caseInsensitive: true },
+        },
+      ],
+      'import-x/no-duplicates': 'error',
     },
   },
 

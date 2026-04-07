@@ -12,6 +12,9 @@
     "noPropertyAccessFromIndexSignature": true,
     "forceConsistentCasingInFileNames": true,
     "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "incremental": true,
     "skipLibCheck": true,
     "outDir": "dist",
     "rootDir": "src"

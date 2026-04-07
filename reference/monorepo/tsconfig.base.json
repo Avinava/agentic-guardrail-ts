@@ -13,6 +13,9 @@
     "noPropertyAccessFromIndexSignature": true,
     "forceConsistentCasingInFileNames": true,
     "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "incremental": true,
     "skipLibCheck": true
   },
   "exclude": ["node_modules", "**/dist/**"]

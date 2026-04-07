@@ -25,6 +25,9 @@ pre-commit:
       glob: "packages/*/src/**/*.ts"
       run: npx vitest related {staged_files} --run --passWithNoTests
 
+    - name: secrets
+      run: npx gitleaks@latest detect --staged --no-banner
+
 commit-msg:
   jobs:
     - name: commitlint

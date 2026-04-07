@@ -13,7 +13,8 @@ Install a self-correcting guardrail stack into a TypeScript project. After setup
 **What this skill installs:**
 - Lefthook (parallel pre-commit hooks)
 - Prettier + lint-staged (auto-formatting)
-- ESLint + TypeScript strict (code quality)
+- ESLint + TypeScript strict + import ordering (code quality)
+- Gitleaks (secret scanning — prevents hardcoded API keys)
 - Commitlint (conventional commits)
 - Vitest (test runner)
 - Knip (dead code detection)
@@ -143,6 +144,9 @@ pre-commit:
       glob: "src/**/*.ts"
       run: npx vitest related {staged_files} --run --passWithNoTests
 
+    - name: secrets
+      run: npx gitleaks@latest detect --staged --no-banner
+
 commit-msg:
   jobs:
     - name: commitlint
@@ -174,6 +178,9 @@ pre-commit:
     - name: test-related
       glob: "packages/*/src/**/*.ts"
       run: npx vitest related {staged_files} --run --passWithNoTests
+
+    - name: secrets
+      run: npx gitleaks@latest detect --staged --no-banner
 
 commit-msg:
   jobs:
@@ -215,6 +222,7 @@ export default config;
 
 ```javascript
 import tseslint from 'typescript-eslint';
+import importX from 'eslint-plugin-import-x';
 import eslintConfigPrettier from 'eslint-config-prettier';
 
 export default tseslint.config(
@@ -229,6 +237,24 @@ export default tseslint.config(
     },
   },
 
+  // Import organization: builtins → external → internal → relative
+  {
+    files: ['src/**/*.ts'],
+    plugins: { 'import-x': importX },
+    rules: {
+      'import-x/order': [
+        'error',
+        {
+          groups: ['builtin', 'external', 'internal', 'parent', 'sibling', 'index'],
+          'newlines-between': 'always',
+          alphabetize: { order: 'asc', caseInsensitive: true },
+        },
+      ],
+      'import-x/no-duplicates': 'error',
+    },
+  },
+
+  // Ban console.log
   {
     files: ['src/**/*.ts'],
     ignores: ['**/__tests__/**'],
@@ -255,6 +281,7 @@ Generate the tier arrays from the actual packages detected in Step 1d. Ask the u
 ```javascript
 import tseslint from 'typescript-eslint';
 import boundaries from 'eslint-plugin-boundaries';
+import importX from 'eslint-plugin-import-x';
 import eslintConfigPrettier from 'eslint-config-prettier';
 
 // ── Replace with actual scope and packages ──
@@ -340,6 +367,23 @@ export default tseslint.config(
     },
   },
 
+  // ── Import organization ──
+  {
+    files: ['packages/*/src/**/*.ts', 'apps/*/src/**/*.ts'],
+    plugins: { 'import-x': importX },
+    rules: {
+      'import-x/order': [
+        'error',
+        {
+          groups: ['builtin', 'external', 'internal', 'parent', 'sibling', 'index'],
+          'newlines-between': 'always',
+          alphabetize: { order: 'asc', caseInsensitive: true },
+        },
+      ],
+      'import-x/no-duplicates': 'error',
+    },
+  },
+
   // ── Ban console.log ──
   {
     files: ['packages/*/src/**/*.ts'],
@@ -351,7 +395,13 @@ export default tseslint.config(
 );
 ```
 
-### `tsconfig.base.json` (monorepo only)
+### TypeScript Configuration
+
+> **ASK THE USER:** "Does this project use TypeScript `enum` or `namespace` keywords?"
+> - If **NO** (recommended): include `"erasableSyntaxOnly": true` — prepares the project for native Node.js TS execution (type stripping)
+> - If **YES**: omit `erasableSyntaxOnly` — enums/namespaces require transpilation and are incompatible with type stripping
+
+**`tsconfig.base.json`** (monorepo only):
 
 ```json
 {
@@ -369,6 +419,9 @@ export default tseslint.config(
     "noPropertyAccessFromIndexSignature": true,
     "forceConsistentCasingInFileNames": true,
     "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "incremental": true,
     "skipLibCheck": true
   },
   "exclude": ["node_modules", "**/dist/**"]
@@ -392,6 +445,9 @@ For single-package projects, write a `tsconfig.json` instead (with `outDir` and 
     "noPropertyAccessFromIndexSignature": true,
     "forceConsistentCasingInFileNames": true,
     "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "incremental": true,
     "skipLibCheck": true,
     "outDir": "dist",
     "rootDir": "src"
@@ -400,6 +456,11 @@ For single-package projects, write a `tsconfig.json` instead (with `outDir` and 
   "exclude": ["dist", "node_modules"]
 }
 ```
+
+**New flags explained:**
+- `isolatedModules` — ensures each file can be compiled independently (required for esbuild/swc compatibility)
+- `erasableSyntaxOnly` — errors on enums/namespaces/parameter properties, enabling native Node.js TS execution
+- `incremental` — caches type-check results for faster rebuilds
 
 If a `tsconfig.json` already exists, do NOT overwrite it. Only create `tsconfig.base.json` for monorepos if it doesn't exist.
 
@@ -611,7 +672,7 @@ Merge with existing scripts — do NOT overwrite scripts that already exist unle
 
 ### All projects:
 ```bash
-npm install -D lefthook prettier lint-staged eslint typescript vitest knip @commitlint/cli @commitlint/config-conventional typescript-eslint eslint-config-prettier publint
+npm install -D lefthook prettier lint-staged eslint typescript vitest knip @commitlint/cli @commitlint/config-conventional typescript-eslint eslint-config-prettier eslint-plugin-import-x publint
 ```
 
 ### Monorepo only — add these:
@@ -666,15 +727,27 @@ If the commit succeeds, setup is complete. If it fails, read the errors and fix 
 
 ## Verification Checklist
 
-- [ ] `lefthook.yml` exists and `npx lefthook install` succeeded
-- [ ] `eslint.config.js` exists with correct config for project type
+- [ ] `lefthook.yml` exists with secrets job and `npx lefthook install` succeeded
+- [ ] `eslint.config.js` exists with import ordering and correct config for project type
 - [ ] `.prettierrc` exists
 - [ ] `commitlint.config.ts` exists with actual package scopes
 - [ ] `vitest.config.ts` exists
+- [ ] `tsconfig` includes `isolatedModules`, `incremental`, and optionally `erasableSyntaxOnly`
 - [ ] `git commit --allow-empty` passes without hook errors
-- [ ] Lockfile updated with new devDependencies
+- [ ] Lockfile updated with new devDependencies (including `eslint-plugin-import-x`)
 - [ ] For monorepo: `tsconfig.base.json`, `knip.json`, `.syncpackrc.json`, `turbo.json` exist
 - [ ] For monorepo: `scripts/typecheck-staged.sh` exists and is executable
+
+## User Confirmation Summary
+
+During setup, you should have asked the user about:
+1. **Org scope** (Step 1c) — if not auto-detected in a monorepo
+2. **Tier assignments** (Step 4) — how to classify packages for architecture enforcement
+3. **Enum usage** (Step 4, TypeScript config) — whether to enable `erasableSyntaxOnly`
+4. **Existing configs** — any file that already exists should be flagged, not silently overwritten
+5. **npm scripts** (Step 8) — existing scripts should be preserved unless user confirms overwrite
+
+If you skipped any of these, go back and ask now.
 
 ## Related Skills
 

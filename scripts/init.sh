@@ -211,6 +211,7 @@ DEPS=(
   "eslint"
   "typescript-eslint"
   "eslint-config-prettier"
+  "eslint-plugin-import-x"
   "knip"
   "publint"
   "vitest"

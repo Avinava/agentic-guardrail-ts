@@ -83,13 +83,15 @@ The agent reads the instructions and executes them in your project.
 | 1 | **Lefthook** | Orchestrates all checks in parallel | Pre-commit |
 | 2 | **Prettier + lint-staged** | Formatting inconsistencies | Pre-commit |
 | 3 | **ESLint + TypeScript strict** | `any` leaks, floating promises, unused vars | Pre-commit + CI |
-| 4 | **ESLint Boundaries** | Architecture violations (monorepo only) | Pre-commit + CI |
-| 5 | **Knip** | Unused files, exports, dependencies | Pre-commit + CI |
-| 6 | **Syncpack** | Version mismatches across packages (monorepo) | Pre-commit + CI |
-| 7 | **Publint** | Broken `package.json` exports | CI only |
-| 8 | **Commitlint** | Non-conventional commit messages | Pre-commit |
-| 9 | **Vitest** | Regressions in changed code | Pre-commit + CI |
-| 10 | **Turborepo** | Slow rebuilds (cached parallel builds, monorepo) | Build time |
+| 4 | **ESLint Import Ordering** | Inconsistent import order | Pre-commit + CI |
+| 5 | **ESLint Boundaries** | Architecture violations (monorepo only) | Pre-commit + CI |
+| 6 | **Gitleaks** | Hardcoded secrets, API keys, tokens | Pre-commit |
+| 7 | **Knip** | Unused files, exports, dependencies | Pre-commit + CI |
+| 8 | **Syncpack** | Version mismatches across packages (monorepo) | Pre-commit + CI |
+| 9 | **Publint** | Broken `package.json` exports | CI only |
+| 10 | **Commitlint** | Non-conventional commit messages | Pre-commit |
+| 11 | **Vitest** | Regressions in changed code | Pre-commit + CI |
+| 12 | **Turborepo** | Slow rebuilds (cached parallel builds, monorepo) | Build time |
 
 ---
 
