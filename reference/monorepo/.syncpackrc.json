@@ -1,0 +1,19 @@
+{
+  "semverGroups": [
+    {
+      "label": "Internal workspace packages use exact versions",
+      "packages": ["@example/**"],
+      "dependencies": ["@example/**"],
+      "dependencyTypes": ["prod", "dev"],
+      "pinVersion": "*"
+    }
+  ],
+  "versionGroups": [
+    {
+      "label": "All third-party deps should use the same version",
+      "packages": ["**"],
+      "dependencies": ["**"],
+      "dependencyTypes": ["prod", "dev"]
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-// eslint.config.js — Single package (simplified, no boundaries)
+// eslint.config.js — Single package (no architecture boundaries)
 import tseslint from 'typescript-eslint';
 import eslintConfigPrettier from 'eslint-config-prettier';
 

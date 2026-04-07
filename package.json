@@ -1,6 +1,6 @@
 {
   "name": "agentic-guardrail-ts",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "description": "Automated guardrails for AI-assisted TypeScript development. A self-correcting loop that catches architecture violations, dead code, type errors, and more — before AI-generated code reaches your main branch.",
   "keywords": [

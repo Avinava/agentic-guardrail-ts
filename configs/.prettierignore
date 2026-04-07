@@ -1,9 +1,0 @@
-# Don't format generated/vendored files
-dist/
-build/
-coverage/
-node_modules/
-*.lock
-pnpm-lock.yaml
-tsconfig.tsbuildinfo
-.turbo/

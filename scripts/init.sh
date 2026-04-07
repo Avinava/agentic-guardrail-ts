@@ -22,7 +22,7 @@ NC='\033[0m' # No Color
 banner() {
   echo ""
   echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════════╗${NC}"
-  echo -e "${CYAN}${BOLD}║        🛡️  agentic-guardrail-ts  v1.0.0                 ║${NC}"
+  echo -e "${CYAN}${BOLD}║        🛡️  agentic-guardrail-ts  v2.0.0                 ║${NC}"
   echo -e "${CYAN}${BOLD}║   Automated guardrails for AI-assisted TypeScript dev   ║${NC}"
   echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
   echo ""
@@ -34,13 +34,13 @@ warn()    { echo -e "${YELLOW}⚠${NC}  $1"; }
 error()   { echo -e "${RED}✗${NC}  $1"; }
 step()    { echo -e "\n${BOLD}── $1 ──${NC}"; }
 
-# ── Resolve GUARDRAIL_DIR (where configs/ lives) ──
+# ── Resolve GUARDRAIL_DIR (where reference/ lives) ──
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GUARDRAIL_DIR="$(dirname "$SCRIPT_DIR")"
 TARGET_DIR="$(pwd)"
 
-# Validate we have the configs
-if [ ! -d "$GUARDRAIL_DIR/configs" ]; then
+# Validate we have the reference configs
+if [ ! -d "$GUARDRAIL_DIR/reference" ]; then
   # Try fetching from GitHub
   GUARDRAIL_DIR="/tmp/agentic-guardrail-ts-$$"
   info "Downloading guardrail configs..."
@@ -68,7 +68,7 @@ if [ -f "$TARGET_DIR/package.json" ]; then
   fi
 fi
 
-# Project type — ask FIRST so we can tailor the scope prompt
+# Project type
 echo ""
 echo -e "${CYAN}?${NC} Project type:"
 echo "  1) Single package (simple TypeScript project)"
@@ -89,19 +89,7 @@ case "${PKG_MANAGER_CHOICE:-1}" in
   *) PKG_MANAGER="npm"; WORKSPACE_PIN="*" ;;
 esac
 
-# Agent
-echo ""
-echo -e "${CYAN}?${NC} Primary AI coding agent:"
-echo "  1) Claude Code"
-echo "  2) Cursor"
-echo "  3) GitHub Copilot / Codex"
-echo "  4) Gemini CLI"
-echo "  5) All of the above"
-read -rp "  Choice [1-5]: " AGENT_CHOICE
-AGENT_CHOICE="${AGENT_CHOICE:-5}"
-
-# Org scope — auto-detect or prompt
-echo ""
+# Org scope — auto-detect or prompt (only for monorepo)
 DETECTED_SCOPE=""
 if [ -f "$TARGET_DIR/package.json" ]; then
   DETECTED_SCOPE=$(node -e "
@@ -112,49 +100,36 @@ if [ -f "$TARGET_DIR/package.json" ]; then
 fi
 
 if [ "$PROJECT_TYPE" = "2" ]; then
-  # Monorepo — scope is important
+  echo ""
   echo -e "${CYAN}?${NC} npm org scope"
-  echo -e "  ${BLUE}ℹ${NC}  This is the prefix for your workspace packages (e.g. ${BOLD}@acme${NC}/shared-types)."
-  echo -e "  ${BLUE}ℹ${NC}  It's used in ESLint boundary rules and Syncpack configs to identify"
-  echo -e "     your internal packages vs third-party dependencies."
-  if [ -n "$DETECTED_SCOPE" ]; then
-    echo -e "  ${GREEN}✓${NC}  Auto-detected: ${BOLD}$DETECTED_SCOPE${NC} (from package.json)"
-    read -rp "  Scope [$DETECTED_SCOPE]: " ORG_SCOPE
-    ORG_SCOPE="${ORG_SCOPE:-$DETECTED_SCOPE}"
-  else
-    echo ""
-    echo -e "  Examples: ${BOLD}@acme${NC}, ${BOLD}@my-company${NC}, ${BOLD}@myname${NC}"
-    read -rp "  Scope: " ORG_SCOPE
-  fi
-  if [ -z "$ORG_SCOPE" ]; then
-    ORG_SCOPE="@myorg"
-    warn "No scope provided, using placeholder: $ORG_SCOPE (edit configs later)"
-  fi
-else
-  # Single package — scope is optional
-  echo -e "${CYAN}?${NC} npm org scope ${YELLOW}(optional for single packages)${NC}"
-  echo -e "  ${BLUE}ℹ${NC}  Only needed if your package name is scoped (e.g. ${BOLD}@acme${NC}/my-lib)."
-  echo -e "  ${BLUE}ℹ${NC}  Press Enter to skip — you can always add it later."
+  echo -e "  ${BLUE}ℹ${NC}  Prefix for workspace packages (e.g. ${BOLD}@acme${NC}/shared-types)."
   if [ -n "$DETECTED_SCOPE" ]; then
     echo -e "  ${GREEN}✓${NC}  Auto-detected: ${BOLD}$DETECTED_SCOPE${NC}"
     read -rp "  Scope [$DETECTED_SCOPE]: " ORG_SCOPE
     ORG_SCOPE="${ORG_SCOPE:-$DETECTED_SCOPE}"
   else
-    read -rp "  Scope (or Enter to skip): " ORG_SCOPE
+    read -rp "  Scope (e.g. @acme): " ORG_SCOPE
   fi
   if [ -z "$ORG_SCOPE" ]; then
     ORG_SCOPE="@myorg"
-    info "Using placeholder: $ORG_SCOPE (only matters if you add workspace packages later)"
+    warn "No scope provided, using placeholder: $ORG_SCOPE (edit configs later)"
   fi
+  [[ "$ORG_SCOPE" != @* ]] && ORG_SCOPE="@$ORG_SCOPE"
+else
+  ORG_SCOPE="${DETECTED_SCOPE:-@myorg}"
 fi
-
-# Ensure @ prefix
-[[ "$ORG_SCOPE" != @* ]] && ORG_SCOPE="@$ORG_SCOPE"
 
 echo ""
 step "Scaffolding Configuration Files"
 
-# ── Step 2: Copy configs ──
+# ── Step 2: Determine source directory ──
+if [ "$PROJECT_TYPE" = "2" ]; then
+  REF_DIR="$GUARDRAIL_DIR/reference/monorepo"
+else
+  REF_DIR="$GUARDRAIL_DIR/reference/single-package"
+fi
+
+# ── Step 3: Copy configs ──
 copy_config() {
   local src="$1"
   local dest="$2"
@@ -163,85 +138,65 @@ copy_config() {
     return
   fi
   cp "$src" "$dest"
-  # Replace placeholders
+  # Replace @example scope with actual scope
   if command -v sed &>/dev/null; then
-    sed -i.bak "s|__ORG_SCOPE__|$ORG_SCOPE|g" "$dest" 2>/dev/null && rm -f "$dest.bak"
-    sed -i.bak "s|\"pinVersion\": \"\\*\"|\"pinVersion\": \"$WORKSPACE_PIN\"|g" "$dest" 2>/dev/null && rm -f "$dest.bak"
+    sed -i.bak "s|@example|$ORG_SCOPE|g" "$dest" 2>/dev/null && rm -f "$dest.bak"
   fi
   success "Created ${dest##*/}"
 }
 
 # Foundation files
-copy_config "$GUARDRAIL_DIR/configs/.editorconfig" "$TARGET_DIR/.editorconfig"
-copy_config "$GUARDRAIL_DIR/configs/.nvmrc" "$TARGET_DIR/.nvmrc"
-copy_config "$GUARDRAIL_DIR/configs/.prettierrc" "$TARGET_DIR/.prettierrc"
-copy_config "$GUARDRAIL_DIR/configs/.prettierignore" "$TARGET_DIR/.prettierignore"
-
-# Hooks & commits
-copy_config "$GUARDRAIL_DIR/configs/lefthook.yml" "$TARGET_DIR/lefthook.yml"
-copy_config "$GUARDRAIL_DIR/configs/commitlint.config.ts" "$TARGET_DIR/commitlint.config.ts"
-
-# Linting & types
-copy_config "$GUARDRAIL_DIR/configs/eslint.config.js" "$TARGET_DIR/eslint.config.js"
-copy_config "$GUARDRAIL_DIR/configs/tsconfig.base.json" "$TARGET_DIR/tsconfig.base.json"
-
-# Code health
-copy_config "$GUARDRAIL_DIR/configs/knip.json" "$TARGET_DIR/knip.json"
-copy_config "$GUARDRAIL_DIR/configs/.syncpackrc.json" "$TARGET_DIR/.syncpackrc.json"
-
-# Testing & builds
-copy_config "$GUARDRAIL_DIR/configs/vitest.config.ts" "$TARGET_DIR/vitest.config.ts"
-
-# Monorepo-only
-if [ "$PROJECT_TYPE" = "2" ]; then
-  copy_config "$GUARDRAIL_DIR/configs/turbo.json" "$TARGET_DIR/turbo.json"
-fi
-
-# Gitignore template
-if [ ! -f "$TARGET_DIR/.gitignore" ]; then
-  cp "$GUARDRAIL_DIR/configs/.gitignore.template" "$TARGET_DIR/.gitignore"
-  success "Created .gitignore"
-fi
-
-# ── Step 3: Scripts ──
-mkdir -p "$TARGET_DIR/scripts"
-for script in typecheck-staged.sh publint-all.sh; do
-  if [ -f "$GUARDRAIL_DIR/scripts/$script" ]; then
-    copy_config "$GUARDRAIL_DIR/scripts/$script" "$TARGET_DIR/scripts/$script"
-    chmod +x "$TARGET_DIR/scripts/$script"
+for f in .editorconfig .nvmrc .prettierrc .prettierignore; do
+  if [ -f "$REF_DIR/$f" ]; then
+    copy_config "$REF_DIR/$f" "$TARGET_DIR/$f"
   fi
 done
 
-# ── Step 4: Agent instruction files ──
-step "Creating Agent Instruction Files"
+# Linting & hooks
+copy_config "$REF_DIR/lefthook.yml" "$TARGET_DIR/lefthook.yml"
+copy_config "$REF_DIR/commitlint.config.ts" "$TARGET_DIR/commitlint.config.ts"
+copy_config "$REF_DIR/eslint.config.js" "$TARGET_DIR/eslint.config.js"
+copy_config "$REF_DIR/vitest.config.ts" "$TARGET_DIR/vitest.config.ts"
 
-copy_agent() {
-  local src="$1"
-  local dest="$2"
-  if [ -f "$src" ]; then
-    copy_config "$src" "$dest"
+# TypeScript config
+if [ "$PROJECT_TYPE" = "2" ]; then
+  copy_config "$REF_DIR/tsconfig.base.json" "$TARGET_DIR/tsconfig.base.json"
+else
+  if [ -f "$REF_DIR/tsconfig.json" ] && [ ! -f "$TARGET_DIR/tsconfig.json" ]; then
+    copy_config "$REF_DIR/tsconfig.json" "$TARGET_DIR/tsconfig.json"
   fi
-}
+fi
 
-case "$AGENT_CHOICE" in
-  1) copy_agent "$GUARDRAIL_DIR/agents/CLAUDE.md" "$TARGET_DIR/CLAUDE.md" ;;
-  2) copy_agent "$GUARDRAIL_DIR/agents/.cursorrules" "$TARGET_DIR/.cursorrules" ;;
-  3) copy_agent "$GUARDRAIL_DIR/agents/AGENTS.md" "$TARGET_DIR/AGENTS.md" ;;
-  4) copy_agent "$GUARDRAIL_DIR/agents/GEMINI.md" "$TARGET_DIR/GEMINI.md" ;;
-  5)
-    copy_agent "$GUARDRAIL_DIR/agents/CLAUDE.md" "$TARGET_DIR/CLAUDE.md"
-    copy_agent "$GUARDRAIL_DIR/agents/GEMINI.md" "$TARGET_DIR/GEMINI.md"
-    copy_agent "$GUARDRAIL_DIR/agents/AGENTS.md" "$TARGET_DIR/AGENTS.md"
-    copy_agent "$GUARDRAIL_DIR/agents/.cursorrules" "$TARGET_DIR/.cursorrules"
-    ;;
-esac
+# Monorepo-only
+if [ "$PROJECT_TYPE" = "2" ]; then
+  copy_config "$REF_DIR/turbo.json" "$TARGET_DIR/turbo.json"
+  copy_config "$REF_DIR/knip.json" "$TARGET_DIR/knip.json"
+  copy_config "$REF_DIR/.syncpackrc.json" "$TARGET_DIR/.syncpackrc.json"
+fi
 
-# ── Step 5: CI ──
-step "Creating CI Pipeline"
-mkdir -p "$TARGET_DIR/.github/workflows"
-if [ ! -f "$TARGET_DIR/.github/workflows/ci.yml" ]; then
-  cp "$GUARDRAIL_DIR/.github/workflows/ci.yml" "$TARGET_DIR/.github/workflows/ci.yml" 2>/dev/null || true
-  success "Created .github/workflows/ci.yml"
+# ── Step 4: Scripts (monorepo only) ──
+if [ "$PROJECT_TYPE" = "2" ]; then
+  mkdir -p "$TARGET_DIR/scripts"
+  for script in typecheck-staged.sh publint-all.sh; do
+    if [ -f "$GUARDRAIL_DIR/scripts/$script" ]; then
+      copy_config "$GUARDRAIL_DIR/scripts/$script" "$TARGET_DIR/scripts/$script"
+      chmod +x "$TARGET_DIR/scripts/$script"
+    fi
+  done
+fi
+
+# ── Step 5: .gitignore ──
+if [ ! -f "$TARGET_DIR/.gitignore" ]; then
+  cat > "$TARGET_DIR/.gitignore" << 'EOF'
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.turbo/
+.env
+.env.local
+EOF
+  success "Created .gitignore"
 fi
 
 # ── Step 6: Install dependencies ──
@@ -255,17 +210,15 @@ DEPS=(
   "@commitlint/config-conventional"
   "eslint"
   "typescript-eslint"
-  "eslint-plugin-boundaries"
   "eslint-config-prettier"
   "knip"
-  "syncpack"
   "publint"
   "vitest"
   "typescript"
 )
 
 if [ "$PROJECT_TYPE" = "2" ]; then
-  DEPS+=("turbo")
+  DEPS+=("eslint-plugin-boundaries" "syncpack" "turbo")
 fi
 
 DEPS_STRING=$(printf ' %s' "${DEPS[@]}")
@@ -309,18 +262,21 @@ echo -e "${GREEN}${BOLD}║               🎉  Setup Complete!                 
 echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "${BOLD}What was created:${NC}"
-echo "  • Config files:  .prettierrc, eslint.config.js, tsconfig.base.json, etc."
+echo "  • Config files:  .prettierrc, eslint.config.js, tsconfig, lefthook.yml, etc."
 echo "  • Git hooks:     lefthook.yml (pre-commit + commit-msg)"
-echo "  • Agent file:    CLAUDE.md / .cursorrules / GEMINI.md / AGENTS.md"
-echo "  • CI pipeline:   .github/workflows/ci.yml"
-echo "  • Scripts:       scripts/typecheck-staged.sh, scripts/publint-all.sh"
+echo "  • CI pipeline:   .github/workflows/ci.yml (if you need one, see reference/ci/)"
+if [ "$PROJECT_TYPE" = "2" ]; then
+  echo "  • Scripts:       scripts/typecheck-staged.sh, scripts/publint-all.sh"
+fi
 echo ""
 echo -e "${BOLD}Next steps:${NC}"
-echo "  1. Review and customize ${BOLD}eslint.config.js${NC} — map YOUR packages to tiers"
-echo "  2. Review and customize ${BOLD}commitlint.config.ts${NC} — add YOUR package scopes"
-echo "  3. Review and customize ${BOLD}knip.json${NC} — add YOUR workspace entries"
-echo "  4. Add scripts to your root ${BOLD}package.json${NC} (see docs/getting-started.md)"
-echo "  5. Make an intentional mistake and try to commit — watch the loop! 🔄"
+if [ "$PROJECT_TYPE" = "2" ]; then
+  echo "  1. Review ${BOLD}eslint.config.js${NC} — map YOUR packages to tiers"
+  echo "  2. Review ${BOLD}commitlint.config.ts${NC} — add YOUR package scopes"
+  echo "  3. Review ${BOLD}knip.json${NC} — add YOUR workspace entries"
+fi
+echo "  4. Add scripts to your root ${BOLD}package.json${NC} (build, test, lint, etc.)"
+echo "  5. Make a commit and watch the guardrails in action! 🔄"
 echo ""
 echo -e "  📖  Full docs: ${BLUE}https://github.com/Avinava/agentic-guardrail-ts#readme${NC}"
 echo ""

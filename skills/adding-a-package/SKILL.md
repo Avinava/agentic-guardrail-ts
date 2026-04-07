@@ -1,13 +1,25 @@
 ---
 name: adding-a-package
-description: Use when creating a new workspace package in a monorepo. Covers package creation, tier assignment, and all config updates required.
+description: >
+  Use when creating a new workspace package in a monorepo.
+  Covers package creation, tier assignment, and all config updates required.
 ---
 
 ## Overview
 
 Adding a new package to a monorepo guarded by this stack requires updating **5 config files** in addition to creating the package itself. Skip any of these and the pre-commit hooks will catch it — but it's faster to do it right the first time.
 
-## Step 1: Create Package Directory
+## Step 1: Detect Project Context
+
+Before creating anything, read these files to understand the current setup:
+- `package.json` — find the org scope (e.g. `@acme`) from the `name` or `workspaces` field
+- `eslint.config.js` — find the existing tier arrays and boundary elements
+- `knip.json` — find existing workspace entries
+- `commitlint.config.ts` — find existing scopes
+
+Use the detected org scope wherever `@scope` appears below.
+
+## Step 2: Create Package Directory
 
 ```
 packages/new-pkg/
@@ -20,7 +32,7 @@ packages/new-pkg/
 ### `package.json`
 ```json
 {
-  "name": "@acme/new-pkg",
+  "name": "@scope/new-pkg",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -41,7 +53,7 @@ packages/new-pkg/
 }
 ```
 
-Replace `@acme` with your org scope and `new-pkg` with the actual package name.
+Replace `@scope` with the org scope detected in Step 1.
 
 ### `tsconfig.json`
 ```json
@@ -58,16 +70,15 @@ Replace `@acme` with your org scope and `new-pkg` with the actual package name.
 
 ### `src/index.ts`
 ```typescript
-// @acme/new-pkg — entry point
 export {};
 ```
 
-## Step 2: Assign to Architecture Tier
+## Step 3: Assign to Architecture Tier
 
 Decide which tier this package belongs to:
 
 | Tier | Contains | Can Import |
-|------|----------|-----------|
+|------|----------|-----------| 
 | 0 | Pure types, logger, constants | Nothing (leaf) |
 | 1 | Config, helpers, utilities | Tier 0 |
 | 2 | Database, external APIs, queues | Tier 0-1 |
@@ -77,31 +88,27 @@ Decide which tier this package belongs to:
 
 If unsure, ask the user. Getting the tier right now prevents painful refactoring later.
 
-## Step 3: Update `eslint.config.js`
+## Step 4: Update `eslint.config.js`
 
 Two changes required:
 
-### 3a: Add to tier array
+### 4a: Add to tier array
 ```javascript
-// Before:
-const tier2 = ['database', 'external-api'];
-
-// After (if new-pkg is tier 2):
-const tier2 = ['database', 'external-api', 'new-pkg'];
+// Find the appropriate tier array and add the package name:
+const tier2 = ['database', 'external-api', 'new-pkg'];  // ← added
 ```
 
-### 3b: Add to boundaries/elements
+### 4b: Add to boundaries/elements
 ```javascript
 settings: {
   'boundaries/elements': [
     // ... existing entries ...
-    // Add:
     { type: 'new-pkg', pattern: ['packages/new-pkg/*'], mode: 'folder' },
   ],
 },
 ```
 
-## Step 4: Update `knip.json`
+## Step 5: Update `knip.json`
 
 Add the new package to the workspaces entry list:
 
@@ -116,12 +123,11 @@ Add the new package to the workspaces entry list:
 }
 ```
 
-## Step 5: Update `commitlint.config.ts`
+## Step 6: Update `commitlint.config.ts`
 
 Add the package name to the allowed scopes:
 
 ```typescript
-// Find the scope-enum rule and add 'new-pkg':
 rules: {
   'scope-enum': [2, 'always', [
     // ... existing scopes ...
@@ -130,20 +136,19 @@ rules: {
 }
 ```
 
-## Step 6: Add as Dependency (if needed)
+## Step 7: Add as Dependency (if needed)
 
 If other packages will import from this new package, add it as a dependency:
 
 ```json
-// In the consuming package's package.json:
 {
   "dependencies": {
-    "@acme/new-pkg": "workspace:*"
+    "@scope/new-pkg": "*"
   }
 }
 ```
 
-For npm (without workspaces protocol), use `"*"` instead of `"workspace:*"`.
+For pnpm/yarn, use `"workspace:*"` instead of `"*"`.
 
 Then add a TypeScript project reference in the consuming package's `tsconfig.json`:
 
@@ -155,7 +160,7 @@ Then add a TypeScript project reference in the consuming package's `tsconfig.jso
 }
 ```
 
-## Step 7: Verify
+## Step 8: Verify
 
 ```bash
 git add -A
@@ -163,7 +168,7 @@ git commit -m "feat(new-pkg): scaffold new package"
 ```
 
 The pre-commit hooks will verify:
-- Knip: no unused exports (empty index.ts is fine)
+- Knip: no unused exports (empty `index.ts` is fine)
 - ESLint: boundary rules are satisfied
 - TypeScript: compiles cleanly
 - Commitlint: scope is valid

@@ -4,7 +4,7 @@
 
 A set of agent-readable skills and pre-configured tools that enforce code quality, architecture boundaries, and dependency hygiene — via a self-correcting feedback loop that runs on every `git commit`.
 
-> AI coding agents are fast but imprecise. They generate code that compiles but violates your architecture, leaks `any` through the type system, leaves dead exports behind, and forgets to `await` promises. This repo gives your agent **skills** to set up 13 guardrail tools and **use them** to catch and fix its own mistakes in seconds.
+> AI coding agents are fast but imprecise. They generate code that compiles but violates your architecture, leaks `any` through the type system, leaves dead exports behind, and forgets to `await` promises. This repo gives your agent **skills** to set up guardrail tools and **use them** to catch and fix its own mistakes in seconds.
 
 ---
 
@@ -13,11 +13,10 @@ A set of agent-readable skills and pre-configured tools that enforce code qualit
 ```
 Agent generates code
     ↓
-git commit → Lefthook runs 7 checks in parallel (~3s)
+git commit → Lefthook runs checks in parallel (~3s)
     ↓
 ┌─ Prettier ────── auto-fixes formatting               ✓
 ├─ Knip ────────── detects unused export                ✗
-├─ Syncpack ────── checks dependency versions           ✓
 ├─ ESLint ──────── catches import from wrong tier       ✗
 ├─ TypeScript ──── finds type error                     ✗
 ├─ Vitest ──────── runs related tests                   ✓
@@ -42,7 +41,7 @@ All checks pass → PR → CI runs full pipeline → merge ✓
 > `https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/skills/setup-guardrails/SKILL.md`
 > to set up TypeScript guardrails in this project.
 
-That's it. The agent reads the skill, detects your project type, fetches all configs, installs dependencies, and sets up git hooks.
+That's it. The agent reads the skill, detects your project type, generates all configs, installs dependencies, and sets up git hooks.
 
 ### Manual (non-agentic)
 
@@ -56,7 +55,7 @@ See [docs/getting-started.md](docs/getting-started.md) for step-by-step instruct
 
 ## Skills
 
-This repo provides **agent-readable skills** — structured instruction files that AI agents read and execute step-by-step. Like [superpowers](https://github.com/obra/superpowers) provides skills for brainstorming and TDD, we provide skills for guardrails.
+This repo provides **agent-readable skills** — structured instruction files that AI agents read and execute step-by-step.
 
 | Skill | When to Use |
 |-------|------------|
@@ -64,7 +63,6 @@ This repo provides **agent-readable skills** — structured instruction files th
 | [**enforce-architecture**](skills/enforce-architecture/SKILL.md) | Adding imports, creating packages, or reviewing code for tier violations |
 | [**self-correcting-loop**](skills/self-correcting-loop/SKILL.md) | Every commit — how to read errors, fix all in one pass, retry |
 | [**adding-a-package**](skills/adding-a-package/SKILL.md) | Creating a new workspace package (monorepo) |
-| [**writing-agent-instructions**](skills/writing-agent-instructions/SKILL.md) | Creating/updating CLAUDE.md, GEMINI.md, .cursorrules, AGENTS.md |
 
 ### Using a skill
 
@@ -82,30 +80,16 @@ The agent reads the instructions and executes them in your project.
 
 | # | Tool | What It Catches | Layer |
 |---|------|----------------|-------|
-| 1 | [**Lefthook**](docs/tool-reference.md#1-lefthook--hook-orchestrator) | Orchestrates all checks in parallel | Pre-commit |
-| 2 | [**Prettier**](docs/tool-reference.md#2-prettier--lint-staged--formatting) | Formatting inconsistencies | Pre-commit |
-| 3 | [**ESLint + Boundaries**](docs/tool-reference.md#3-eslint--boundaries--architecture-enforcement) | Architecture violations, `any` leaks, floating promises | Pre-commit + CI |
-| 4 | [**TypeScript**](docs/tool-reference.md#4-typescript-strict-mode) | Type errors, unused variables | Pre-commit + CI |
-| 5 | [**Knip**](docs/tool-reference.md#5-knip--dead-code-detection) | Unused files, exports, dependencies | Pre-commit + CI |
-| 6 | [**Syncpack**](docs/tool-reference.md#6-syncpack--dependency-version-consistency) | Version mismatches across packages | Pre-commit + CI |
-| 7 | [**Publint**](docs/tool-reference.md#7-publint--package-export-validation) | Broken `package.json` exports | CI only |
-| 8 | [**Commitlint**](docs/tool-reference.md#8-commitlint--commit-message-standards) | Non-conventional commit messages | Pre-commit |
-| 9 | [**Vitest**](docs/tool-reference.md#9-vitest--related-test-execution) | Regressions in changed code | Pre-commit + CI |
-| 10 | [**Turborepo**](docs/tool-reference.md#10-turborepo--cached-parallel-builds) | Slow rebuilds (cached parallel builds) | Build time |
-| 11 | [**Import Ordering**](docs/tool-reference.md#11-import-ordering) | Inconsistent import order | Pre-commit |
-| 12 | [**npm audit**](docs/tool-reference.md#12-security-scanning) | Vulnerable dependencies | CI only |
-| 13 | [**Agent Instructions**](docs/tool-reference.md#13-agent-instructions-claudemd--cursorrules) | Agent lacks project context | Agent startup |
-
----
-
-## Agent Support
-
-| Agent | Instruction File | Auto-Discovered? |
-|-------|-----------------|--------------------|
-| **Claude Code** | `CLAUDE.md` | ✅ Yes |
-| **Cursor** | `.cursorrules` | ✅ Yes |
-| **GitHub Copilot / Codex** | `AGENTS.md` | ✅ Yes |
-| **Gemini CLI** | `GEMINI.md` | ✅ Yes |
+| 1 | **Lefthook** | Orchestrates all checks in parallel | Pre-commit |
+| 2 | **Prettier + lint-staged** | Formatting inconsistencies | Pre-commit |
+| 3 | **ESLint + TypeScript strict** | `any` leaks, floating promises, unused vars | Pre-commit + CI |
+| 4 | **ESLint Boundaries** | Architecture violations (monorepo only) | Pre-commit + CI |
+| 5 | **Knip** | Unused files, exports, dependencies | Pre-commit + CI |
+| 6 | **Syncpack** | Version mismatches across packages (monorepo) | Pre-commit + CI |
+| 7 | **Publint** | Broken `package.json` exports | CI only |
+| 8 | **Commitlint** | Non-conventional commit messages | Pre-commit |
+| 9 | **Vitest** | Regressions in changed code | Pre-commit + CI |
+| 10 | **Turborepo** | Slow rebuilds (cached parallel builds, monorepo) | Build time |
 
 ---
 
@@ -113,34 +97,20 @@ The agent reads the instructions and executes them in your project.
 
 ```
 agentic-guardrail-ts/
-├── skills/                          ← Agent-readable instruction files
+├── skills/                          ← Agent-readable instruction files (THE PRODUCT)
 │   ├── setup-guardrails/SKILL.md    ← Main installation skill
 │   ├── enforce-architecture/SKILL.md
 │   ├── self-correcting-loop/SKILL.md
-│   ├── adding-a-package/SKILL.md
-│   └── writing-agent-instructions/SKILL.md
-├── configs/                         ← Ready-to-copy config files
-│   ├── eslint.config.js
-│   ├── lefthook.yml
-│   ├── tsconfig.base.json
-│   └── ... (13 files)
-├── agents/                          ← Agent instruction templates
-│   ├── CLAUDE.md
-│   ├── GEMINI.md
-│   ├── AGENTS.md
-│   └── .cursorrules
+│   └── adding-a-package/SKILL.md
+├── reference/                       ← Complete working examples (for browsing)
+│   ├── single-package/              ← All configs for a single TS package
+│   ├── monorepo/                    ← All configs for a TS monorepo
+│   └── ci/ci.yml                    ← GitHub Actions template
 ├── scripts/
 │   ├── init.sh                      ← Manual (non-agentic) setup
 │   ├── typecheck-staged.sh
 │   └── publint-all.sh
-├── docs/                            ← Deep-dive documentation
-│   ├── getting-started.md
-│   ├── tool-reference.md
-│   ├── architecture-tiers.md
-│   └── ... (8 files)
-└── examples/
-    ├── single-package/
-    └── monorepo/
+└── docs/                            ← Deep-dive documentation
 ```
 
 ---
@@ -151,7 +121,7 @@ agentic-guardrail-ts/
 |-------|-------------|
 | [**Getting Started**](docs/getting-started.md) | Quick start for single-package projects |
 | [**Monorepo Setup**](docs/monorepo-setup.md) | Full monorepo with workspaces |
-| [**Tool Reference**](docs/tool-reference.md) | Deep dive on all 13 tools |
+| [**Tool Reference**](docs/tool-reference.md) | Deep dive on all tools |
 | [**Architecture Tiers**](docs/architecture-tiers.md) | How to design your dependency hierarchy |
 | [**Self-Correcting Loop**](docs/self-correcting-loop.md) | How AI agents auto-fix their mistakes |
 | [**CI Pipeline**](docs/ci-pipeline.md) | GitHub Actions configuration |
@@ -163,6 +133,7 @@ agentic-guardrail-ts/
 ## Philosophy
 
 - **Agent-first.** Skills are the primary interface — the agent reads instructions and implements them in your project.
+- **Generate, don't copy.** Skills analyze your project and generate configs with real values — no placeholder templates.
 - **Self-correcting > blocking.** The goal isn't to prevent mistakes — it's to catch and fix them in 3 seconds.
 - **Two enforcement layers.** Pre-commit hooks (fast, staged files) + CI (full, safety net).
 - **Convention > configuration.** Opinionated defaults that work out of the box.
@@ -171,14 +142,7 @@ agentic-guardrail-ts/
 
 ## Contributing
 
-1. Fork the repo
-2. Create a branch
-3. Make your changes
-4. Ensure shell scripts pass `shellcheck` and JSON is valid
-5. Test `init.sh` in a fresh temp directory
-6. Submit a PR
-
-See [CLAUDE.md](CLAUDE.md) for contributor guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ---
 

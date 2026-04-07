@@ -3,23 +3,19 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", "tsconfig.tsbuildinfo"],
-      "outputLogs": "new-only"
+      "outputs": ["dist/**"]
     },
     "typecheck": {
       "dependsOn": ["^build"],
       "outputs": []
     },
     "test": {
-      "dependsOn": ["build"],
+      "dependsOn": ["^build"],
       "outputs": ["coverage/**"]
     },
     "lint": {
-      "dependsOn": ["^build"],
+      "dependsOn": [],
       "outputs": []
     }
-  },
-  "globalDependencies": [
-    "tsconfig.base.json"
-  ]
+  }
 }

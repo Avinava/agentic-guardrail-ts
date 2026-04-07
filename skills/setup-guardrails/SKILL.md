@@ -1,256 +1,683 @@
 ---
 name: setup-guardrails
-description: Use when setting up a new TypeScript project or adding guardrails to an existing one. Installs 13 pre-configured tools that enforce code quality and architecture boundaries via pre-commit hooks.
+description: >
+  Set up a self-correcting guardrail stack in any TypeScript project.
+  Detects project type, generates all configs inline, installs dependencies,
+  and configures pre-commit hooks. No cloning or template copying required.
 ---
 
 ## Overview
 
-Install a self-correcting guardrail stack into a TypeScript project. After setup, every `git commit` runs 7 parallel checks (~3s) and rejects bad code automatically. You (the agent) will see the errors, fix them, and retry.
+Install a self-correcting guardrail stack into a TypeScript project. After setup, every `git commit` runs quality checks in parallel (~3s) and rejects bad code. You (the agent) see the errors, fix them, and retry.
 
-**This skill sets up:**
+**What this skill installs:**
 - Lefthook (parallel pre-commit hooks)
-- Prettier + lint-staged (formatting)
-- ESLint + boundaries plugin (architecture enforcement)
-- TypeScript strict mode (type safety)
-- Knip (dead code detection)
-- Syncpack (dependency version consistency)
+- Prettier + lint-staged (auto-formatting)
+- ESLint + TypeScript strict (code quality)
 - Commitlint (conventional commits)
 - Vitest (test runner)
-- Turborepo (cached builds — monorepo only)
-- Publint (package export validation — CI only)
+- Knip (dead code detection)
+- ESLint boundaries plugin (architecture enforcement — monorepo only)
+- Syncpack (dependency version consistency — monorepo only)
+- Turborepo (cached parallel builds — monorepo only)
+
+**What this skill does NOT do:**
+- It does NOT create agent instruction files (CLAUDE.md, GEMINI.md, etc.)
+- It does NOT copy template files — all configs are generated based on YOUR project
 
 ## Prerequisites
 
-- Node.js 20+ (check `.nvmrc`)
+- Node.js 20+ installed
 - A TypeScript project with a `package.json`
-- Git initialized
+- Git initialized (`git init`)
 
-## Step 1: Detect Project Type
+---
 
-Read the target project's `package.json`.
+## Step 1: Analyze the Target Project
+
+Read the project's `package.json` and file system to detect:
+
+### 1a. Project type
 
 **Monorepo** if ANY of these are true:
-- `workspaces` field exists
+- `workspaces` field exists in `package.json`
 - `turbo.json` exists at root
-- `packages/` directory exists
+- `packages/` or `apps/` directory exists
 
 **Single package** otherwise.
 
-Store the result — it affects which configs to install and how to customize them.
+### 1b. Package manager
 
-## Step 2: Detect Org Scope
+Check which lockfile exists:
+- `pnpm-lock.yaml` → pnpm (use `pnpm add -D`)
+- `yarn.lock` → yarn (use `yarn add -D`)
+- `package-lock.json` or none → npm (use `npm install -D`)
+
+### 1c. Org scope
 
 Look at the `name` field in `package.json`:
 - If it starts with `@something/`, the org scope is `@something`
-- If no scope detected, ask the user: "What's your npm org scope? (e.g. `@acme`)"
-- If the user says "none" or skips, use `@myorg` as placeholder
+- If no scope detected and this is a monorepo, ask the user
+- If single package with no scope, use `@myorg` as a fallback (only matters if they add workspaces later)
 
-The scope is used in ESLint boundary rules and Syncpack to distinguish internal packages from third-party dependencies. For single-package projects it's only relevant if they later add workspaces.
+### 1d. Existing packages (monorepo only)
 
-## Step 3: Detect Package Manager
+List the directories under `packages/` and `apps/`. These become the tier assignments in ESLint config. Ask the user how to classify them (see Step 4).
 
-Check which lockfile exists:
-- `pnpm-lock.yaml` → pnpm
-- `yarn.lock` → yarn
-- `package-lock.json` or none → npm
+---
 
-## Step 4: Fetch and Write Config Files
+## Step 2: Write Foundation Configs
 
-Fetch each config from this repository and write it to the target project root. Replace `__ORG_SCOPE__` with the detected/provided org scope.
+Create these files in the project root. **Skip any file that already exists** — warn the user instead.
 
-**Base URL:** `https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/configs/`
+### `.editorconfig`
+```ini
+root = true
 
-### All projects (single + monorepo):
+[*]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
 
-| Fetch from | Write to | Notes |
-|-----------|---------|-------|
-| `.editorconfig` | `.editorconfig` | No substitution needed |
-| `.nvmrc` | `.nvmrc` | No substitution needed |
-| `.prettierrc` | `.prettierrc` | No substitution needed |
-| `.prettierignore` | `.prettierignore` | No substitution needed |
-| `.gitignore.template` | `.gitignore` | Merge with existing if present |
-| `lefthook.yml` | `lefthook.yml` | No substitution needed |
-| `commitlint.config.ts` | `commitlint.config.ts` | Replace `__ORG_SCOPE__` |
-| `tsconfig.base.json` | `tsconfig.base.json` | No substitution needed |
-| `vitest.config.ts` | `vitest.config.ts` | No substitution needed |
-| `eslint.config.js` | `eslint.config.js` | Replace `__ORG_SCOPE__`. **Customize tiers** (see Step 5) |
+[*.md]
+trim_trailing_whitespace = false
 
-### Monorepo only:
+[{Makefile,*.mk}]
+indent_style = tab
+```
 
-| Fetch from | Write to | Notes |
-|-----------|---------|-------|
-| `.syncpackrc.json` | `.syncpackrc.json` | Replace `__ORG_SCOPE__` |
-| `knip.json` | `knip.json` | Replace `__ORG_SCOPE__` |
-| `turbo.json` | `turbo.json` | No substitution needed |
+### `.nvmrc`
+```
+22
+```
 
-### Merge strategy for `.gitignore`:
-If a `.gitignore` already exists, append any lines from the template that don't already appear. Don't duplicate entries.
+### `.prettierrc`
+```json
+{
+  "singleQuote": true,
+  "trailingComma": "all",
+  "printWidth": 100,
+  "semi": true,
+  "tabWidth": 2,
+  "arrowParens": "always",
+  "endOfLine": "lf"
+}
+```
 
-## Step 5: Customize ESLint Architecture Tiers
+### `.prettierignore`
+```
+dist
+node_modules
+coverage
+*.min.js
+```
 
-This is the most important customization step. Open the `eslint.config.js` you just wrote.
+---
 
-### For single-package projects:
-Remove the entire `boundaries` plugin section. Single packages don't need architecture tiers. Keep everything else (TypeScript strict, no-console, Prettier compat).
+## Step 3: Write Pre-Commit Hook Config
 
-### For monorepo projects:
-Edit the tier arrays to match the **actual packages** in the project:
+### `lefthook.yml`
+
+**For single-package projects:**
+```yaml
+pre-commit:
+  parallel: true
+  jobs:
+    - name: prettier
+      run: npx lint-staged
+
+    - name: lint-unused
+      run: npx knip
+
+    - name: lint
+      glob: "*.{ts,tsx}"
+      run: npx eslint {staged_files}
+
+    - name: typecheck
+      run: npx tsc --noEmit
+
+    - name: test-related
+      glob: "src/**/*.ts"
+      run: npx vitest related {staged_files} --run --passWithNoTests
+
+commit-msg:
+  jobs:
+    - name: commitlint
+      run: npx commitlint --edit {1}
+```
+
+**For monorepo projects:**
+```yaml
+pre-commit:
+  parallel: true
+  jobs:
+    - name: prettier
+      run: npx lint-staged
+
+    - name: lint-unused
+      run: npx knip
+
+    - name: lint-deps
+      run: npx syncpack lint
+
+    - name: lint
+      glob: "*.{ts,tsx}"
+      run: npx eslint {staged_files}
+
+    - name: typecheck
+      glob: "packages/*/src/**/*.ts"
+      run: bash scripts/typecheck-staged.sh
+
+    - name: test-related
+      glob: "packages/*/src/**/*.ts"
+      run: npx vitest related {staged_files} --run --passWithNoTests
+
+commit-msg:
+  jobs:
+    - name: commitlint
+      run: npx commitlint --edit {1}
+```
+
+### `commitlint.config.ts`
+
+Generate the scope list from the actual packages detected in Step 1d:
+
+```typescript
+import type { UserConfig } from '@commitlint/types';
+
+const config: UserConfig = {
+  extends: ['@commitlint/config-conventional'],
+  rules: {
+    'scope-enum': [2, 'always', [
+      // ← INSERT actual package names detected from packages/ and apps/
+      'deps',
+      'ci',
+      'release',
+    ]],
+    'scope-empty': [1, 'never'],
+    'body-max-line-length': [0, 'always', Infinity],
+  },
+};
+
+export default config;
+```
+
+---
+
+## Step 4: Write Linting & Type-Checking Configs
+
+### `eslint.config.js`
+
+**For single-package projects** (no architecture boundaries):
 
 ```javascript
-const tier0 = ['shared-types', 'logger'];      // ← Replace with YOUR leaf packages
-const tier1 = ['config', 'helpers'];            // ← Replace with YOUR util packages
-const tier2 = ['database', 'external-api'];     // ← Replace with YOUR infra packages
-const tier3 = ['domain-logic', 'processing'];   // ← Replace with YOUR domain packages
-const tier4 = ['orchestrator'];                 // ← Replace with YOUR orchestration
+import tseslint from 'typescript-eslint';
+import eslintConfigPrettier from 'eslint-config-prettier';
+
+export default tseslint.config(
+  { ignores: ['**/dist/**', '**/node_modules/**', '**/coverage/**'] },
+
+  ...tseslint.configs.strictTypeChecked,
+  {
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+      },
+    },
+  },
+
+  {
+    files: ['src/**/*.ts'],
+    ignores: ['**/__tests__/**'],
+    rules: {
+      'no-console': 'error',
+    },
+  },
+
+  eslintConfigPrettier,
+);
 ```
 
-Also update `settings['boundaries/elements']` to match the actual package paths.
+**For monorepo projects** (with architecture boundary enforcement):
 
-**Rule of thumb for classifying:**
-- If it has NO workspace dependencies → tier 0
-- If it depends only on tier 0 → tier 1
-- If it talks to databases/APIs → tier 2
-- If it contains business logic → tier 3
-- If it wires everything together → tier 4
-- If it's a deployable app → app tier (no restrictions)
+Generate the tier arrays from the actual packages detected in Step 1d. Ask the user to classify each package into a tier:
 
-If you're unsure, ask the user. Getting the tiers right is critical.
+- **Tier 0 (leaf):** No workspace dependencies (types, logger, constants)
+- **Tier 1:** Only depends on tier 0 (config, helpers, utilities)
+- **Tier 2:** Wraps external services (database, API clients)
+- **Tier 3:** Business/domain logic
+- **Tier 4:** Orchestration (wires together multiple domain + infra packages)
+- **App tier:** Deployable applications (no restrictions)
 
-## Step 6: Fetch Helper Scripts
+```javascript
+import tseslint from 'typescript-eslint';
+import boundaries from 'eslint-plugin-boundaries';
+import eslintConfigPrettier from 'eslint-config-prettier';
 
-Fetch scripts that the pre-commit hooks depend on:
+// ── Replace with actual scope and packages ──
+const SCOPE = 'DETECTED_SCOPE';  // ← from Step 1c
 
+const tier0 = [/* actual tier 0 package names */];
+const tier1 = [/* actual tier 1 package names */];
+const tier2 = [/* actual tier 2 package names */];
+const tier3 = [/* actual tier 3 package names */];
+const tier4 = [/* actual tier 4 package names */];
+
+const modules = (names) => names.map((n) => `${SCOPE}/${n}`);
+
+export default tseslint.config(
+  { ignores: ['**/dist/**', '**/node_modules/**', '**/coverage/**'] },
+
+  ...tseslint.configs.strictTypeChecked,
+  {
+    languageOptions: {
+      parserOptions: { projectService: true },
+    },
+  },
+
+  // ── Architecture boundaries ──
+  {
+    files: ['packages/*/src/**/*.ts', 'apps/*/src/**/*.ts'],
+    ignores: ['**/__tests__/**', '**/__mocks__/**'],
+    plugins: { boundaries },
+    settings: {
+      'boundaries/elements': [
+        // ← Generate one entry per package:
+        // { type: 'pkg-name', pattern: ['packages/pkg-name/*'], mode: 'folder' },
+      ],
+    },
+    rules: {
+      'boundaries/dependencies': [
+        'error',
+        {
+          default: 'allow',
+          rules: [
+            // Tier 0: no workspace imports
+            {
+              from: { type: tier0 },
+              disallow: { dependency: { module: `${SCOPE}/*` } },
+            },
+            // Tier 1: only tier 0
+            {
+              from: { type: tier1 },
+              disallow: {
+                dependency: {
+                  module: modules([...tier1, ...tier2, ...tier3, ...tier4]),
+                },
+              },
+            },
+            // Tier 2: only tier 0-1
+            {
+              from: { type: tier2 },
+              disallow: {
+                dependency: {
+                  module: modules([...tier2, ...tier3, ...tier4]),
+                },
+              },
+            },
+            // Tier 3: only tier 0-2
+            {
+              from: { type: tier3 },
+              disallow: {
+                dependency: {
+                  module: modules([...tier3, ...tier4]),
+                },
+              },
+            },
+            // Tier 4: only tier 0-3
+            {
+              from: { type: tier4 },
+              disallow: {
+                dependency: { module: modules([...tier4]) },
+              },
+            },
+          ],
+        },
+      ],
+    },
+  },
+
+  // ── Ban console.log ──
+  {
+    files: ['packages/*/src/**/*.ts'],
+    ignores: ['**/logger/src/**', '**/__tests__/**'],
+    rules: { 'no-console': 'error' },
+  },
+
+  eslintConfigPrettier,
+);
 ```
-https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/scripts/typecheck-staged.sh
-https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/scripts/publint-all.sh
+
+### `tsconfig.base.json` (monorepo only)
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "composite": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "forceConsistentCasingInFileNames": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true
+  },
+  "exclude": ["node_modules", "**/dist/**"]
+}
 ```
 
-Write them to `scripts/` in the target project. Make them executable: `chmod +x scripts/*.sh`.
+For single-package projects, write a `tsconfig.json` instead (with `outDir` and `rootDir`):
 
-## Step 7: Create lint-staged Config
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "forceConsistentCasingInFileNames": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src"],
+  "exclude": ["dist", "node_modules"]
+}
+```
 
-Add to `package.json`:
+If a `tsconfig.json` already exists, do NOT overwrite it. Only create `tsconfig.base.json` for monorepos if it doesn't exist.
+
+---
+
+## Step 5: Write Code Health Configs (Monorepo Only)
+
+Skip this entire step for single-package projects.
+
+### `knip.json`
+
+Generate workspace entries from the actual packages detected in Step 1d:
+
+```json
+{
+  "workspaces": {
+    "packages/*": {
+      "entry": ["src/index.ts"],
+      "project": ["src/**/*.ts"]
+    }
+  }
+}
+```
+
+### `.syncpackrc.json`
+
+Use the detected org scope from Step 1c:
+
+```json
+{
+  "semverGroups": [
+    {
+      "label": "Internal workspace packages use exact versions",
+      "packages": ["DETECTED_SCOPE/**"],
+      "dependencies": ["DETECTED_SCOPE/**"],
+      "dependencyTypes": ["prod", "dev"],
+      "pinVersion": "*"
+    }
+  ],
+  "versionGroups": [
+    {
+      "label": "All third-party deps should use the same version",
+      "packages": ["**"],
+      "dependencies": ["**"],
+      "dependencyTypes": ["prod", "dev"]
+    }
+  ]
+}
+```
+
+Replace `DETECTED_SCOPE` with the actual scope. For pnpm/yarn, change `"pinVersion": "*"` to `"pinVersion": "workspace:*"`.
+
+### `turbo.json`
+
+```json
+{
+  "$schema": "https://turbo.build/schema.json",
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": ["coverage/**"]
+    },
+    "lint": {
+      "dependsOn": [],
+      "outputs": []
+    }
+  }
+}
+```
+
+---
+
+## Step 6: Write Test Config
+
+### `vitest.config.ts`
+
+```typescript
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    globals: true,
+    include: ['src/**/*.test.ts'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov'],
+    },
+  },
+});
+```
+
+For monorepos, update the `include` pattern:
+```typescript
+include: ['packages/*/src/**/*.test.ts'],
+```
+
+---
+
+## Step 7: Write Helper Scripts (Monorepo Only)
+
+Skip this step for single-package projects.
+
+### `scripts/typecheck-staged.sh`
+
+```bash
+#!/usr/bin/env bash
+# Type-check only the packages that have staged changes.
+set -euo pipefail
+
+STAGED=$(git diff --cached --name-only --diff-filter=d | grep -oP 'packages/[^/]+' | sort -u)
+if [ -z "$STAGED" ]; then
+  echo "No packages with staged changes — skipping typecheck."
+  exit 0
+fi
+
+for pkg in $STAGED; do
+  if [ -f "$pkg/tsconfig.json" ]; then
+    echo "Type-checking $pkg..."
+    npx tsc -b "$pkg" --noEmit
+  fi
+done
+```
+
+Make it executable: `chmod +x scripts/typecheck-staged.sh`
+
+### `scripts/publint-all.sh`
+
+```bash
+#!/usr/bin/env bash
+# Run publint against every workspace package that has a dist/ folder.
+set -euo pipefail
+
+EXIT_CODE=0
+for pkg in packages/*/; do
+  if [ -d "$pkg/dist" ]; then
+    echo "publint: $pkg"
+    npx publint "$pkg" || EXIT_CODE=1
+  fi
+done
+
+exit $EXIT_CODE
+```
+
+Make it executable: `chmod +x scripts/publint-all.sh`
+
+---
+
+## Step 8: Update package.json
+
+### 8a. Add lint-staged config
 
 ```json
 {
   "lint-staged": {
-    "*.{ts,tsx,js,jsx,json,md,yml,yaml}": "prettier --write"
+    "*.{ts,tsx,js,jsx,mjs,cjs,json,md,css,html,yml,yaml}": "prettier --write"
   }
 }
 ```
 
-## Step 8: Add npm Scripts
+### 8b. Add npm scripts
 
-Add these scripts to `package.json`:
-
+**Single package:**
 ```json
 {
   "scripts": {
-    "build": "tsc -b",
-    "test": "vitest run",
-    "lint": "eslint .",
+    "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint 'src/**/*.ts'",
     "lint:unused": "knip",
-    "lint:deps": "syncpack lint",
-    "prettier:check": "prettier --check .",
-    "prettier:fix": "prettier --write ."
+    "prettier:check": "prettier --check '**/*.{ts,js,json,md,yml}'",
+    "prettier:fix": "prettier --write '**/*.{ts,js,json,md,yml}'",
+    "prepare": "lefthook install"
   }
 }
 ```
 
-For monorepos using Turborepo, replace `build` with:
+**Monorepo:**
 ```json
-"build": "turbo run build"
+{
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "vitest run",
+    "lint": "eslint 'packages/*/src/**/*.ts'",
+    "lint:unused": "knip",
+    "lint:deps": "syncpack lint",
+    "lint:packages": "bash scripts/publint-all.sh",
+    "prettier:check": "prettier --check '**/*.{ts,js,json,md,yml}'",
+    "prettier:fix": "prettier --write '**/*.{ts,js,json,md,yml}'",
+    "prepare": "lefthook install"
+  }
+}
 ```
+
+Merge with existing scripts — do NOT overwrite scripts that already exist unless the user confirms.
+
+---
 
 ## Step 9: Install devDependencies
 
 ### All projects:
 ```bash
-npm install -D lefthook prettier lint-staged eslint typescript vitest @commitlint/cli @commitlint/config-conventional typescript-eslint eslint-config-prettier publint
+npm install -D lefthook prettier lint-staged eslint typescript vitest knip @commitlint/cli @commitlint/config-conventional typescript-eslint eslint-config-prettier publint
 ```
 
-### Monorepo only (add these):
+### Monorepo only — add these:
 ```bash
-npm install -D eslint-plugin-boundaries syncpack knip turbo
+npm install -D eslint-plugin-boundaries syncpack turbo
 ```
 
-### Single-package (add knip only):
-```bash
-npm install -D knip
-```
+Adapt for detected package manager:
+- pnpm: `pnpm add -D ...`
+- yarn: `yarn add -D ...`
 
-Adapt the install command for the detected package manager (pnpm add -D, yarn add -D, etc.).
+---
 
-## Step 10: Initialize Lefthook
+## Step 10: Initialize Git Hooks
 
 ```bash
 npx lefthook install
 ```
 
-This creates the `.git/hooks/` symlinks that make the pre-commit checks fire automatically.
+This creates `.git/hooks/` symlinks that make pre-commit checks fire automatically.
 
-## Step 11: Set Up Agent Instructions
+---
 
-Based on the user's AI coding agent, write the appropriate instruction file. Fetch the template from:
+## Step 11: Merge or Create `.gitignore`
+
+If `.gitignore` exists, append any missing entries. If it doesn't exist, create it:
 
 ```
-https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/agents/CLAUDE.md
-https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/agents/GEMINI.md
-https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/agents/AGENTS.md
-https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/agents/.cursorrules
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.turbo/
+.env
+.env.local
 ```
 
-Write the appropriate file to the project root. Customize:
-- Replace generic architecture tiers with the project's actual tiers
-- Replace generic package names with actual package names
-- Adjust commands for the detected package manager
-
-If unsure which agent the user uses, write all four.
+---
 
 ## Step 12: Verify Setup
 
-Run a verification commit to confirm the hooks work:
+Run a verification commit:
 
 ```bash
 git add -A
 git commit --allow-empty -m "chore: verify guardrail setup"
 ```
 
-If the commit succeeds, the setup is complete. If it fails, read the errors and fix them — **this is the self-correcting loop in action**.
+If the commit succeeds, setup is complete. If it fails, read the errors and fix them — **this is the self-correcting loop in action.**
+
+---
 
 ## Verification Checklist
 
 - [ ] `lefthook.yml` exists and `npx lefthook install` succeeded
-- [ ] `eslint.config.js` exists with correct org scope
-- [ ] `tsconfig.base.json` exists
+- [ ] `eslint.config.js` exists with correct config for project type
 - [ ] `.prettierrc` exists
-- [ ] `commitlint.config.ts` exists
+- [ ] `commitlint.config.ts` exists with actual package scopes
 - [ ] `vitest.config.ts` exists
-- [ ] `scripts/typecheck-staged.sh` exists and is executable
-- [ ] Agent instruction file exists (CLAUDE.md, GEMINI.md, etc.)
 - [ ] `git commit --allow-empty` passes without hook errors
-- [ ] Package manager lockfile updated with new devDependencies
-
-## What Happens After Setup
-
-Every `git commit` now runs this pipeline in parallel (~3s):
-
-```
-┌─ Prettier ────── auto-fixes formatting               ✓/✗
-├─ Knip ────────── detects unused exports               ✓/✗
-├─ Syncpack ────── checks dependency versions           ✓/✗
-├─ ESLint ──────── catches architecture violations      ✓/✗
-├─ TypeScript ──── finds type errors                    ✓/✗
-├─ Vitest ──────── runs related tests                   ✓/✗
-└─ Commitlint ──── validates commit message             ✓/✗
-```
-
-If ANY check fails, the commit is rejected. You see the errors, fix them, retry. This is the self-correcting loop — use it on every commit.
+- [ ] Lockfile updated with new devDependencies
+- [ ] For monorepo: `tsconfig.base.json`, `knip.json`, `.syncpackrc.json`, `turbo.json` exist
+- [ ] For monorepo: `scripts/typecheck-staged.sh` exists and is executable
 
 ## Related Skills
 
 - **enforce-architecture** — Understanding and working within the tiered dependency rules
 - **self-correcting-loop** — How to handle commit rejections efficiently
 - **adding-a-package** — Adding a new workspace package (monorepo)
-- **writing-agent-instructions** — Creating/updating CLAUDE.md, GEMINI.md, etc.

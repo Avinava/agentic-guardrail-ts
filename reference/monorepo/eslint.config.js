@@ -1,24 +1,19 @@
-// eslint.config.js — ESLint v9+ flat config
-// Architecture enforcement + TypeScript strict rules + Prettier compatibility
+// eslint.config.js — Monorepo with architecture boundary enforcement
 //
 // CUSTOMIZE:
-//   1. Replace '__ORG_SCOPE__' with your npm org scope (e.g. '@acme')
+//   1. Replace '@example' with your npm org scope
 //   2. Replace the tier arrays with YOUR actual package names
-//   3. Update boundaries/elements to match your packages/ and apps/ layout
+//   3. Update boundaries/elements to match your packages/ layout
 
 import tseslint from 'typescript-eslint';
 import boundaries from 'eslint-plugin-boundaries';
 import eslintConfigPrettier from 'eslint-config-prettier';
 
 // ────────────────────────────────────────────────────────────────
-// CUSTOMIZE: Define YOUR architecture tiers.
-//
-// Rule: a tier can import from any LOWER tier,
-//       never from its own tier or higher.
-// Tier 0 (leaf packages): no workspace imports allowed.
-// Top tier (apps): no restrictions.
+// Architecture tiers — a tier can import from any LOWER tier,
+// never from its own tier or higher.
 // ────────────────────────────────────────────────────────────────
-const SCOPE = '__ORG_SCOPE__'; // ← your npm org scope
+const SCOPE = '@example';  // ← Replace with your org scope
 
 const tier0 = ['shared-types', 'logger'];           // leaf packages
 const tier1 = ['config', 'helpers'];                 // low-level utils

@@ -1,5 +1,5 @@
-# .github/workflows/ci.yml — CI Pipeline template
-# Copy this to your project's .github/workflows/ci.yml
+# .github/workflows/ci.yml — CI for agentic-guardrail-ts itself
+# Validates reference configs, shell scripts, and JSON files.
 name: CI
 on:
   push:
@@ -12,30 +12,49 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ci:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
 
-      - run: npm ci
+      # ── Validate shell scripts ──
+      - name: Shellcheck
+        run: |
+          sudo apt-get install -y shellcheck
+          shellcheck scripts/*.sh
 
-      # ── Static checks (no build required) ──
-      - run: npm run prettier:check
-      - run: npm run lint:unused
-      - run: npm run lint:deps
+      # ── Validate JSON files ──
+      - name: JSON validation
+        run: |
+          for f in $(find reference/ -name '*.json'); do
+            echo "Validating $f..."
+            node -e "JSON.parse(require('fs').readFileSync('$f', 'utf8'))"
+          done
 
-      # ── Build (required for publint + downstream checks) ──
-      - run: npm run build
+      # ── Verify no broken internal links ──
+      - name: Check for stale references
+        run: |
+          # Ensure no references to deleted directories
+          if grep -r 'configs/' --include='*.md' skills/ docs/ README.md 2>/dev/null | grep -v 'reference/'; then
+            echo "ERROR: Found references to deleted configs/ directory"
+            exit 1
+          fi
+          if grep -r 'agents/' --include='*.md' skills/ docs/ README.md 2>/dev/null; then
+            echo "ERROR: Found references to deleted agents/ directory"
+            exit 1
+          fi
+          if grep -r 'examples/' --include='*.md' skills/ docs/ README.md 2>/dev/null | grep -v 'reference/'; then
+            echo "ERROR: Found references to deleted examples/ directory"
+            exit 1
+          fi
+          echo "No stale references found."
 
-      # ── Post-build checks ──
-      - run: npm run lint:packages       # publint (needs dist/)
-      - run: npm run lint                # ESLint + boundaries
-      - run: npm test                    # Full test suite
-
-      # ── Security ──
-      - run: npm audit --audit-level=high
+      # ── Verify raw URLs use correct branch ──
+      - name: Check branch references
+        run: |
+          if grep -r '/master/' --include='*.md' .; then
+            echo "ERROR: Found /master/ in URLs — should be /main/"
+            exit 1
+          fi
+          echo "All URLs use correct branch."

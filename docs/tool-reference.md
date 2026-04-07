@@ -37,7 +37,7 @@ Deep dive on each of the 13 guardrail tools: what they do, why they matter for A
 
 **Why over Husky:** Lefthook is a Go binary with native parallel execution. Husky runs hooks sequentially via shell scripts. With 6+ parallel jobs, the difference is meaningful.
 
-**Config:** See [configs/lefthook.yml](../configs/lefthook.yml)
+**Config:** See [reference/monorepo/lefthook.yml](../reference/monorepo/lefthook.yml) or [reference/single-package/lefthook.yml](../reference/single-package/lefthook.yml)
 
 ---
 
@@ -49,7 +49,7 @@ Deep dive on each of the 13 guardrail tools: what they do, why they matter for A
 
 **Interaction with ESLint:** Install `eslint-config-prettier` to disable ESLint formatting rules. Prettier is the sole formatter.
 
-**Config:** See [configs/.prettierrc](../configs/.prettierrc) and [configs/.prettierignore](../configs/.prettierignore)
+**Config:** See [reference/single-package/.prettierrc](../reference/single-package/.prettierrc)
 
 ---
 
@@ -68,7 +68,7 @@ Deep dive on each of the 13 guardrail tools: what they do, why they matter for A
 | `no-unsafe-assignment` | Assigning `any` to typed variable |
 | `no-explicit-any` | Using `any` instead of proper types |
 
-**Config:** See [configs/eslint.config.js](../configs/eslint.config.js)
+**Config:** See [reference/monorepo/eslint.config.js](../reference/monorepo/eslint.config.js) (monorepo) or [reference/single-package/eslint.config.js](../reference/single-package/eslint.config.js) (single)
 **Guide:** See [Architecture Tiers](./architecture-tiers.md)
 
 ---
@@ -86,7 +86,7 @@ Deep dive on each of the 13 guardrail tools: what they do, why they matter for A
 | TypeScript | Unused *local* variables and parameters |
 | Knip | Unused *exports*, *files*, and *dependencies* |
 
-**Config:** See [configs/tsconfig.base.json](../configs/tsconfig.base.json)
+**Config:** See [reference/monorepo/tsconfig.base.json](../reference/monorepo/tsconfig.base.json)
 **Script:** See [scripts/typecheck-staged.sh](../scripts/typecheck-staged.sh)
 
 ---
@@ -102,7 +102,7 @@ Deep dive on each of the 13 guardrail tools: what they do, why they matter for A
 - `ignoreExportsUsedInFile` — Don't flag exports used within their own file
 - `exclude: ["enumMembers"]` — Don't flag individual enum values
 
-**Config:** See [configs/knip.json](../configs/knip.json)
+**Config:** See [reference/monorepo/knip.json](../reference/monorepo/knip.json)
 
 ---
 
@@ -116,7 +116,7 @@ Deep dive on each of the 13 guardrail tools: what they do, why they matter for A
 - npm: `"pinVersion": "*"`
 - pnpm/yarn: `"pinVersion": "workspace:*"`
 
-**Config:** See [configs/.syncpackrc.json](../configs/.syncpackrc.json)
+**Config:** See [reference/monorepo/.syncpackrc.json](../reference/monorepo/.syncpackrc.json)
 
 ---
 
@@ -142,7 +142,7 @@ Deep dive on each of the 13 guardrail tools: what they do, why they matter for A
 - Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`
 - Scopes: Your package names + `deps`, `ci`, `release`
 
-**Config:** See [configs/commitlint.config.ts](../configs/commitlint.config.ts)
+**Config:** See [reference/single-package/commitlint.config.ts](../reference/single-package/commitlint.config.ts)
 
 ---
 
@@ -154,7 +154,7 @@ Deep dive on each of the 13 guardrail tools: what they do, why they matter for A
 
 **Coverage ratcheting:** `autoUpdate: true` means thresholds only go UP, never down.
 
-**Config:** See [configs/vitest.config.ts](../configs/vitest.config.ts)
+**Config:** See [reference/single-package/vitest.config.ts](../reference/single-package/vitest.config.ts)
 
 ---
 
@@ -166,7 +166,7 @@ Deep dive on each of the 13 guardrail tools: what they do, why they matter for A
 
 **Monorepo only.** Not needed for single-package projects.
 
-**Config:** See [configs/turbo.json](../configs/turbo.json)
+**Config:** See [reference/monorepo/turbo.json](../reference/monorepo/turbo.json)
 
 ---
 
@@ -190,13 +190,10 @@ Pick one, not both.
 
 ---
 
-## 13. Agent Instructions (CLAUDE.md / .cursorrules)
+## ~~13. Agent Instructions~~
 
-**What:** Direct context for AI coding agents — commands, architecture rules, critical rules.
+**Removed.** Agent instruction files (CLAUDE.md, GEMINI.md, etc.) are no longer part of the guardrail stack. They were causing agents to pollute target repos with generic templates. Instead, create project-specific agent instructions manually if needed.
 
-**Templates:** See [agents/](../agents/) for Claude, Cursor, Codex, and Gemini templates.
-
----
 
 ## DevDependencies Reference
 

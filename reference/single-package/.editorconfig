@@ -1,5 +1,3 @@
-# EditorConfig — consistent whitespace/encoding across all editors and AI agents
-# https://editorconfig.org
 root = true
 
 [*]
@@ -12,3 +10,6 @@ insert_final_newline = true
 
 [*.md]
 trim_trailing_whitespace = false
+
+[{Makefile,*.mk}]
+indent_style = tab

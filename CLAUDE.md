@@ -1,25 +1,18 @@
-# CLAUDE.md — Instructions for contributing to agentic-guardrail-ts
-# This file is read by Claude Code when working on THIS repo.
+# CLAUDE.md — Contributing to agentic-guardrail-ts
 
-## What This Repo Is
-A configuration scaffolding tool for AI-assisted TypeScript development.
-NOT an npm library — users clone/curl this repo and run `scripts/init.sh`.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for all project guidelines.
 
-## Structure
-- `configs/` — Ready-to-copy config files with `__ORG_SCOPE__` placeholders
-- `scripts/` — init.sh (scaffolding), typecheck-staged.sh, publint-all.sh
-- `agents/` — Instruction file templates for Claude, Cursor, Codex, Gemini
-- `docs/` — Documentation (getting-started, monorepo-setup, tool-reference, etc.)
-- `examples/` — Working examples (single-package, monorepo)
+## Critical Context
 
-## Rules
-- Config files in `configs/` use `__ORG_SCOPE__` as placeholder — `init.sh` replaces it
-- All shell scripts must pass `shellcheck`
-- All JSON must be valid (no trailing commas, no comments)
-- Documentation should cross-link using relative paths
-- Keep docs concise — this is reference material, not a novel
+This repo is a **scaffolding tool** — it provides skills and configs that agents use
+to set up guardrails in OTHER projects.
 
-## Testing Changes
-1. Run `bash scripts/init.sh` in a fresh temp directory
-2. Verify all config files are created with correct substitutions
-3. Verify `npm install` succeeds with the generated configs
+**DO NOT:**
+- Copy files from `reference/` into this repo's root
+- Create agent instruction templates (AGENTS.md, .cursorrules, etc.) in this repo
+- Add `__ORG_SCOPE__` placeholders — skills detect the target project's actual scope
+
+**DO:**
+- Keep skills self-contained (all config content inline)
+- Test changes by running `init.sh` in a fresh temp directory
+- Ensure all shell scripts pass `shellcheck`

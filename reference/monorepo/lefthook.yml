@@ -1,6 +1,5 @@
-# lefthook.yml — Pre-commit hook orchestration
+# lefthook.yml — Pre-commit hook orchestration (monorepo)
 # All jobs run in parallel (~3s total). If any fails, the commit is rejected.
-# AI agents see the error output, fix the issue, and retry automatically.
 
 pre-commit:
   parallel: true

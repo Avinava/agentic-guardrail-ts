@@ -1,6 +1,8 @@
 ---
 name: enforce-architecture
-description: Use when adding imports, creating packages, or reviewing code to ensure tiered dependency rules are followed
+description: >
+  Use when adding imports, creating packages, or reviewing code to ensure
+  tiered dependency rules are followed. Read this to understand the tier system.
 ---
 
 ## Overview
@@ -13,19 +15,21 @@ This prevents circular dependencies, enforces separation of concerns, and makes 
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Apps (cli, web, worker)          ← can import anything │
+│  Apps (deployable apps)             ← can import anything │
 ├─────────────────────────────────────────────────────────┤
-│  Tier 4: orchestrator             ← imports 0-3        │
+│  Tier 4: orchestration              ← imports 0-3        │
 ├─────────────────────────────────────────────────────────┤
-│  Tier 3: domain-logic, processing ← imports 0-2        │
+│  Tier 3: domain/business logic      ← imports 0-2        │
 ├─────────────────────────────────────────────────────────┤
-│  Tier 2: database, external-api   ← imports 0-1        │
+│  Tier 2: infrastructure (DB, APIs)  ← imports 0-1        │
 ├─────────────────────────────────────────────────────────┤
-│  Tier 1: config, helpers          ← imports 0 only     │
+│  Tier 1: config, helpers, utils     ← imports 0 only     │
 ├─────────────────────────────────────────────────────────┤
-│  Tier 0: shared-types, logger     ← NO workspace deps  │
+│  Tier 0: types, logger, constants   ← NO workspace deps  │
 └─────────────────────────────────────────────────────────┘
 ```
+
+**To see your project's actual tier assignments**, read the `eslint.config.js` file at the project root. The tier arrays (`tier0`, `tier1`, etc.) list which packages belong to each tier.
 
 ## Before Writing an Import
 
@@ -46,14 +50,12 @@ If #3 is NO → **stop**. The import is illegal. Find another way:
 
 If you see an error like:
 ```
-error  'boundaries/dependencies' - Not allowed to import '@acme/database' from 'domain-logic'
+error  'boundaries/dependencies' - Not allowed to import '@scope/database' from 'helpers'
 ```
 
-This means `domain-logic` (tier 3) tried to import `database` (tier 2). Wait — tier 3 CAN import tier 2. 
-
-Actually, re-read the error carefully. Common mistakes:
-- Importing from the **same tier** (tier 3 → tier 3): illegal
-- Importing **upward** (tier 2 → tier 3): illegal
+Read carefully — common mistakes:
+- Importing from the **same tier** (e.g. tier 1 → tier 1): illegal
+- Importing **upward** (e.g. tier 2 → tier 3): illegal
 - Test files are excluded from boundary checks — this is intentional
 
 ## Classifying a New Package
@@ -61,7 +63,7 @@ Actually, re-read the error carefully. Common mistakes:
 When creating a new package, assign it to the correct tier:
 
 | If the package... | Assign to |
-|-------------------|-----------|
+|-------------------|-----------| 
 | Has NO workspace dependencies | Tier 0 |
 | Only depends on types/logger | Tier 1 |
 | Wraps external services (DB, API, queue) | Tier 2 |
@@ -76,7 +78,7 @@ Then update `eslint.config.js`:
 ## Common Violations and Fixes
 
 ### "I need types from a higher-tier package"
-Extract the types into `shared-types` (tier 0). Both packages can then import from tier 0.
+Extract the types into a tier 0 package (e.g. `shared-types`). Both packages can then import from tier 0.
 
 ### "Two packages at the same tier need to share code"
 Create a new package at a lower tier and have both import from it.

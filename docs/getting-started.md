@@ -28,10 +28,9 @@ The interactive script will:
 1. Detect your existing `package.json` (if present)
 2. Ask for project type (single package or monorepo)
 3. Ask for package manager (npm / pnpm / yarn)
-4. Ask which AI agent you use
-5. Ask for your npm org scope — auto-detected if possible
-6. Copy all config files with your scope substituted
-7. Optionally install devDependencies and git hooks
+4. Ask for your npm org scope — auto-detected if possible
+5. Copy all config files with your scope substituted
+6. Optionally install devDependencies and git hooks
 
 ## What Gets Created
 
@@ -47,13 +46,9 @@ your-project/
 ├── lefthook.yml           # Pre-commit hook orchestration
 ├── tsconfig.base.json     # TypeScript strict settings
 ├── vitest.config.ts       # Test runner + coverage
-├── scripts/
-│   ├── typecheck-staged.sh
-│   └── publint-all.sh
-├── CLAUDE.md              # (and/or .cursorrules, GEMINI.md, AGENTS.md)
-└── .github/
-    └── workflows/
-        └── ci.yml         # CI pipeline
+└── scripts/
+    ├── typecheck-staged.sh
+    └── publint-all.sh
 ```
 
 Monorepo projects also get `.syncpackrc.json` and `turbo.json`.
@@ -142,4 +137,3 @@ For agent-driven workflows, point your agent at:
 - [enforce-architecture](../skills/enforce-architecture/SKILL.md) — tier rules
 - [self-correcting-loop](../skills/self-correcting-loop/SKILL.md) — commit feedback loop
 - [adding-a-package](../skills/adding-a-package/SKILL.md) — new workspace packages
-- [writing-agent-instructions](../skills/writing-agent-instructions/SKILL.md) — CLAUDE.md etc.

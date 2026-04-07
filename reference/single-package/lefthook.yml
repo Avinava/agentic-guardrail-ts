@@ -1,0 +1,27 @@
+# lefthook.yml — Pre-commit hook orchestration (single package)
+# All jobs run in parallel (~3s total). If any fails, the commit is rejected.
+
+pre-commit:
+  parallel: true
+  jobs:
+    - name: prettier
+      run: npx lint-staged
+
+    - name: lint-unused
+      run: npx knip
+
+    - name: lint
+      glob: "*.{ts,tsx}"
+      run: npx eslint {staged_files}
+
+    - name: typecheck
+      run: npx tsc --noEmit
+
+    - name: test-related
+      glob: "src/**/*.ts"
+      run: npx vitest related {staged_files} --run --passWithNoTests
+
+commit-msg:
+  jobs:
+    - name: commitlint
+      run: npx commitlint --edit {1}
