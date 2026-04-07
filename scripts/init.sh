@@ -84,9 +84,9 @@ echo "  2) pnpm"
 echo "  3) yarn"
 read -rp "  Choice [1/2/3]: " PKG_MANAGER_CHOICE
 case "${PKG_MANAGER_CHOICE:-1}" in
-  2) PKG_MANAGER="pnpm"; WORKSPACE_PIN="workspace:*" ;;
-  3) PKG_MANAGER="yarn"; WORKSPACE_PIN="workspace:*" ;;
-  *) PKG_MANAGER="npm"; WORKSPACE_PIN="*" ;;
+  2) PKG_MANAGER="pnpm" ;;
+  3) PKG_MANAGER="yarn" ;;
+  *) PKG_MANAGER="npm" ;;
 esac
 
 # Org scope — auto-detect or prompt (only for monorepo)
@@ -237,9 +237,9 @@ INSTALL_CONFIRM="${INSTALL_CONFIRM:-Y}"
 if [[ "$INSTALL_CONFIRM" =~ ^[Yy] ]]; then
   info "Installing devDependencies..."
   case "$PKG_MANAGER" in
-    pnpm) pnpm add -D $DEPS_STRING ;;
-    yarn) yarn add -D $DEPS_STRING ;;
-    *)    npm install -D $DEPS_STRING ;;
+    pnpm) pnpm add -D "$DEPS_STRING" ;;
+    yarn) yarn add -D "$DEPS_STRING" ;;
+    *)    npm install -D "$DEPS_STRING" ;;
   esac
   success "Dependencies installed"
 
