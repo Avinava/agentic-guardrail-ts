@@ -50,6 +50,10 @@ jobs:
           fi
           echo "No stale references found."
 
+      # ── Doc currency check ──
+      - name: Docs check (stale path references)
+        run: node scripts/docs-check.mjs --strict
+
       # ── Verify raw URLs use correct branch ──
       - name: Check branch references
         run: |

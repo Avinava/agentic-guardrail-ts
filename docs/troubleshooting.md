@@ -170,3 +170,24 @@ CI will still catch everything. Use `--no-verify` sparingly.
 4. File is too long — keep critical rules at the top
 
 **Tip:** The automated hooks enforce rules regardless. The instruction file is guidance; the hooks are enforcement.
+
+---
+
+## Setup Produced Hundreds of Warnings
+
+**Symptom:** After running `setup-guardrails`, ESLint/TypeScript reports hundreds of warnings or errors.
+
+**This is expected on an existing codebase.** The guardrail stack is showing you the backlog.
+
+**Do NOT use `--max-warnings=N`** — it decays over time and erodes trust in the tool. Today's 200 becomes tomorrow's 250 with no one noticing.
+
+**Fix:** Use **Wave sequencing** (retrofit mode):
+1. Set new rules to `warn` instead of `error`
+2. Add a warning budget header in `eslint.config.js` tracking the count per rule
+3. Drive each rule category to zero violations via focused refactoring
+4. Flip `warn` → `error` in the same commit that proves the count is zero
+5. Repeat for the next category
+
+**The key principle:** Tools become gates only when their baseline is exit-0.
+
+See [reference/retrofit-rollout.md](../reference/retrofit-rollout.md) for a worked example.

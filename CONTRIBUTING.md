@@ -29,6 +29,8 @@ docs/               ← Deep-dive documentation
 4. JSON must be valid (no trailing commas, no comments)
 5. Documentation should cross-link using relative paths
 6. Keep docs concise — this is reference material, not a novel
+7. Every `eslint-disable` in reference configs must include a paper-trail comment (rule + reason + tracking reference)
+8. Cross-tool interactions must be documented in [docs/known-conflicts.md](docs/known-conflicts.md)
 
 ## Testing Changes
 
@@ -36,6 +38,7 @@ docs/               ← Deep-dive documentation
 2. Verify all config files are created with correct values
 3. Verify `npm install` succeeds with the generated configs
 4. Point an agent at a skill URL — verify it doesn't pollute the target repo
+5. Run `node scripts/docs-check.mjs` to verify no stale path references in docs
 
 ## Commit Format
 

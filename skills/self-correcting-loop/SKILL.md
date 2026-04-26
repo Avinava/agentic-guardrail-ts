@@ -153,7 +153,7 @@ If the secret was already committed to history, alert the user — they need to 
 
 ### "But the error is a false positive"
 Probably not. Read it again carefully. If it genuinely is:
-- ESLint: add `// eslint-disable-next-line rule-name` with a comment explaining why
+- ESLint: add `// eslint-disable-next-line rule-name` with a comment explaining why, a tracking reference, and a `tech-debt.md` cross-link if it represents known debt (see the `enforce-architecture` skill § "Escape Hatches and Paper Trails")
 - Knip: add the entry to `knip.json` ignore list
 - Ask the user before suppressing — they may prefer to fix the root cause
 

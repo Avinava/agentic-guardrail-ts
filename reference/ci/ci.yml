@@ -37,5 +37,10 @@ jobs:
       - run: npm run lint                # ESLint + boundaries
       - run: npm test                    # Full test suite
 
+      # ── Doc currency (optional) ──
+      - name: Docs check (stale path references)
+        run: node scripts/docs-check.mjs
+        continue-on-error: true           # Warn-only until baseline is created
+
       # ── Security ──
       - run: npm audit --audit-level=high

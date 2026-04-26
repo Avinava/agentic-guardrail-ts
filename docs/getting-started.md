@@ -122,6 +122,21 @@ git commit -m "test: verify guardrails"
 
 Fix the issue and retry — that's the self-correcting loop.
 
+## If Your Project Isn't Greenfield
+
+If you're adding guardrails to an **existing codebase**, expect lint to surface a backlog of violations. This is normal — the tools are showing you what was invisible before.
+
+**Do NOT reach for `--max-warnings=N`.** It decays silently and erodes trust in the entire tool stack.
+
+Instead, the `setup-guardrails` skill detects your baseline and installs in **retrofit mode**:
+- Rules that can be auto-fixed (formatting, import ordering) start at `error` immediately
+- Rules that require manual refactoring start at `warn` with a tracked warning budget
+- You drive each rule category to zero via focused waves, then flip `warn` → `error`
+
+**The key principle:** Tools become gates only when their baseline is exit-0.
+
+See the [Retrofit Rollout Guide](../reference/retrofit-rollout.md) for a complete worked example with wave-by-wave instructions and timeline expectations.
+
 ## Next Steps
 
 - [Tool Reference](./tool-reference.md) — deep dive on each of the 13 tools

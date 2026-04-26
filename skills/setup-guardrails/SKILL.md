@@ -65,6 +65,72 @@ Look at the `name` field in `package.json`:
 
 List the directories under `packages/` and `apps/`. These become the tier assignments in ESLint config. Ask the user how to classify them (see Step 4).
 
+### 1e. Assess existing codebase health
+
+**⚠ IMPORTANT: Do this BEFORE generating any configs.**
+
+Run a quick health check to classify this as greenfield or retrofit:
+
+1. Check for existing lint configs (`.eslintrc*`, `eslint.config.*`, `.prettierrc*`)
+2. Check for existing TypeScript config strictness — is `strict: true` present?
+3. If an ESLint config exists, run: `npx eslint 'src/**/*.ts' --no-error-on-unmatched-pattern 2>&1 | tail -5`
+4. Count type-safety escapes: `grep -r '@ts-ignore\|@ts-expect-error' src/ | wc -l`
+
+**Classification:**
+- **Greenfield:** No existing lint config, or existing config with <10 violations → proceed normally (all rules at `error`)
+- **Retrofit:** Existing codebase with >10 violations or non-strict TypeScript → use Wave mode
+
+**If retrofit, WARN the user before proceeding:**
+
+> "This is an existing codebase with [N] lint violations and [M] type issues.
+> I'll install guardrails in **Wave mode** — rules start at `warn` so your
+> existing workflow isn't disrupted. You'll then drive each rule category to
+> zero violations via focused refactoring, and flip warn→error one category
+> at a time.
+>
+> **What to expect:**
+> - Pre-commit hooks will run but won't block commits initially (warnings, not errors)
+> - A warning budget header in `eslint.config.js` tracks progress toward zero
+> - Each rule category gets its own cleanup wave
+> - Total adoption timeline: days to weeks depending on codebase size
+>
+> **The key principle: Tools become gates only when their baseline is exit-0.**
+> A rule moves to `error` only when you have zero violations. Never use
+> `--max-warnings=N` — it decays over time and erodes trust in the tool."
+
+**Get user confirmation** before generating configs. They should understand:
+- This is a progressive adoption, not a big-bang flip
+- Some rules (formatting, import ordering) can be auto-fixed immediately
+- Others (type safety, architecture boundaries) require manual refactoring
+
+**If retrofit mode:** When generating `eslint.config.js` in Step 4, set these rules to `warn` instead of `error`:
+- `import-x/default`, `import-x/named`
+- `@typescript-eslint/no-non-null-assertion`
+- `@typescript-eslint/consistent-type-assertions`
+- `no-restricted-syntax` (double-cast)
+- `boundaries/dependencies` (if monorepo)
+
+Rules that ALWAYS start at `error` even on retrofit (they're auto-fixable):
+- `import-x/order`, `import-x/no-duplicates`, `no-console`
+
+Add a **warning budget header** at the top of `eslint.config.js`:
+
+```js
+// ── WARNING BUDGET (retrofit mode) ──────────────────────────
+// These rules are at 'warn' until the violation count reaches 0.
+// Drive each to zero, then flip to 'error' in the same commit.
+//
+// Rule                               Count   Target
+// import-x/default                   12      Wave 1
+// import-x/named                     3       Wave 1
+// no-non-null-assertion              47      Wave 2
+// consistent-type-assertions         8       Wave 2
+// boundaries/dependencies            22      Wave 3
+//
+// Last audited: YYYY-MM-DD
+// ─────────────────────────────────────────────────────────────
+```
+
 ---
 
 ## Step 2: Write Foundation Configs
@@ -114,6 +180,9 @@ dist
 node_modules
 coverage
 *.min.js
+*.min.css
+.turbo/
+# Add auto-generated or column-aligned files below (see docs/known-conflicts.md):
 ```
 
 ---
@@ -251,6 +320,30 @@ export default tseslint.config(
         },
       ],
       'import-x/no-duplicates': 'error',
+      // Catches stale default/named import shapes — ESM rejects these at runtime
+      'import-x/default': 'error',
+      'import-x/named': 'error',
+    },
+  },
+
+  // Runtime safety — prevent type lies that bypass the compiler
+  {
+    files: ['src/**/*.ts'],
+    rules: {
+      // Prevent ! operator — lies to the compiler about nullability
+      '@typescript-eslint/no-non-null-assertion': 'error',
+      // Prevent {} as Foo shortcuts — use proper construction instead
+      '@typescript-eslint/consistent-type-assertions': ['error', {
+        assertionStyle: 'as',
+        objectLiteralTypeAssertions: 'never',
+      }],
+      // Prevent double-cast (as unknown as T) — bypasses the type system entirely
+      'no-restricted-syntax': ['error',
+        {
+          selector: 'TSAsExpression > TSAsExpression',
+          message: 'Double type assertion bypasses the type system. Narrow properly or add an eslint-disable with a paper trail.',
+        },
+      ],
     },
   },
 
@@ -381,6 +474,27 @@ export default tseslint.config(
         },
       ],
       'import-x/no-duplicates': 'error',
+      // Catches stale default/named import shapes — ESM rejects these at runtime
+      'import-x/default': 'error',
+      'import-x/named': 'error',
+    },
+  },
+
+  // ── Runtime safety — prevent type lies that bypass the compiler ──
+  {
+    files: ['packages/*/src/**/*.ts', 'apps/*/src/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-non-null-assertion': 'error',
+      '@typescript-eslint/consistent-type-assertions': ['error', {
+        assertionStyle: 'as',
+        objectLiteralTypeAssertions: 'never',
+      }],
+      'no-restricted-syntax': ['error',
+        {
+          selector: 'TSAsExpression > TSAsExpression',
+          message: 'Double type assertion bypasses the type system. Narrow properly or add an eslint-disable with a paper trail.',
+        },
+      ],
     },
   },
 
@@ -721,14 +835,25 @@ git add -A
 git commit --allow-empty -m "chore: verify guardrail setup"
 ```
 
-If the commit succeeds, setup is complete. If it fails, read the errors and fix them — **this is the self-correcting loop in action.**
+**Greenfield success criteria:**
+- All checks pass with zero warnings and zero errors
+- The commit succeeds — setup is complete
+
+**Retrofit success criteria:**
+- Pre-commit hooks run without errors (warnings are expected and tracked)
+- Warning budget header in `eslint.config.js` is accurate and honest
+- No rule was force-flipped to `error` at a non-zero baseline
+- Auto-fixable rules (formatting, import ordering) are already at `error`
+- User understands the wave sequencing plan (see below)
+
+If the commit fails, read the errors and fix them — **this is the self-correcting loop in action.**
 
 ---
 
 ## Verification Checklist
 
 - [ ] `lefthook.yml` exists with secrets job and `npx lefthook install` succeeded
-- [ ] `eslint.config.js` exists with import ordering and correct config for project type
+- [ ] `eslint.config.js` exists with import ordering, runtime safety rules, and correct config for project type
 - [ ] `.prettierrc` exists
 - [ ] `commitlint.config.ts` exists with actual package scopes
 - [ ] `vitest.config.ts` exists
@@ -737,17 +862,58 @@ If the commit succeeds, setup is complete. If it fails, read the errors and fix 
 - [ ] Lockfile updated with new devDependencies (including `eslint-plugin-import-x`)
 - [ ] For monorepo: `tsconfig.base.json`, `knip.json`, `.syncpackrc.json`, `turbo.json` exist
 - [ ] For monorepo: `scripts/typecheck-staged.sh` exists and is executable
+- [ ] For retrofit: warning budget header present and honest; no rule at `error` with non-zero violations
 
 ## User Confirmation Summary
 
 During setup, you should have asked the user about:
 1. **Org scope** (Step 1c) — if not auto-detected in a monorepo
-2. **Tier assignments** (Step 4) — how to classify packages for architecture enforcement
-3. **Enum usage** (Step 4, TypeScript config) — whether to enable `erasableSyntaxOnly`
-4. **Existing configs** — any file that already exists should be flagged, not silently overwritten
-5. **npm scripts** (Step 8) — existing scripts should be preserved unless user confirms overwrite
+2. **Greenfield or retrofit** (Step 1e) — determines rule severity strategy
+3. **Tier assignments** (Step 4) — how to classify packages for architecture enforcement
+4. **Enum usage** (Step 4, TypeScript config) — whether to enable `erasableSyntaxOnly`
+5. **Existing configs** — any file that already exists should be flagged, not silently overwritten
+6. **npm scripts** (Step 8) — existing scripts should be preserved unless user confirms overwrite
 
 If you skipped any of these, go back and ask now.
+
+---
+
+## Wave Sequencing (Retrofit Projects)
+
+After initial setup in retrofit mode, drive each rule category to zero violations one wave at a time. Do NOT mix waves — complete one before starting the next.
+
+### Wave 1: Auto-fixable rules (usually same-day)
+- `import-x/order` → run `npx eslint --fix` → already at error
+- `import-x/no-duplicates` → run `npx eslint --fix` → already at error
+- Prettier issues → run `npx prettier --write .` → already enforced
+- Update the warning budget header with post-fix counts
+
+### Wave 2: Import correctness (1–3 days)
+- `import-x/default` + `import-x/named` → fix each import mismatch manually
+- Common fix: change `import Foo from './bar'` to `import { Foo } from './bar'`
+- For React.lazy consumers: use `.then((m) => ({ default: m.NamedExport }))`
+- When count reaches 0 → flip to `error` in the same commit
+- Commit message: `refactor(lint): flip import-x/default warn→error (0 violations)`
+
+### Wave 3: Type safety (3–7 days)
+- `no-non-null-assertion` → replace `!` with proper null checks (`if`, `??`, optional chaining)
+- `consistent-type-assertions` → replace `{} as Foo` with proper construction or factory functions
+- `no-restricted-syntax` (double-cast) → narrow types properly instead of `as unknown as T`
+- When count reaches 0 → flip to `error`
+
+### Wave 4: Architecture boundaries (1–2 weeks, monorepo only)
+- `boundaries/dependencies` → refactor cross-tier imports
+- Move shared code to lower-tier packages
+- Use dependency injection where direct import is impossible
+- When count reaches 0 → flip to `error`
+
+### After each wave
+1. Update the warning budget header with the new counts
+2. Commit the rule flip with a clear message
+3. The pre-commit hook now enforces the rule — no regression possible
+4. Move to the next wave
+
+See [reference/retrofit-rollout.md](../../reference/retrofit-rollout.md) for a complete worked example.
 
 ## Related Skills
 

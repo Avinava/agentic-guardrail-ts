@@ -67,6 +67,23 @@ Deep dive on each of the 13 guardrail tools: what they do, why they matter for A
 | `no-misused-promises` | Passing async where sync expected |
 | `no-unsafe-assignment` | Assigning `any` to typed variable |
 | `no-explicit-any` | Using `any` instead of proper types |
+| `no-non-null-assertion` | Using `!` to lie about nullability |
+| `consistent-type-assertions` | Object literal type shortcuts (`{} as Foo`) |
+
+**Import correctness rules (via `import-x`):**
+
+| Rule | What It Catches |
+|------|----------------|
+| `import-x/default` | Importing a default that doesn't exist — ESM rejects at runtime with `SyntaxError` |
+| `import-x/named` | Importing a named export that doesn't exist — same runtime crash |
+| `import-x/order` | Inconsistent import ordering |
+| `import-x/no-duplicates` | Duplicate import statements for the same module |
+
+**Custom anti-pattern rules:**
+
+| Rule | What It Catches |
+|------|----------------|
+| `no-restricted-syntax` (double-cast) | `as unknown as T` — bypasses the compiler entirely. If you need this, add an eslint-disable with a paper trail |
 
 **Config:** See [reference/monorepo/eslint.config.js](../reference/monorepo/eslint.config.js) (monorepo) or [reference/single-package/eslint.config.js](../reference/single-package/eslint.config.js) (single)
 **Guide:** See [Architecture Tiers](./architecture-tiers.md)

@@ -98,6 +98,49 @@ Test files (`__tests__/**`) are excluded from boundary checks. This is intention
 | App tier importing directly from tier 0 | Not wrong, but consider if an orchestrator should exist |
 | Circular dependency warnings | Architecture violation — restructure needed |
 
+## Escape Hatches and Paper Trails
+
+Sometimes you genuinely need to disable a rule. That's OK — but every escape hatch must leave a paper trail.
+
+Every `eslint-disable` comment MUST include:
+
+1. **The specific rule** being disabled (never bare `// eslint-disable-next-line`)
+2. **A reason** explaining why narrowing is impossible
+3. **A tracking reference** (issue link, doc section, or `tech-debt.md` entry)
+
+### Examples
+
+```typescript
+// GOOD — full paper trail
+// eslint-disable-next-line @typescript-eslint/no-explicit-any — UseFormReturn<any>
+// is polymorphic by design; see tech-debt.md#rhf-any-wrapper, tracked in #142
+const form: UseFormReturn<any> = useForm(config);
+
+// BAD — no context, no trail, future contributor has no idea why
+// eslint-disable-next-line
+const data = getResponse() as any;
+
+// BAD — has the rule but no reason
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const result: any = parseInput(raw);
+```
+
+### Convention
+
+- **No bare disables.** Every `eslint-disable` without a reason is a future mystery.
+- **Cross-link to `tech-debt.md`** when the disable represents known debt (see [reference/tech-debt.md](../../reference/tech-debt.md) for the template).
+- **Quarterly audit:** search for `eslint-disable` and verify each still has a valid reason + tracking reference. Prune any that no longer apply.
+
+### If You're the Agent
+
+Before adding an `eslint-disable`, ask yourself:
+1. Can I fix the code to satisfy the rule instead?
+2. If not, can I narrow the disable to a specific rule (not a blanket disable)?
+3. Have I documented why this specific case can't be fixed?
+4. Have I added a tracking reference so a human can find and evaluate this later?
+
+If the answer to any of 2–4 is no, fix that before committing.
+
 ## Related Skills
 
 - **setup-guardrails** — Initial ESLint boundaries setup

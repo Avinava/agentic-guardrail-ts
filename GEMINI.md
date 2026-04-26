@@ -16,3 +16,6 @@ to set up guardrails in OTHER projects.
 - Keep skills self-contained (all config content inline)
 - Test changes by running `init.sh` in a fresh temp directory
 - Ensure all shell scripts pass `shellcheck`
+- Run `node scripts/docs-check.mjs` after doc changes
+- Follow the paper-trail convention for any `eslint-disable` (see `enforce-architecture` skill)
+- Check [docs/known-conflicts.md](docs/known-conflicts.md) when tools interact unexpectedly

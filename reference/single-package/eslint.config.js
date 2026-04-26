@@ -29,6 +29,29 @@ export default tseslint.config(
         },
       ],
       'import-x/no-duplicates': 'error',
+      'import-x/default': 'error',
+      'import-x/named': 'error',
+    },
+  },
+
+  // Runtime safety — prevent type lies that bypass the compiler
+  {
+    files: ['src/**/*.ts'],
+    rules: {
+      // Prevent ! operator — lies to the compiler about nullability
+      '@typescript-eslint/no-non-null-assertion': 'error',
+      // Prevent {} as Foo shortcuts — use proper construction instead
+      '@typescript-eslint/consistent-type-assertions': ['error', {
+        assertionStyle: 'as',
+        objectLiteralTypeAssertions: 'never',
+      }],
+      // Prevent double-cast (as unknown as T) — bypasses the type system entirely
+      'no-restricted-syntax': ['error',
+        {
+          selector: 'TSAsExpression > TSAsExpression',
+          message: 'Double type assertion (as unknown as T) bypasses the type system. Narrow properly or add an eslint-disable with a paper trail (see enforce-architecture skill).',
+        },
+      ],
     },
   },
 
