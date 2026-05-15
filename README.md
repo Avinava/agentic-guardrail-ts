@@ -70,6 +70,7 @@ This repo provides **agent-readable skills** — structured instruction files th
 | Skill | When to Use |
 |-------|------------|
 | [**setup-guardrails**](skills/setup-guardrails/SKILL.md) | Setting up a new TS project or adding guardrails to an existing one (supports greenfield + retrofit mode) |
+| [**enforce-code-discipline**](skills/enforce-code-discipline/SKILL.md) | After setup-guardrails — add LLM discipline rules: complexity limits, naming conventions, coverage thresholds |
 | [**enforce-architecture**](skills/enforce-architecture/SKILL.md) | Adding imports, creating packages, reviewing code for tier violations, and managing escape hatches |
 | [**self-correcting-loop**](skills/self-correcting-loop/SKILL.md) | Every commit — how to read errors, fix all in one pass, retry |
 | [**adding-a-package**](skills/adding-a-package/SKILL.md) | Creating a new workspace package (monorepo) |
