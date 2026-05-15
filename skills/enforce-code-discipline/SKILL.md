@@ -137,7 +137,7 @@ Then append the discipline config blocks.
     plugins: { sonarjs },
     rules: {
       'sonarjs/cognitive-complexity': ['error', 15],
-      'sonarjs/no-duplicate-string': ['error', { threshold: 3 }],
+      'sonarjs/no-duplicate-string': ['error', { minDuplicates: 3 }],
       'sonarjs/no-identical-functions': 'error',
       'sonarjs/no-collapsible-if': 'error',
       'sonarjs/no-gratuitous-expressions': 'error',
@@ -210,27 +210,43 @@ Add this header comment immediately after the structure comment block:
   // These rules are at 'warn' until the violation count reaches 0.
   // Drive each to zero, then flip to 'error' in the same commit.
   //
-  // Rule                               Count   Target
-  // unicorn/no-lonely-if                ?      Wave 1
-  // unicorn/no-array-push-push          ?      Wave 1
-  // unicorn/prefer-string-slice         ?      Wave 1
-  // sonarjs/prefer-immediate-return     ?      Wave 1
-  // sonarjs/no-redundant-jump           ?      Wave 1
-  // sonarjs/cognitive-complexity        ?      Wave 2
-  // max-lines                           ?      Wave 2
-  // max-lines-per-function              ?      Wave 2
-  // max-depth                           ?      Wave 2
-  // naming-convention                   ?      Wave 3
-  // sonarjs/no-duplicate-string         ?      Wave 3
-  // no-magic-numbers                    ?      Wave 3
-  // jsdoc/*                             ?      Wave 4
+  // Rule                                    Count   Target
+  // unicorn/filename-case                    ?      Wave 1
+  // unicorn/no-array-for-each               ?      Wave 1
+  // unicorn/no-for-loop                     ?      Wave 1
+  // unicorn/no-lonely-if                    ?      Wave 1
+  // unicorn/no-array-push-push              ?      Wave 1
+  // unicorn/no-useless-undefined            ?      Wave 1
+  // unicorn/prefer-string-slice             ?      Wave 1
+  // unicorn/no-process-exit                 ?      Wave 1
+  // unicorn/prefer-module                   ?      Wave 1
+  // unicorn/explicit-length-check           ?      Wave 1
+  // sonarjs/prefer-immediate-return         ?      Wave 1
+  // sonarjs/no-redundant-jump               ?      Wave 1
+  // sonarjs/cognitive-complexity            ?      Wave 2
+  // sonarjs/no-identical-functions          ?      Wave 2
+  // sonarjs/no-collapsible-if               ?      Wave 2
+  // sonarjs/no-gratuitous-expressions       ?      Wave 2
+  // max-lines                               ?      Wave 2
+  // max-lines-per-function                  ?      Wave 2
+  // max-params                              ?      Wave 2
+  // max-depth                               ?      Wave 2
+  // max-classes-per-file                    ?      Wave 2
+  // no-nested-ternary                       ?      Wave 2
+  // @typescript-eslint/naming-convention    ?      Wave 3
+  // sonarjs/no-duplicate-string             ?      Wave 3
+  // no-magic-numbers                        ?      Wave 3
+  // jsdoc/*                                 ?      Wave 4
   //
   // Last audited: YYYY-MM-DD
   // ─────────────────────────────────────────────────────────────
 ```
 
-Replace the `?` values by running `npx eslint 'src/**/*.ts' --rule '{"rule-name": "warn"}' 2>&1 | grep -c 'warning'`
-for each rule, or by running the full lint pass after appending the config at `warn` and counting warnings.
+Replace the `?` values by running the full lint pass after appending the config at `warn`:
+```bash
+npx eslint 'src/**/*.ts' 2>&1 | grep -oE '\[([^\]]+)\]' | sort | uniq -c | sort -rn
+```
+This shows per-rule violation counts. Fill in each `?` with the count for that rule.
 
 Then use `'warn'` instead of `'error'` in all five discipline blocks above
 (jsdoc stays `'warn'` regardless).
