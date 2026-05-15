@@ -211,12 +211,17 @@ Add this header comment immediately after the structure comment block:
   // Drive each to zero, then flip to 'error' in the same commit.
   //
   // Rule                               Count   Target
-  // sonarjs/cognitive-complexity        ?      Wave 1
-  // max-lines                           ?      Wave 1
-  // max-lines-per-function              ?      Wave 1
-  // max-depth                           ?      Wave 1
-  // naming-convention                   ?      Wave 2
-  // sonarjs/no-duplicate-string         ?      Wave 2
+  // unicorn/no-lonely-if                ?      Wave 1
+  // unicorn/no-array-push-push          ?      Wave 1
+  // unicorn/prefer-string-slice         ?      Wave 1
+  // sonarjs/prefer-immediate-return     ?      Wave 1
+  // sonarjs/no-redundant-jump           ?      Wave 1
+  // sonarjs/cognitive-complexity        ?      Wave 2
+  // max-lines                           ?      Wave 2
+  // max-lines-per-function              ?      Wave 2
+  // max-depth                           ?      Wave 2
+  // naming-convention                   ?      Wave 3
+  // sonarjs/no-duplicate-string         ?      Wave 3
   // no-magic-numbers                    ?      Wave 3
   // jsdoc/*                             ?      Wave 4
   //
@@ -259,7 +264,7 @@ export default defineConfig({
 });
 ```
 
-For monorepos, `include` should be `['packages/*/src/**/*.test.ts']`.
+For monorepos, `include` should be `['packages/*/src/**/*.test.ts', 'apps/*/src/**/*.test.ts']`.
 
 ### Retrofit — set thresholds at current baseline:
 
