@@ -209,6 +209,7 @@ export default tseslint.config(
         { selector: 'parameter', format: ['camelCase'] },
         { selector: 'property', format: ['camelCase'] },
         { selector: 'typeLike', format: ['PascalCase'] },
+        { selector: 'enumMember', format: ['UPPER_CASE'] },
       ],
     },
   },

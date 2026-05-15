@@ -18,7 +18,7 @@ easy to maintain.
 - Code quality checks (cognitive complexity, duplicate code, dead branches)
 - Naming conventions (camelCase / PascalCase / UPPER_CASE enforcement)
 - ESM idioms (unicorn plugin — `no-array-for-each`, `filename-case`, etc.)
-- Documentation coverage for public APIs (jsdoc — always wave-gated)
+- Documentation coverage for public APIs (jsdoc — starts at `warn`, flip to `error` in Wave 4)
 - Test coverage thresholds (hard gates in Vitest)
 
 **Prerequisites:** `setup-guardrails` skill already applied to this project.
@@ -157,6 +157,7 @@ Then append the discipline config blocks.
         { selector: 'parameter', format: ['camelCase'] },
         { selector: 'property', format: ['camelCase'] },
         { selector: 'typeLike', format: ['PascalCase'] },
+        { selector: 'enumMember', format: ['UPPER_CASE'] },
       ],
     },
   },
@@ -211,18 +212,18 @@ Add this header comment immediately after the structure comment block:
   // Drive each to zero, then flip to 'error' in the same commit.
   //
   // Rule                                    Count   Target
-  // unicorn/filename-case                    ?      Wave 1
   // unicorn/no-array-for-each               ?      Wave 1
   // unicorn/no-for-loop                     ?      Wave 1
   // unicorn/no-lonely-if                    ?      Wave 1
   // unicorn/no-array-push-push              ?      Wave 1
   // unicorn/no-useless-undefined            ?      Wave 1
   // unicorn/prefer-string-slice             ?      Wave 1
-  // unicorn/no-process-exit                 ?      Wave 1
   // unicorn/prefer-module                   ?      Wave 1
   // unicorn/explicit-length-check           ?      Wave 1
   // sonarjs/prefer-immediate-return         ?      Wave 1
   // sonarjs/no-redundant-jump               ?      Wave 1
+  // unicorn/filename-case                   ?      Wave 2
+  // unicorn/no-process-exit                 ?      Wave 2
   // sonarjs/cognitive-complexity            ?      Wave 2
   // sonarjs/no-identical-functions          ?      Wave 2
   // sonarjs/no-collapsible-if               ?      Wave 2
@@ -244,7 +245,12 @@ Add this header comment immediately after the structure comment block:
 
 Replace the `?` values by running the full lint pass after appending the config at `warn`:
 ```bash
-npx eslint 'src/**/*.ts' 2>&1 | grep -oE '\[([^\]]+)\]' | sort | uniq -c | sort -rn
+npx eslint 'src/**/*.ts' --format json 2>/dev/null | node -e "
+const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+const c={};
+for(const f of d) for(const m of f.messages) c[m.ruleId]=(c[m.ruleId]||0)+1;
+for(const [r,n] of Object.entries(c).sort((a,b)=>b[1]-a[1])) console.log(n,r);
+"
 ```
 This shows per-rule violation counts. Fill in each `?` with the count for that rule.
 
@@ -255,7 +261,9 @@ Then use `'warn'` instead of `'error'` in all five discipline blocks above
 
 ## Step 5: Update `vitest.config.ts`
 
-Open `vitest.config.ts`. Find the `coverage` block and add `thresholds`:
+Open `vitest.config.ts`. Find the `coverage` block and add `thresholds`.
+
+**Do NOT rewrite the file.** Only add the `thresholds` key inside the existing `coverage` block — preserve all other config.
 
 ### Greenfield — set hard thresholds:
 
@@ -330,20 +338,33 @@ Drive each rule category to zero violations one wave at a time. Do NOT mix waves
 
 ### Wave 1 — auto-fixable (same day)
 Run `npx eslint --fix 'src/**/*.ts'` to auto-fix:
-- `unicorn/no-lonely-if`
-- `unicorn/no-array-push-push`
-- `unicorn/prefer-string-slice`
-- `sonarjs/prefer-immediate-return`
-- `sonarjs/no-redundant-jump`
+- `unicorn/no-array-for-each` — converts `.forEach()` to `for...of`
+- `unicorn/no-for-loop` — converts index-based loops to `for...of`
+- `unicorn/no-lonely-if` — merges `else { if () }` to `else if`
+- `unicorn/no-array-push-push` — merges consecutive `.push()` calls
+- `unicorn/no-useless-undefined` — removes explicit `undefined` returns
+- `unicorn/prefer-string-slice` — replaces `.substring()` with `.slice()`
+- `unicorn/prefer-module` — converts `require()` to `import` (partial)
+- `unicorn/explicit-length-check` — adds explicit `> 0` to length checks
+- `sonarjs/prefer-immediate-return` — removes unnecessary temp variables
+- `sonarjs/no-redundant-jump` — removes unnecessary `return`/`break`
 
-When count reaches 0 → flip to `error`. Commit: `refactor(lint): flip [rule] warn→error (0 violations)`
+When count reaches 0 → flip each to `error`. Commit: `refactor(lint): flip [rule] warn→error (0 violations)`
 
-### Wave 2 — complexity (1–3 days)
+### Wave 2 — complexity & structural idioms (1–3 days)
 Manually refactor:
+- `unicorn/filename-case` — rename files to `kebab-case` (update all imports)
+- `unicorn/no-process-exit` — replace `process.exit()` with thrown errors or callbacks
 - `sonarjs/cognitive-complexity` — break up nested logic into named helper functions
-- `max-lines` — split large files at their natural boundaries (one class/one domain concept per file)
+- `sonarjs/no-identical-functions` — extract duplicate function bodies
+- `sonarjs/no-collapsible-if` — combine `if (a) { if (b) }` into `if (a && b)`
+- `sonarjs/no-gratuitous-expressions` — remove always-true/false conditions
+- `max-lines` — split large files at their natural boundaries
 - `max-lines-per-function` — extract private helper functions
+- `max-params` — introduce options objects for functions with >4 params
 - `max-depth` — use early returns and guard clauses to reduce nesting
+- `max-classes-per-file` — one class per file
+- `no-nested-ternary` — replace with `if/else`
 
 When each reaches 0 → flip to `error`.
 
