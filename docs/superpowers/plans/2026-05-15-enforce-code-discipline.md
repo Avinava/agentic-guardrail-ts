@@ -172,7 +172,7 @@ Then append the discipline config blocks.
     plugins: { sonarjs },
     rules: {
       'sonarjs/cognitive-complexity': ['error', 15],
-      'sonarjs/no-duplicate-string': ['error', { threshold: 3 }],
+      'sonarjs/no-duplicate-string': ['error', { minDuplicates: 3 }],
       'sonarjs/no-identical-functions': 'error',
       'sonarjs/no-collapsible-if': 'error',
       'sonarjs/no-gratuitous-expressions': 'error',
@@ -451,7 +451,7 @@ Replace it with:
     plugins: { sonarjs },
     rules: {
       'sonarjs/cognitive-complexity': ['error', 15],
-      'sonarjs/no-duplicate-string': ['error', { threshold: 3 }],
+      'sonarjs/no-duplicate-string': ['error', { minDuplicates: 3 }],
       'sonarjs/no-identical-functions': 'error',
       'sonarjs/no-collapsible-if': 'error',
       'sonarjs/no-gratuitous-expressions': 'error',
@@ -578,7 +578,7 @@ Replace it with:
     plugins: { sonarjs },
     rules: {
       'sonarjs/cognitive-complexity': ['error', 15],
-      'sonarjs/no-duplicate-string': ['error', { threshold: 3 }],
+      'sonarjs/no-duplicate-string': ['error', { minDuplicates: 3 }],
       'sonarjs/no-identical-functions': 'error',
       'sonarjs/no-collapsible-if': 'error',
       'sonarjs/no-gratuitous-expressions': 'error',
