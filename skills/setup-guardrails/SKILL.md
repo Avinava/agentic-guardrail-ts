@@ -1,14 +1,23 @@
 ---
 name: setup-guardrails
 description: >
-  Set up a self-correcting guardrail stack in any TypeScript project.
-  Detects project type, generates all configs inline, installs dependencies,
-  and configures pre-commit hooks. No cloning or template copying required.
+  Audit and install a self-correcting guardrail stack in any TypeScript project.
+  Four-phase workflow: understand the guardrail system from this repo, inventory
+  the target project, generate a gap analysis, then apply changes — creating missing
+  configs and merging missing sections into existing ones.
 ---
 
 ## Overview
 
-Install a self-correcting guardrail stack into a TypeScript project. After setup, every `git commit` runs quality checks in parallel (~3s) and rejects bad code. You (the agent) see the errors, fix them, and retry.
+Install or update a self-correcting guardrail stack in a TypeScript project. After setup,
+every `git commit` runs quality checks in parallel (~3s) and rejects bad code. You (the agent)
+see the errors, fix them, and retry.
+
+**Four-phase workflow:**
+1. **Understand** — read this repo's reference configs to know what "correct" looks like
+2. **Inventory** — inspect the target project's current state (configs, deps, code health)
+3. **Gap analysis** — compare current vs. desired; present a structured report; get confirmation
+4. **Apply** — create missing files, merge missing sections into outdated ones, install missing deps
 
 **What this skill installs:**
 - Lefthook (parallel pre-commit hooks)
@@ -65,9 +74,68 @@ See [docs/tool-reference.md](../../docs/tool-reference.md) for a deep dive on ea
 
 ---
 
-## Step 1: Analyze the Target Project
+## Phase 0: Understand the Guardrail System
 
-Read the project's `package.json` and file system to detect:
+**Do this before reading the target project.** Phase 0 builds your mental model of what
+"correct" looks like, so you can do accurate gap analysis in Phase 2.
+
+> **Important:** The reference files show the **complete end-state** after BOTH
+> `setup-guardrails` AND `enforce-code-discipline` have run. Discipline-specific sections
+> (unicorn, sonarjs, jsdoc, complexity limits, coverage thresholds) are added by
+> `enforce-code-discipline`, not by this skill. In Phase 2, use the inline content in THIS
+> file — not the reference files — as your source of truth for what this skill installs.
+
+### 0a. Quick project type detection
+
+Read the target project's `package.json` before fetching anything:
+- **Monorepo** if: `workspaces` field exists, or `turbo.json` / `packages/` / `apps/` directory present
+- **Single-package** otherwise
+
+This determines which reference directory to fetch next.
+
+### 0b. Fetch reference configs from GitHub
+
+Fetch and read each file fully using raw GitHub URLs.
+
+**Single-package** — from `https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/reference/single-package/`:
+- `eslint.config.js`
+- `lefthook.yml`
+- `tsconfig.json`
+- `vitest.config.ts`
+- `commitlint.config.ts`
+- `package.json`
+
+**Monorepo** — from `https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/reference/monorepo/`:
+- `eslint.config.js`
+- `lefthook.yml`
+- `tsconfig.base.json`
+- `knip.json`
+- `turbo.json`
+- `.syncpackrc.json`
+- `commitlint.config.ts`
+- `vitest.config.ts`
+- `package.json`
+
+Also fetch `docs/known-conflicts.md`:
+`https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/docs/known-conflicts.md`
+
+> If a fetch fails (no network access), continue using the inline templates in this skill
+> as your sole reference for what each config should contain.
+
+### 0c. What to take away from the reference files
+
+After reading, you should understand:
+- What pre-commit jobs a complete `lefthook.yml` has (including `secrets` and, for monorepo, `lint-deps`)
+- What TypeScript flags are required (`isolatedModules`, `verbatimModuleSyntax`, `incremental`, `erasableSyntaxOnly`)
+- Which ESLint rules belong to THIS skill (import-x rules, runtime safety, boundaries for monorepo) vs. `enforce-code-discipline` (unicorn, sonarjs, jsdoc, complexity limits)
+- What devDependencies the reference `package.json` lists
+- Any known tool conflicts (from `docs/known-conflicts.md`) — especially the ESLint Config Prettier ordering constraint
+
+You are now ready to inspect the target project.
+
+---
+
+## Phase 1: Inventory the Target Project
 
 ### 1a. Project type
 
@@ -94,9 +162,47 @@ Look at the `name` field in `package.json`:
 
 ### 1d. Existing packages (monorepo only)
 
-List the directories under `packages/` and `apps/`. These become the tier assignments in ESLint config. Ask the user how to classify them (see Step 4).
+List the directories under `packages/` and `apps/`. These become the tier assignments in ESLint config. Ask the user how to classify them (see Phase 3).
 
-### 1e. Assess existing codebase health
+### 1e. Config file inventory
+
+For each file below, record: (a) does it exist? (b) if it exists, is it outdated?
+
+**"Outdated" = file exists but is missing these literal strings:**
+
+| File | Outdated if file exists but is MISSING any of these strings |
+|------|-------------------------------------------------------------|
+| `lefthook.yml` | `name: secrets` |
+| `lefthook.yml` (monorepo) | also: `name: lint-deps` |
+| `eslint.config.js` | `'import-x/named'`, `'import-x/default'`, `no-non-null-assertion`, `TSAsExpression > TSAsExpression` |
+| `eslint.config.js` (monorepo) | also: `eslint-plugin-boundaries` |
+| `tsconfig.json` / `tsconfig.base.json` | `"isolatedModules"`, `"verbatimModuleSyntax"`, `"incremental"`, `"erasableSyntaxOnly"` |
+| `package.json` scripts | `"lint:unused"`, `"prettier:check"`, `"prettier:fix"`, `"prepare"` |
+| `.gitignore` | `*.tsbuildinfo` |
+| `commitlint.config.ts` | _(no outdated check — treat as present or missing only)_ |
+| `vitest.config.ts` | _(no outdated check)_ |
+| `knip.json` (monorepo) | _(no outdated check)_ |
+| `.syncpackrc.json` (monorepo) | _(no outdated check)_ |
+| `turbo.json` (monorepo) | _(no outdated check)_ |
+| `scripts/typecheck-staged.sh` (monorepo) | _(exists AND is executable?)_ |
+| `.editorconfig` | _(no outdated check)_ |
+| `.nvmrc` | _(no outdated check)_ |
+| `.prettierrc` | _(no outdated check)_ |
+| `.prettierignore` | _(no outdated check)_ |
+
+### 1f. devDependency audit
+
+Read the target project's `package.json`. For each package below, record whether it is already in `devDependencies`. Phase 3 will install ONLY the missing ones.
+
+**All projects:**
+`lefthook`, `prettier`, `lint-staged`, `eslint`, `typescript`, `vitest`, `knip`,
+`@commitlint/cli`, `@commitlint/config-conventional`, `typescript-eslint`,
+`eslint-config-prettier`, `eslint-plugin-import-x`, `publint`
+
+**Monorepo only (in addition to above):**
+`eslint-plugin-boundaries`, `syncpack`, `turbo`
+
+### 1g. Assess existing codebase health
 
 **⚠ IMPORTANT: Do this BEFORE generating any configs.**
 
@@ -129,12 +235,7 @@ Run a quick health check to classify this as greenfield or retrofit:
 > A rule moves to `error` only when you have zero violations. Never use
 > `--max-warnings=N` — it decays over time and erodes trust in the tool."
 
-**Get user confirmation** before generating configs. They should understand:
-- This is a progressive adoption, not a big-bang flip
-- Some rules (formatting, import ordering) can be auto-fixed immediately
-- Others (type safety, architecture boundaries) require manual refactoring
-
-**If retrofit mode:** When generating `eslint.config.js` in Step 4, set these rules to `warn` instead of `error`:
+**If retrofit mode:** When generating `eslint.config.js` in Phase 3, set these rules to `warn` instead of `error`:
 - `import-x/default`, `import-x/named`
 - `@typescript-eslint/no-non-null-assertion`
 - `@typescript-eslint/consistent-type-assertions`
@@ -164,9 +265,74 @@ Add a **warning budget header** at the top of `eslint.config.js`:
 
 ---
 
-## Step 2: Write Foundation Configs
+## Phase 2: Gap Analysis
 
-Create these files in the project root. **Skip any file that already exists** — warn the user instead.
+Using the Phase 1 inventory, compile this report and present it to the user before making any changes:
+
+```
+GUARDRAIL GAP ANALYSIS
+======================
+Project type:    [single-package | monorepo]
+Package manager: [npm | pnpm | yarn]
+Mode:            [greenfield | retrofit]
+
+CONFIG FILES
+  PRESENT AND CORRECT:   [list files]
+  PRESENT BUT OUTDATED:  [list files with specific gap, e.g. "lefthook.yml (missing: secrets job)"]
+  MISSING:               [list files]
+
+PACKAGE.JSON SCRIPTS
+  PRESENT AND CORRECT:   [list scripts]
+  MISSING:               [list scripts]
+
+DEVDEPENDENCIES
+  ALREADY INSTALLED:     [list packages]
+  MISSING (to install):  [list packages]
+
+[Retrofit only:]
+EXISTING VIOLATIONS: [N lint violations, M @ts-ignore occurrences]
+STRATEGY: Wave mode — auto-fixable rules at error immediately, others at warn
+```
+
+**Then ask:** "Confirm this plan? Reply YES to proceed, or list any items to SKIP."
+
+Wait for user confirmation before proceeding to Phase 3. Record any exclusions.
+
+This single checkpoint replaces the scattered "ask user" prompts in the old workflow — **EXCEPT** still ask separately about:
+- **Tier assignments** (monorepo only): after YES, ask how to classify each detected package into tiers (see Phase 3, eslint.config.js section)
+- **Enum usage**: ask before writing tsconfig — "Does this project use TypeScript `enum` or `namespace` keywords?"
+
+---
+
+## Phase 3: Apply Changes
+
+**File treatment policy:**
+- **MISSING**: Create the file from the inline template in this skill.
+- **PRESENT BUT OUTDATED**: Merge the missing sections into the existing file. Do NOT overwrite content that is already correct. Do NOT overwrite unrelated custom content.
+- **PRESENT AND CORRECT**: Skip silently. No warning needed.
+
+**Merge instructions by file type:**
+
+**`lefthook.yml` — outdated (missing job):**
+Read the existing file. Append the missing job block inside `pre-commit.jobs`, immediately before the `commit-msg` section. Do not modify existing jobs or their order.
+
+**`eslint.config.js` — outdated (missing rule group):**
+Read the existing file. Locate the array passed to `tseslint.config(...)`. Find the `eslintConfigPrettier` entry — it MUST remain the last element (see `docs/known-conflicts.md`, "ESLint Config Prettier × ESLint Rules"). Insert the missing config object(s) immediately BEFORE `eslintConfigPrettier`. Do not modify existing config objects. If the file doesn't use `tseslint.config()`, skip the merge and warn the user that the format is non-standard.
+
+**`tsconfig.json` / `tsconfig.base.json` — outdated (missing flags):**
+Add the missing key-value pairs to `compilerOptions`. Do not remove or modify existing options.
+
+**`package.json` scripts — outdated (missing scripts):**
+Add the missing script entries. Do not overwrite scripts that already exist unless the user confirms.
+
+**`.gitignore` — outdated (missing entries):**
+Append the missing entries. Do not remove existing entries.
+
+---
+
+### 3a. Foundation Configs
+
+Create these files in the project root. Apply the file treatment policy (create if missing, skip if present).
 
 ### `.editorconfig`
 ```ini
@@ -218,7 +384,7 @@ coverage
 
 ---
 
-## Step 3: Write Pre-Commit Hook Config
+### 3b. Pre-Commit Hook Config
 
 ### `lefthook.yml`
 
@@ -290,7 +456,7 @@ commit-msg:
 
 ### `commitlint.config.ts`
 
-Generate the scope list from the actual packages detected in Step 1d:
+Generate the scope list from the actual packages detected in Phase 1d:
 
 ```typescript
 import type { UserConfig } from '@commitlint/types';
@@ -314,7 +480,7 @@ export default config;
 
 ---
 
-## Step 4: Write Linting & Type-Checking Configs
+### 3c. Linting & Type-Checking Configs
 
 ### `eslint.config.js`
 
@@ -393,7 +559,7 @@ export default tseslint.config(
 
 **For monorepo projects** (with architecture boundary enforcement):
 
-Generate the tier arrays from the actual packages detected in Step 1d. Ask the user to classify each package into a tier:
+Generate the tier arrays from the actual packages detected in Phase 1d. Ask the user to classify each package into a tier:
 
 - **Tier 0 (leaf):** No workspace dependencies (types, logger, constants)
 - **Tier 1:** Only depends on tier 0 (config, helpers, utilities)
@@ -409,7 +575,7 @@ import importX from 'eslint-plugin-import-x';
 import eslintConfigPrettier from 'eslint-config-prettier';
 
 // ── Replace with actual scope and packages ──
-const SCOPE = 'DETECTED_SCOPE';  // ← from Step 1c
+const SCOPE = 'DETECTED_SCOPE';  // ← from Phase 1c
 
 const tier0 = [/* actual tier 0 package names */];
 const tier1 = [/* actual tier 1 package names */];
@@ -607,17 +773,17 @@ For single-package projects, write a `tsconfig.json` instead (with `outDir` and 
 - `erasableSyntaxOnly` — errors on enums/namespaces/parameter properties, enabling native Node.js TS execution
 - `incremental` — caches type-check results for faster rebuilds
 
-If a `tsconfig.json` already exists, do NOT overwrite it. Only create `tsconfig.base.json` for monorepos if it doesn't exist.
+If a `tsconfig.json` already exists, apply the merge policy: add any missing flags to `compilerOptions`, do not overwrite existing options.
 
 ---
 
-## Step 5: Write Code Health Configs (Monorepo Only)
+### 3d. Code Health Configs (Monorepo Only)
 
-Skip this entire step for single-package projects.
+Skip this entire section for single-package projects.
 
 ### `knip.json`
 
-Generate workspace entries from the actual packages detected in Step 1d:
+Generate workspace entries from the actual packages detected in Phase 1d:
 
 ```json
 {
@@ -632,7 +798,7 @@ Generate workspace entries from the actual packages detected in Step 1d:
 
 ### `.syncpackrc.json`
 
-Use the detected org scope from Step 1c:
+Use the detected org scope from Phase 1c:
 
 ```json
 {
@@ -686,7 +852,7 @@ Replace `DETECTED_SCOPE` with the actual scope. For pnpm/yarn, change `"pinVersi
 
 ---
 
-## Step 6: Write Test Config
+### 3e. Test Config
 
 ### `vitest.config.ts`
 
@@ -714,7 +880,7 @@ include: ['packages/*/src/**/*.test.ts', 'apps/*/src/**/*.test.ts'],
 
 ---
 
-## Step 7: Write Helper Scripts (Monorepo Only)
+### 3f. Helper Scripts (Monorepo Only)
 
 Skip this step for single-package projects.
 
@@ -763,9 +929,9 @@ Make it executable: `chmod +x scripts/publint-all.sh`
 
 ---
 
-## Step 8: Update package.json
+### 3g. Update package.json
 
-### 8a. Add lint-staged config
+### 3g-i. Add lint-staged config
 
 ```json
 {
@@ -775,7 +941,7 @@ Make it executable: `chmod +x scripts/publint-all.sh`
 }
 ```
 
-### 8b. Add npm scripts
+### 3g-ii. Add npm scripts
 
 **Single package:**
 ```json
@@ -811,18 +977,20 @@ Make it executable: `chmod +x scripts/publint-all.sh`
 }
 ```
 
-Merge with existing scripts — do NOT overwrite scripts that already exist unless the user confirms.
+Apply the merge policy — add missing scripts, do NOT overwrite scripts that already exist unless the user confirms.
 
 ---
 
-## Step 9: Install devDependencies
+### 3h. Install Missing devDependencies
 
-### All projects:
+Install ONLY the packages identified as missing in Phase 1f. Do not reinstall packages that are already present.
+
+**All projects (install only what is missing from this list):**
 ```bash
 npm install -D lefthook prettier lint-staged eslint typescript vitest knip @commitlint/cli @commitlint/config-conventional typescript-eslint eslint-config-prettier eslint-plugin-import-x publint
 ```
 
-### Monorepo only — add these:
+**Monorepo only — add these if missing:**
 ```bash
 npm install -D eslint-plugin-boundaries syncpack turbo
 ```
@@ -833,17 +1001,17 @@ Adapt for detected package manager:
 
 ---
 
-## Step 10: Initialize Git Hooks
+### 3i. Initialize Git Hooks
 
 ```bash
 npx lefthook install
 ```
 
-This creates `.git/hooks/` symlinks that make pre-commit checks fire automatically.
+This creates `.git/hooks/` symlinks that make pre-commit checks fire automatically. This command is idempotent — safe to run even if hooks were already installed.
 
 ---
 
-## Step 11: Merge or Create `.gitignore`
+### 3j. Merge or Create `.gitignore`
 
 If `.gitignore` exists, append any missing entries. If it doesn't exist, create it:
 
@@ -859,9 +1027,9 @@ coverage/
 
 ---
 
-## Step 12: Verify Setup
+## Phase 4: Verify
 
-Run a verification commit:
+### 4a. Run verification commit
 
 ```bash
 git add -A
@@ -881,33 +1049,38 @@ git commit --allow-empty -m "chore: verify guardrail setup"
 
 If the commit fails, read the errors and fix them — **this is the self-correcting loop in action.**
 
----
+### 4b. Verification checklist
 
-## Verification Checklist
-
-- [ ] `lefthook.yml` exists with secrets job and `npx lefthook install` succeeded
-- [ ] `eslint.config.js` exists with import ordering, runtime safety rules, and correct config for project type
+- [ ] `lefthook.yml` exists with `name: secrets` job
+- [ ] For monorepo: `lefthook.yml` has `name: lint-deps` job
+- [ ] `npx lefthook install` succeeded (`.git/hooks/` entries created)
+- [ ] `eslint.config.js` exists with `import-x/named`, `import-x/default`, `no-non-null-assertion`, `TSAsExpression > TSAsExpression`
+- [ ] For monorepo: `eslint.config.js` imports `eslint-plugin-boundaries`
 - [ ] `.prettierrc` exists
 - [ ] `commitlint.config.ts` exists with actual package scopes
-- [ ] `vitest.config.ts` exists
-- [ ] `tsconfig` includes `isolatedModules`, `incremental`, and optionally `erasableSyntaxOnly`
+- [ ] `vitest.config.ts` exists with correct `include` pattern
+- [ ] `tsconfig` includes `"isolatedModules"`, `"verbatimModuleSyntax"`, `"incremental"` (and `"erasableSyntaxOnly"` if user confirmed no enums)
+- [ ] `.editorconfig` exists
+- [ ] `.nvmrc` exists
+- [ ] `package.json` has `lint:unused`, `prettier:check`, `prettier:fix`, `prepare` scripts
 - [ ] `git commit --allow-empty` passes without hook errors
 - [ ] Lockfile updated with new devDependencies (including `eslint-plugin-import-x`)
 - [ ] For monorepo: `tsconfig.base.json`, `knip.json`, `.syncpackrc.json`, `turbo.json` exist
 - [ ] For monorepo: `scripts/typecheck-staged.sh` exists and is executable
 - [ ] For retrofit: warning budget header present and honest; no rule at `error` with non-zero violations
 
-## User Confirmation Summary
+### 4c. Adoption summary
 
-During setup, you should have asked the user about:
-1. **Org scope** (Step 1c) — if not auto-detected in a monorepo
-2. **Greenfield or retrofit** (Step 1e) — determines rule severity strategy
-3. **Tier assignments** (Step 4) — how to classify packages for architecture enforcement
-4. **Enum usage** (Step 4, TypeScript config) — whether to enable `erasableSyntaxOnly`
-5. **Existing configs** — any file that already exists should be flagged, not silently overwritten
-6. **npm scripts** (Step 8) — existing scripts should be preserved unless user confirms overwrite
+After the verification commit succeeds, report:
 
-If you skipped any of these, go back and ask now.
+```
+SETUP COMPLETE
+==============
+Files created:    [N] new files
+Files updated:    [Y] existing files with merged sections
+Files unchanged:  [Z] already correct
+Deps installed:   [W] new packages
+```
 
 ---
 
