@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.0] - 2026-05-15
+
+### Added
+- **`enforce-code-discipline` skill** — companion skill to `setup-guardrails` that extends any TypeScript project with LLM discipline rules
+  - Complexity & size limits (`max-lines: 300`, `max-lines-per-function: 40`, `max-params: 4`, `max-depth: 4`, `max-classes-per-file: 1`, `no-magic-numbers`, `no-nested-ternary`)
+  - Code quality via `eslint-plugin-sonarjs` (cognitive complexity ≤15, duplicate string detection, identical function detection, collapsible-if, gratuitous expressions, redundant jumps, prefer-immediate-return)
+  - Naming conventions via `@typescript-eslint/naming-convention` (camelCase variables/functions, PascalCase types, UPPER_CASE constants, UPPER_CASE enum members)
+  - ESM idioms via `eslint-plugin-unicorn` (10 selective rules: filename-case, no-array-for-each, no-for-loop, explicit-length-check, no-useless-undefined, no-array-push-push, no-lonely-if, prefer-string-slice, no-process-exit, prefer-module)
+  - Documentation coverage via `eslint-plugin-jsdoc` (wave-gated: starts at `warn`, flip to `error` in Wave 4)
+  - Test coverage thresholds in Vitest (lines: 80%, branches: 75%, functions: 80%, statements: 80%)
+  - Greenfield and retrofit modes with full wave-sequencing guide (Wave 1: auto-fixable, Wave 2: complexity & structural, Wave 3: naming & literals, Wave 4: documentation)
+- Reference configs updated: `reference/single-package/eslint.config.js`, `reference/monorepo/eslint.config.js`, `reference/single-package/vitest.config.ts`
+- Three new `devDependencies` in reference `package.json` files: `eslint-plugin-unicorn`, `eslint-plugin-sonarjs`, `eslint-plugin-jsdoc`
+
+### Changed
+- `skills/setup-guardrails/SKILL.md`: added `enforce-code-discipline` to Related Skills
+- README skills table: added `enforce-code-discipline` row
+
 ## [2.1.0] - 2026-04-26
 
 ### Added

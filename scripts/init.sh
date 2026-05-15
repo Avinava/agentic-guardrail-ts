@@ -22,7 +22,7 @@ NC='\033[0m' # No Color
 banner() {
   echo ""
   echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════════╗${NC}"
-  echo -e "${CYAN}${BOLD}║        🛡️  agentic-guardrail-ts  v2.0.0                 ║${NC}"
+  echo -e "${CYAN}${BOLD}║        🛡️  agentic-guardrail-ts  v2.2.0                 ║${NC}"
   echo -e "${CYAN}${BOLD}║   Automated guardrails for AI-assisted TypeScript dev   ║${NC}"
   echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
   echo ""
