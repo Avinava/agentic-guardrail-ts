@@ -26,6 +26,37 @@ Install a self-correcting guardrail stack into a TypeScript project. After setup
 - It does NOT create agent instruction files (CLAUDE.md, GEMINI.md, etc.)
 - It does NOT copy template files — all configs are generated based on YOUR project
 
+---
+
+## Skill Selection Guide
+
+**This skill is always the starting point.** Run it once per project to install the toolchain. After setup, you have several optional skills to extend the stack:
+
+| Goal | Skill | When |
+|------|-------|------|
+| Install the full guardrail stack | **setup-guardrails** (this skill) | Any new or existing TypeScript project — run first |
+| Add LLM discipline rules (complexity, naming, coverage gates) | **enforce-code-discipline** | After `setup-guardrails` — essential for AI-heavy projects |
+| Deep-dive on architecture tier rules | **enforce-architecture** | When debugging boundary violations or onboarding to tier rules |
+| Handle a rejected commit | **self-correcting-loop** | When `git commit` fails after guardrails are installed |
+| Add a new workspace package | **adding-a-package** | In a monorepo, after the root stack is set up |
+
+**Typical setup sequence for an AI-assisted project:**
+
+```
+setup-guardrails          ← installs toolchain and pre-commit hooks (this skill)
+    └─ enforce-code-discipline   ← adds LLM-specific rules and coverage gates
+         └─ enforce-architecture  ← (monorepo only) deep-dives on tier boundaries
+```
+
+> **Not sure whether you need `enforce-code-discipline`?**
+> If human engineers are the primary authors, `setup-guardrails` alone is sufficient.
+> If LLMs frequently write or refactor code in this project, add `enforce-code-discipline` next —
+> it catches complexity creep, naming drift, and coverage regressions that type-checking alone misses.
+
+See [docs/tool-reference.md](../../docs/tool-reference.md) for a deep dive on each guardrail tool and why it was chosen over alternatives.
+
+---
+
 ## Prerequisites
 
 - Node.js 20+ installed
@@ -676,8 +707,10 @@ export default defineConfig({
 
 For monorepos, update the `include` pattern:
 ```typescript
-include: ['packages/*/src/**/*.test.ts'],
+include: ['packages/*/src/**/*.test.ts', 'apps/*/src/**/*.test.ts'],
 ```
+
+> **Coverage thresholds are intentionally omitted here.** They are set by the `enforce-code-discipline` skill, which baselines them against your current coverage in retrofit mode, or sets hard gates (80% lines/functions/statements, 75% branches) in greenfield mode. Run that skill after this one.
 
 ---
 
@@ -917,7 +950,23 @@ See [reference/retrofit-rollout.md](../../reference/retrofit-rollout.md) for a c
 
 ## Related Skills
 
-- **enforce-code-discipline** — Extend with LLM discipline rules: complexity limits, naming conventions, coverage thresholds
-- **enforce-architecture** — Understanding and working within the tiered dependency rules
-- **self-correcting-loop** — How to handle commit rejections efficiently
-- **adding-a-package** — Adding a new workspace package (monorepo)
+Pick the right skill for your situation:
+
+- **Setting up an AI-assisted project from scratch, or adding guardrails to an existing codebase?**
+  → You're in the right place. Complete this skill, then run `enforce-code-discipline`.
+
+- **LLMs frequently write or refactor code in this project?**
+  → After setup, run `enforce-code-discipline` to add complexity limits, naming conventions, and coverage gates.
+  These rules specifically target the patterns LLMs produce that type-checking alone misses.
+
+- **Monorepo with multiple packages and you need to control which can import which?**
+  → After setup, read `enforce-architecture` to understand and configure your tier boundary rules.
+  It explains rule intentions, common violations, and how to handle legitimate exceptions.
+
+- **`git commit` was rejected after guardrails were installed?**
+  → See `self-correcting-loop` — it walks through reading hook output, fixing the issue, and retrying
+  without fighting the tools.
+
+- **Adding a new workspace package to an existing monorepo?**
+  → See `adding-a-package` — it wires up the tsconfig, ESLint boundaries entry, and Turborepo task
+  for the new package without breaking the existing ones.
