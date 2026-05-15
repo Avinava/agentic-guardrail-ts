@@ -917,6 +917,7 @@ See [reference/retrofit-rollout.md](../../reference/retrofit-rollout.md) for a c
 
 ## Related Skills
 
+- **enforce-code-discipline** — Extend with LLM discipline rules: complexity limits, naming conventions, coverage thresholds
 - **enforce-architecture** — Understanding and working within the tiered dependency rules
 - **self-correcting-loop** — How to handle commit rejections efficiently
 - **adding-a-package** — Adding a new workspace package (monorepo)
