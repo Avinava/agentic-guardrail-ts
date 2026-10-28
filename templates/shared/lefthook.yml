@@ -1,0 +1,27 @@
+# lefthook.yml: git hooks. Every command goes through scripts/guardrails.mjs,
+# so hooks behave the same under npm, pnpm, yarn and bun.
+
+pre-commit:
+  piped: true
+  jobs:
+    - name: format
+      glob: '*.{js,mjs,cjs,jsx,ts,mts,cts,tsx,json,md,yml,yaml,css}'
+      run: node scripts/guardrails.mjs format --files {staged_files}
+      stage_fixed: true
+
+    - name: guardrails
+      glob: '*.{js,mjs,cjs,jsx,ts,mts,cts,tsx}'
+      run: node scripts/guardrails.mjs check --files {staged_files}
+
+    - name: secrets
+      run: gitleaks git --pre-commit --staged --redact --no-banner
+
+pre-push:
+  jobs:
+    - name: verify
+      run: node scripts/guardrails.mjs verify
+
+commit-msg:
+  jobs:
+    - name: commitlint
+      run: node scripts/guardrails.mjs exec commitlint --edit {1}

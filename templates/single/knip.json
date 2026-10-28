@@ -1,0 +1,13 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": ["src/index.ts"],
+  "project": ["src/**/*.{ts,tsx}"],
+  "ignoreExportsUsedInFile": true,
+  "ignoreDependencies": [
+    "@commitlint/cli",
+    "@typescript/native",
+    "oxlint",
+    "oxlint-tsgolint",
+    "vite"
+  ]
+}

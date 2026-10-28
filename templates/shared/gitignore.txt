@@ -1,0 +1,10 @@
+node_modules/
+dist/
+build/
+coverage/
+.turbo/
+.vitest/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example

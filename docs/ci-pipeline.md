@@ -1,118 +1,44 @@
-# CI Pipeline
+# CI pipeline
 
-GitHub Actions configuration for the final safety net.
+The template `.github/workflows/ci.yml` runs the same gate as `git push`, so a green push means a green PR. It has two jobs.
 
-## Why CI Matters
+## verify
 
-Pre-commit hooks are the first line of defense, but they can be bypassed with `git commit --no-verify`. CI is the **final gate** — it runs everything on every push and PR.
+1. Checkout with full history (`fetch-depth: 0`).
+2. Set up the package manager and Node from `.nvmrc`, with the lockfile cache.
+3. Install with the frozen lockfile.
+4. `node scripts/guardrails.mjs verify`: format check, typecheck, full guardrails check (including Knip), tests with coverage thresholds.
+5. `node scripts/guardrails.mjs check --strict-baseline`: fails if findings were fixed but `baseline --tighten` was not committed. This keeps the baseline honest.
+6. On pull requests, commitlint over the PR's commit range.
 
-## Configuration
+## secrets
 
-Create `.github/workflows/ci.yml`:
+Installs a pinned gitleaks release and scans the full git history with `--redact`. Pre-commit only sees staged changes; this catches anything that got past it.
 
-```yaml
-name: CI
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+## Package manager
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+The template is written for pnpm. For other managers:
 
-jobs:
-  ci:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'        # Change to 'pnpm' or 'yarn' if applicable
+| Manager | Change |
+| --- | --- |
+| npm | Remove `pnpm/action-setup`. `cache: npm`. `npm ci` |
+| Yarn 1 | Remove `pnpm/action-setup`. `cache: yarn`. `yarn install --frozen-lockfile` |
+| Yarn Berry | Remove `pnpm/action-setup`. Run `corepack enable` first. `cache: yarn`. `yarn install --immutable` |
+| Bun | Replace the pnpm step with `oven-sh/setup-bun` (pinned by SHA). Drop the `cache` line. `bun install --frozen-lockfile` |
 
-      - run: npm ci
+The skill makes these edits for you. See [Package managers](./package-managers.md).
 
-      # ── Static checks (no build required) ──
-      - run: npm run prettier:check
-      - run: npm run lint:unused
-      - run: npm run lint:deps
+## Security defaults
 
-      # ── Build (required for publint + downstream checks) ──
-      - run: npm run build
+- `permissions: contents: read`.
+- Actions pinned by commit SHA, with the version in a comment. Let Renovate or Dependabot update the pins.
+- `concurrency` cancels superseded runs on the same ref.
+- Timeouts on every job.
 
-      # ── Post-build checks ──
-      - run: npm run lint:packages       # publint (needs dist/)
-      - run: npm run lint                # ESLint + boundaries
-      - run: npm test                    # Full test suite
+## Make it required
 
-      # ── Security ──
-      - run: npm audit --audit-level=high
-```
+In the branch protection or ruleset for `main`, require both `verify` and `secrets`. Without that, CI is advice.
 
-## Ordering Matters
+## Monorepo caching
 
-1. **Static checks first** — Prettier, Knip, Syncpack don't need a build
-2. **Build** — Required for publint (validates `dist/` files)
-3. **Post-build checks** — ESLint boundaries, tests
-4. **Security** — npm audit last (doesn't block other checks)
-
-## Branch Protection
-
-Enable these GitHub settings on your `main` branch:
-
-1. **Settings → Branches → Add rule** for `main`
-2. ✅ Require status checks to pass before merging
-3. ✅ Require branches to be up to date before merging
-4. ✅ Require pull request reviews (optional but recommended)
-
-## Concurrency
-
-The `concurrency` block ensures only one CI run per branch. If you push again while CI is running, the old run is cancelled. This saves minutes on rapidly-iterated PRs.
-
-## For pnpm Users
-
-Replace the setup step:
-
-```yaml
-- uses: pnpm/action-setup@v4
-  with:
-    version: 9
-- uses: actions/setup-node@v4
-  with:
-    node-version-file: '.nvmrc'
-    cache: 'pnpm'
-- run: pnpm install --frozen-lockfile
-```
-
-## Automated Dependency Updates
-
-### Dependabot
-
-```yaml
-# .github/dependabot.yml
-version: 2
-updates:
-  - package-ecosystem: "npm"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
-```
-
-### Renovate
-
-```json
-// renovate.json
-{
-  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended"],
-  "packageRules": [
-    { "matchUpdateTypes": ["minor", "patch"], "automerge": true }
-  ]
-}
-```
-
-Both tools open PRs automatically. Your CI pipeline validates each update.
+`verify` calls the root scripts, and the monorepo `typecheck` runs through turbo. To share the turbo cache across runs, add turbo remote caching or cache `.turbo/` with `actions/cache`. Neither is in the template, so the default works with no secrets.

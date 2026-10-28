@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/syncpack/schema.json",
+  "versionGroups": [
+    {
+      "label": "Workspace packages depend on each other through the workspace protocol",
+      "dependencies": ["$LOCAL"],
+      "dependencyTypes": ["!local"],
+      "pinVersion": "workspace:*"
+    },
+    {
+      "label": "Every other dependency uses one version across the repo",
+      "dependencies": ["**"],
+      "packages": ["**"]
+    }
+  ]
+}

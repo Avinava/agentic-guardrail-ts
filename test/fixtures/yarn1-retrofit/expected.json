@@ -1,0 +1,31 @@
+{
+  "variant": "monorepo",
+  "packageManager": "yarn",
+  "retrofit": true,
+  "coverageFloor": 0,
+  "reinstallAfterViolations": true,
+  "tailor": [
+    {
+      "file": ".dependency-cruiser.mjs",
+      "from": "['packages/types'], // tier 0: no workspace dependencies\n  ['packages/core'], // tier 1: may import tier 0\n  ['apps/*'], // apps: may import any package, never another app",
+      "to": "['packages/shared'], // tier 0: no workspace dependencies\n  ['packages/server', 'packages/client'], // tier 1: may import tier 0"
+    },
+    {
+      "file": ".syncpackrc.json",
+      "from": "\"pinVersion\": \"workspace:*\"",
+      "to": "\"pinVersion\": \"*\""
+    }
+  ],
+  "violations": [
+    "depcruise:tier-1|packages/client/src/index.ts"
+  ],
+  "extraViolation": {
+    "file": "packages/client/src/extra.ts",
+    "content": "export function many(a: number, b: number, c: number, d: number, e: number): number {\n  return a + b + c + d + e;\n}\n"
+  },
+  "fix": [
+    "packages/client/src/index.ts",
+    "packages/client/package.json"
+  ],
+  "importedFile": "packages/shared/src/index.ts"
+}

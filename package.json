@@ -1,21 +1,22 @@
 {
   "name": "agentic-guardrail-ts",
-  "version": "2.2.0",
+  "version": "3.0.0",
   "type": "module",
-  "description": "Automated guardrails for AI-assisted TypeScript development. A self-correcting loop that catches architecture violations, dead code, type errors, and more — before AI-generated code reaches your main branch.",
+  "description": "Tool-enforced guardrails for coding agents in TypeScript projects: agent skills and a Claude Code plugin that install Oxlint, TypeScript 7, dependency-cruiser, Knip, Vitest coverage floors, lefthook, a ratchet baseline and agent hooks.",
   "keywords": [
     "ai",
+    "agents",
     "guardrails",
     "typescript",
-    "eslint",
-    "prettier",
+    "oxlint",
+    "dependency-cruiser",
+    "knip",
+    "lefthook",
     "monorepo",
     "code-quality",
-    "ai-coding",
-    "claude",
-    "copilot",
-    "cursor",
-    "gemini",
+    "claude-code",
+    "codex",
+    "agent-skills",
     "pre-commit",
     "static-analysis"
   ],
@@ -28,5 +29,15 @@
   "bugs": {
     "url": "https://github.com/Avinava/agentic-guardrail-ts/issues"
   },
-  "homepage": "https://github.com/Avinava/agentic-guardrail-ts#readme"
+  "homepage": "https://github.com/Avinava/agentic-guardrail-ts#readme",
+  "private": true,
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "render": "node scripts/render.mjs",
+    "render:check": "node scripts/render.mjs --check",
+    "docs:check": "node scripts/docs-check.mjs",
+    "test:fixtures": "node scripts/fixture-test.mjs"
+  }
 }

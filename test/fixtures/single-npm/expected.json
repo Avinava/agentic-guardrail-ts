@@ -1,0 +1,20 @@
+{
+  "variant": "single",
+  "packageManager": "npm",
+  "violations": [
+    "depcruise:layer-domain|src/domain/pricing.ts",
+    "oxlint:eslint(max-params)|src/domain/pricing.ts",
+    "oxlint:typescript(no-floating-promises)|src/domain/pricing.ts",
+    "guardrails:disable-needs-rule-and-reason|src/domain/pricing.ts",
+    "knip:files|src/infrastructure/unused.ts"
+  ],
+  "extraViolation": {
+    "file": "src/domain/extra.ts",
+    "content": "export function many(a: number, b: number, c: number, d: number, e: number): number {\n  return a + b + c + d + e;\n}\n"
+  },
+  "fix": [
+    "src/infrastructure/unused.ts"
+  ],
+  "coverageFloor": 0,
+  "importedFile": "src/domain/order.ts"
+}

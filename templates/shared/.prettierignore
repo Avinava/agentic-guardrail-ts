@@ -1,0 +1,12 @@
+dist
+build
+coverage
+node_modules
+.turbo
+.vitest
+*.min.js
+*.min.css
+pnpm-lock.yaml
+guardrails.baseline.json
+.dependency-cruiser-known-violations.json
+# Add generated or column-aligned files below (see docs/known-conflicts.md)

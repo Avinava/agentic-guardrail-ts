@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "agentic-guardrail-ts",
+  "description": "Guardrail skills for coding agents in TypeScript projects.",
+  "owner": {
+    "name": "Avinava",
+    "url": "https://github.com/Avinava"
+  },
+  "plugins": [
+    {
+      "name": "agentic-guardrail-ts",
+      "source": "./",
+      "description": "Set up, audit and work within tool-enforced guardrails for coding agents in TypeScript repos.",
+      "category": "development",
+      "tags": ["typescript", "lint", "hooks", "quality"]
+    }
+  ]
+}

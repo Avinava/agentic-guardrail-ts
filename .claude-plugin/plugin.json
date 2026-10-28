@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "agentic-guardrail-ts",
+  "displayName": "Agentic Guardrails (TypeScript)",
+  "version": "3.0.0",
+  "description": "Tool-enforced guardrails for coding agents in TypeScript repos: Oxlint, TypeScript 7, dependency-cruiser, Knip, Vitest coverage floors, lefthook, a ratchet baseline, and agent hooks that lint every edit.",
+  "author": {
+    "name": "Avinava",
+    "url": "https://github.com/Avinava"
+  },
+  "homepage": "https://github.com/Avinava/agentic-guardrail-ts#readme",
+  "repository": "https://github.com/Avinava/agentic-guardrail-ts",
+  "license": "MIT",
+  "keywords": ["typescript", "guardrails", "oxlint", "lint", "hooks", "monorepo", "code-quality"]
+}

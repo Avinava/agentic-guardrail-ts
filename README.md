@@ -9,164 +9,122 @@
 </p>
 
 <p align="center">
-  <strong>Automated guardrails for AI-assisted TypeScript development.</strong>
+  <strong>Tool-enforced guardrails for AI coding agents in TypeScript projects.</strong>
 </p>
 
-A set of agent-readable skills and pre-configured tools that enforce code quality, architecture boundaries, and dependency hygiene — via a self-correcting feedback loop that runs on every `git commit`.
+Agent skills that set up a lint, architecture, dead-code, test and secret gate in your TypeScript project, then wire that gate into the agent's own edit loop, your git hooks and CI.
 
-> AI coding agents are fast but imprecise. They generate code that compiles but violates your architecture, leaks `any` through the type system, leaves dead exports behind, and forgets to `await` promises. This repo gives your agent **skills** to set up guardrail tools and **use them** to catch and fix its own mistakes in seconds.
+## Why
 
----
+Coding agents are fast and confident. They also leak `any`, forget to `await`, import across layers, and leave dead exports behind. Instructions in a prompt file help, but they are suggestions. A rule only holds when a tool checks it and refuses the change.
 
-## How It Works
+This repo gives your agent the skills to install those tools in your project and to respond correctly when one of them says no.
 
-```
-Agent generates code
-    ↓
-git commit → Lefthook runs checks in parallel (~3s)
-    ↓
-┌─ Prettier ────── auto-fixes formatting               ✓
-├─ Knip ────────── detects unused export                ✗
-├─ ESLint ──────── catches import from wrong tier       ✗
-├─ TypeScript ──── finds type error                     ✗
-├─ Vitest ──────── runs related tests                   ✓
-└─ Commitlint ──── validates commit message             ✓
-    ↓
-Commit REJECTED — agent reads errors, fixes, retries
-    ↓
-All checks pass → PR → CI runs full pipeline → merge ✓
+## Install
+
+**Any agent: paste this into the chat.** It works in Claude Code, Codex, Gemini CLI, Cursor and any agent that can run shell commands.
+
+```text
+Set up guardrails in this project. Run `npx skills add Avinava/agentic-guardrail-ts -y`,
+then read .agents/skills/setup-guardrails/SKILL.md in full and follow it.
 ```
 
-**The key insight:** AI agents respect git hooks. When a commit fails, the agent sees the error output, fixes the issues, and retries automatically. No human intervention needed.
+**Claude Code plugin** (skills available in every project):
 
----
-
-## Installation
-
-### Tell your AI agent
-
-**Claude Code / Cursor / Copilot / Codex / Gemini:**
-
-> Fetch and follow the instructions from
-> `https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/skills/setup-guardrails/SKILL.md`
-> to set up TypeScript guardrails in this project.
-
-That's it. The agent reads the skill, detects your project type, generates all configs, installs dependencies, and sets up git hooks.
-
-### Manual (non-agentic)
-
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/scripts/init.sh)
+```text
+/plugin marketplace add Avinava/agentic-guardrail-ts
+/plugin install agentic-guardrail-ts@agentic-guardrail-ts
 ```
 
-See [docs/getting-started.md](docs/getting-started.md) for step-by-step instructions.
+Then ask "set up guardrails". Either way the agent audits the project, shows a gap report, waits for your go-ahead, applies the changes and verifies them. See [Getting started](docs/getting-started.md) for the other install options.
 
----
+## What gets installed
+
+| Tool | Config | What it enforces |
+| --- | --- | --- |
+| Oxlint + oxlint-tsgolint | `.oxlintrc.json` | Type-aware lint: `no-explicit-any`, `no-floating-promises`, `no-unsafe-*`, size and complexity limits |
+| TypeScript 7 (`tsc`) | `tsconfig.json` | Strict typecheck. `typescript` is aliased to TS 6 for tools that need its API |
+| dependency-cruiser | `.dependency-cruiser.mjs` | Layers (single package) or tiers (monorepo), cycles, phantom deps |
+| Knip 6 | `knip.json` | Unused files, exports and dependencies |
+| Vitest 5 | `vitest.config.ts` | Tests and coverage floors that only go up |
+| Prettier 3.9 | `.prettierrc.json` | Formatting |
+| lefthook 2 | `lefthook.yml` | Git hooks: format, check, gitleaks, commitlint, `verify` |
+| gitleaks | (binary) | Secrets in staged changes and history |
+| commitlint | `commitlint.config.mjs` | Conventional commit messages |
+| turbo 2, syncpack 15 | `turbo.json`, `.syncpackrc.json` | Monorepo only: task graph and one version per dependency |
+| `scripts/guardrails.mjs` | `guardrails.baseline.json` | One entry point for the gate, the ratchet and agent hooks |
+| Agent files | `AGENTS.md`, `CLAUDE.md`, `.claude/settings.json`, `.codex/hooks.json` | Agent rules and edit/stop hooks |
+| CI | `.github/workflows/ci.yml` | The same gate as `git push`, plus a full-history secret scan |
+
+Full details: [Tool reference](docs/tool-reference.md).
+
+## How the loop works
+
+```text
+agent edits a file
+  -> post-edit hook: Oxlint + disable check on that file      (seconds, report goes back to the agent)
+agent says it is done
+  -> stop hook: typecheck, check on changed files, related tests  (blocks "done" until clean)
+git commit
+  -> lefthook: Prettier, check on staged files, gitleaks, commitlint
+git push / CI
+  -> verify: format check, typecheck, full check, tests with coverage
+     (CI also requires a tight baseline and scans history for secrets)
+```
+
+Each layer catches what the one before missed. The agent sees the rule ID and file in every rejection and fixes the code. See [Agent loop](docs/agent-loop.md).
+
+## The ratchet
+
+Every rule is an error. There are no warn-only rules and no `--max-warnings`.
+
+On an existing codebase, `node scripts/guardrails.mjs baseline --init` records today's findings in `guardrails.baseline.json`, counted per tool, rule and file (`oxlint:eslint(max-params)|src/billing/invoice.ts`). The gate then fails only when a count goes up. When you fix old findings, `baseline --tighten` locks the improvement in and raises Vitest coverage thresholds to what was measured. CI fails if the baseline is looser than the code.
+
+Agents may not edit the baseline, run `--init` or `--reset`, or bypass hooks. See [Retrofit](docs/retrofit.md).
 
 ## Skills
 
-This repo provides **agent-readable skills** — structured instruction files that AI agents read and execute step-by-step.
+Each skill lives in `skills/<name>/SKILL.md`.
 
-| Skill | When to Use |
-|-------|------------|
-| [**setup-guardrails**](skills/setup-guardrails/SKILL.md) | Setting up a new TS project or adding guardrails to an existing one (supports greenfield + retrofit mode) |
-| [**enforce-code-discipline**](skills/enforce-code-discipline/SKILL.md) | After setup-guardrails — add LLM discipline rules: complexity limits, naming conventions, coverage thresholds |
-| [**enforce-architecture**](skills/enforce-architecture/SKILL.md) | Adding imports, creating packages, reviewing code for tier violations, and managing escape hatches |
-| [**self-correcting-loop**](skills/self-correcting-loop/SKILL.md) | Every commit — how to read errors, fix all in one pass, retry |
-| [**adding-a-package**](skills/adding-a-package/SKILL.md) | Creating a new workspace package (monorepo) |
+| Skill | Use it when |
+| --- | --- |
+| `setup-guardrails` | Adding guardrails to a new or existing project. Audit first, then apply, then verify |
+| `guardrails-loop` | Installing `AGENTS.md` and agent hooks, and responding to a rejection |
+| `enforce-architecture` | Adding imports, reviewing tier or layer violations, changing the tier map |
+| `adding-a-package` | Creating a workspace package in a monorepo |
+| `guardrails-doctor` | Checking a project for drift from the templates and planning upgrades |
 
-### Using a skill
+## Requirements
 
-Point your agent at the raw URL:
+- Node 22.12 or newer (templates pin Node 24 in `.nvmrc`)
+- A git repository
+- npm, pnpm, Yarn (1 or Berry with `node_modules`) or Bun. See [Package managers](docs/package-managers.md)
+- gitleaks installed on your machine (the npm package of that name is not official)
 
-```
-Fetch and follow: https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/skills/<skill-name>/SKILL.md
-```
+## Docs
 
-The agent reads the instructions and executes them in your project.
+| Guide | What it covers |
+| --- | --- |
+| [Getting started](docs/getting-started.md) | Install, first run, daily commands |
+| [Tool reference](docs/tool-reference.md) | Every tool, its config and when it runs |
+| [Agent loop](docs/agent-loop.md) | Hooks, rejections and how agents should respond |
+| [Retrofit](docs/retrofit.md) | Adopting the gate on an existing codebase |
+| [Migrating from v2](docs/migrating-from-v2.md) | Moving off ESLint, husky and lint-staged |
+| [Monorepo setup](docs/monorepo-setup.md) | Workspaces, turbo, the `source` condition |
+| [Architecture tiers](docs/architecture-tiers.md) | Designing layers and tiers |
+| [CI pipeline](docs/ci-pipeline.md) | The GitHub Actions workflow |
+| [Package managers](docs/package-managers.md) | npm, pnpm (with catalogs), Yarn, Bun |
+| [Known conflicts](docs/known-conflicts.md) | Tool interactions to know about |
+| [Troubleshooting](docs/troubleshooting.md) | Common failures and fixes |
+| [Engine decision](docs/decisions/0001-engine.md) | Why Oxlint, TS 7 and dependency-cruiser |
 
----
+## How this repo is tested
 
-## What's Included
-
-| # | Tool | What It Catches | Layer |
-|---|------|----------------|-------|
-| 1 | **Lefthook** | Orchestrates all checks in parallel | Pre-commit |
-| 2 | **Prettier + lint-staged** | Formatting inconsistencies | Pre-commit |
-| 3 | **ESLint + TypeScript strict** | `any` leaks, floating promises, unused vars, type lies | Pre-commit + CI |
-| 4 | **ESLint Import Ordering** | Inconsistent import order | Pre-commit + CI |
-| 5 | **ESLint Import Correctness** | Stale default/named imports (ESM runtime crashes) | Pre-commit + CI |
-| 6 | **ESLint Boundaries** | Architecture violations (monorepo only) | Pre-commit + CI |
-| 7 | **Gitleaks** | Hardcoded secrets, API keys, tokens | Pre-commit |
-| 8 | **Knip** | Unused files, exports, dependencies | Pre-commit + CI |
-| 9 | **Syncpack** | Version mismatches across packages (monorepo) | Pre-commit + CI |
-| 10 | **Publint** | Broken `package.json` exports | CI only |
-| 11 | **Commitlint** | Non-conventional commit messages | Pre-commit |
-| 12 | **Vitest** | Regressions in changed code | Pre-commit + CI |
-| 13 | **Turborepo** | Slow rebuilds (cached parallel builds, monorepo) | Build time |
-| 14 | **docs-check** | Stale path references in documentation | CI |
-
----
-
-## Project Structure
-
-```
-agentic-guardrail-ts/
-├── skills/                          ← Agent-readable instruction files (THE PRODUCT)
-│   ├── setup-guardrails/SKILL.md    ← Main installation skill
-│   ├── enforce-architecture/SKILL.md
-│   ├── self-correcting-loop/SKILL.md
-│   └── adding-a-package/SKILL.md
-├── reference/                       ← Complete working examples (for browsing)
-│   ├── single-package/              ← All configs for a single TS package
-│   ├── monorepo/                    ← All configs for a TS monorepo
-│   ├── ci/ci.yml                    ← GitHub Actions template
-│   ├── retrofit-rollout.md          ← Wave-by-wave adoption guide
-│   └── tech-debt.md                 ← Tech-debt ledger template
-├── scripts/
-│   ├── init.sh                      ← Manual (non-agentic) setup
-│   ├── docs-check.mjs               ← Stale path reference detector
-│   ├── typecheck-staged.sh
-│   └── publint-all.sh
-└── docs/                            ← Deep-dive documentation
-```
-
----
-
-## Documentation
-
-| Guide | Description |
-|-------|-------------|
-| [**Getting Started**](docs/getting-started.md) | Quick start for single-package projects |
-| [**Monorepo Setup**](docs/monorepo-setup.md) | Full monorepo with workspaces |
-| [**Tool Reference**](docs/tool-reference.md) | Deep dive on all tools |
-| [**Architecture Tiers**](docs/architecture-tiers.md) | How to design your dependency hierarchy |
-| [**Self-Correcting Loop**](docs/self-correcting-loop.md) | How AI agents auto-fix their mistakes |
-| [**CI Pipeline**](docs/ci-pipeline.md) | GitHub Actions configuration |
-| [**Troubleshooting**](docs/troubleshooting.md) | Common issues and fixes |
-| [**Known Conflicts**](docs/known-conflicts.md) | Cross-tool interaction issues and resolutions |
-| [**Adapting for pnpm/yarn**](docs/adapting-for-pnpm.md) | Package manager differences |
-| [**Retrofit Rollout**](reference/retrofit-rollout.md) | Wave-by-wave adoption guide for existing codebases |
-
----
-
-## Philosophy
-
-- **Agent-first.** Skills are the primary interface — the agent reads instructions and implements them in your project.
-- **Generate, don't copy.** Skills analyze your project and generate configs with real values — no placeholder templates.
-- **Self-correcting > blocking.** The goal isn't to prevent mistakes — it's to catch and fix them in 3 seconds.
-- **Two enforcement layers.** Pre-commit hooks (fast, staged files) + CI (full, safety net) + doc currency (stale reference detection).
-- **Convention > configuration.** Opinionated defaults that work out of the box.
-- **Compose, never replace.** Framework tools must compose with existing project lifecycle hooks — never silently overwrite `postbuild`, `prepare`, or platform-specific hooks.
-- **Gates require exit-0 baselines.** A rule becomes a blocking gate only when the codebase has zero violations. Brownfield adoption uses wave sequencing, not `--max-warnings`.
-
----
+`templates/` is the single source for every config. `scripts/fixture-test.mjs` applies the templates to fixture projects in `test/fixtures/` (a single npm package, a pnpm monorepo, a Yarn 1 retrofit), installs them, and proves the gate passes clean code, catches seeded violations, ratchets, and drives the agent hooks and git hooks. This repo's CI runs the fixtures on every change.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
----
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the [changelog](CHANGELOG.md).
 
 ## License
 
