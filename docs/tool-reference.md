@@ -1,226 +1,113 @@
-# Tool Reference
-
-Deep dive on each of the 13 guardrail tools: what they do, why they matter for AI agents, and how to configure them.
-
----
-
-## Summary Table
-
-| # | Tool | What It Catches | Layer | Speed |
-|---|------|----------------|-------|-------|
-| 1 | **Lefthook** | Orchestrates all tools | Pre-commit | ~3s parallel |
-| 2 | **Prettier** | Formatting inconsistencies | Pre-commit | Instant (auto-fix) |
-| 3 | **ESLint + Boundaries** | Architecture violations, `any` leaks, floating promises | Pre-commit + CI | ~2s |
-| 4 | **TypeScript** | Type errors | Pre-commit + CI | ~3s (targeted) |
-| 5 | **Knip** | Unused code, files, deps | Pre-commit + CI | ~2s |
-| 6 | **Syncpack** | Version mismatches | Pre-commit + CI | ~1s |
-| 7 | **Publint** | Broken package exports | CI only | ~1s |
-| 8 | **Commitlint** | Bad commit messages | Pre-commit | Instant |
-| 9 | **Vitest** | Regressions in changed code | Pre-commit + CI | ~2s (related) |
-| 10 | **Turborepo** | Slow rebuilds | Build time | ~29ms cached |
-| 11 | **Import Ordering** | Inconsistent imports | Pre-commit | ~1s |
-| 12 | **Security Scanning** | Vulnerable dependencies | CI only | ~3s |
-| 13 | **Agent Instructions** | Agent lacks project context | Agent startup | N/A |
-
----
-
-## 1. Lefthook — Hook Orchestrator
-
-**What:** Runs all validation tools in parallel before every commit. If any tool fails, the commit is rejected.
-
-**Why for AI agents:** AI agents respect git hooks. Failed commits trigger self-correction.
-
-**Key concepts:**
-- `parallel: true` — All jobs run concurrently. Total time ≈ slowest job (~3s)
-- `glob` — Job only runs if staged files match the pattern
-- `{staged_files}` — Placeholder that expands to staged file list
-
-**Why over Husky:** Lefthook is a Go binary with native parallel execution. Husky runs hooks sequentially via shell scripts. With 6+ parallel jobs, the difference is meaningful.
-
-**Config:** See [reference/monorepo/lefthook.yml](../reference/monorepo/lefthook.yml) or [reference/single-package/lefthook.yml](../reference/single-package/lefthook.yml)
-
----
-
-## 2. Prettier + lint-staged — Formatting
-
-**What:** Enforces consistent formatting. Runs via lint-staged to only format staged files.
-
-**Why for AI agents:** AI models generate inconsistent formatting — different indentation, quote styles, trailing commas. Prettier normalizes everything.
-
-**Interaction with ESLint:** Install `eslint-config-prettier` to disable ESLint formatting rules. Prettier is the sole formatter.
-
-**Config:** See [reference/single-package/.prettierrc](../reference/single-package/.prettierrc)
-
----
-
-## 3. ESLint + Boundaries — Architecture Enforcement
-
-**What:** Prevents packages from importing across architectural boundaries using a tiered dependency hierarchy. Also enforces TypeScript strict rules.
-
-**Why for AI agents:** This is the **single most impactful guardrail**. AI agents have no understanding of your architecture. The boundaries plugin stops illegal imports with a clear error message.
-
-**TypeScript rules included (via `strictTypeChecked`):**
-
-| Rule | What It Catches |
-|------|----------------|
-| `no-floating-promises` | Forgetting to `await` a promise |
-| `no-misused-promises` | Passing async where sync expected |
-| `no-unsafe-assignment` | Assigning `any` to typed variable |
-| `no-explicit-any` | Using `any` instead of proper types |
-| `no-non-null-assertion` | Using `!` to lie about nullability |
-| `consistent-type-assertions` | Object literal type shortcuts (`{} as Foo`) |
-
-**Import correctness rules (via `import-x`):**
-
-| Rule | What It Catches |
-|------|----------------|
-| `import-x/default` | Importing a default that doesn't exist — ESM rejects at runtime with `SyntaxError` |
-| `import-x/named` | Importing a named export that doesn't exist — same runtime crash |
-| `import-x/order` | Inconsistent import ordering |
-| `import-x/no-duplicates` | Duplicate import statements for the same module |
-
-**Custom anti-pattern rules:**
-
-| Rule | What It Catches |
-|------|----------------|
-| `no-restricted-syntax` (double-cast) | `as unknown as T` — bypasses the compiler entirely. If you need this, add an eslint-disable with a paper trail |
-
-**Config:** See [reference/monorepo/eslint.config.js](../reference/monorepo/eslint.config.js) (monorepo) or [reference/single-package/eslint.config.js](../reference/single-package/eslint.config.js) (single)
-**Guide:** See [Architecture Tiers](./architecture-tiers.md)
-
----
-
-## 4. TypeScript Strict Mode
-
-**What:** `tsc --noEmit` checks types without producing output. Pre-commit only typechecks packages with staged changes.
-
-**Why for AI agents:** AI agents generate code with subtle type errors — wrong generics, missing properties, incompatible returns.
-
-**Complements Knip:**
-
-| Tool | Catches |
-|------|---------|
-| TypeScript | Unused *local* variables and parameters |
-| Knip | Unused *exports*, *files*, and *dependencies* |
-
-**Config:** See [reference/monorepo/tsconfig.base.json](../reference/monorepo/tsconfig.base.json)
-**Script:** See [scripts/typecheck-staged.sh](../scripts/typecheck-staged.sh)
-
----
-
-## 5. Knip — Dead Code Detection
-
-**What:** Finds unused files, exports, dependencies, and unlisted dependencies across the entire project.
-
-**Why for AI agents:** When AI agents refactor, they leave behind unused exports, unreferenced files, and orphan dependencies.
-
-**Key options:**
-- `ignoreDependencies` — Runtime-only deps not statically importable
-- `ignoreExportsUsedInFile` — Don't flag exports used within their own file
-- `exclude: ["enumMembers"]` — Don't flag individual enum values
-
-**Config:** See [reference/monorepo/knip.json](../reference/monorepo/knip.json)
-
----
-
-## 6. Syncpack — Dependency Version Consistency
-
-**What:** Ensures all packages use the same version of shared dependencies.
-
-**Why for AI agents:** Agents might use `^5.0.0` in one package and `^5.1.2` in another.
-
-**Package manager adaption:**
-- npm: `"pinVersion": "*"`
-- pnpm/yarn: `"pinVersion": "workspace:*"`
-
-**Config:** See [reference/monorepo/.syncpackrc.json](../reference/monorepo/.syncpackrc.json)
-
----
-
-## 7. Publint — Package Export Validation
-
-**What:** Validates that `exports`, `main`, and `types` fields point to files that actually exist.
-
-**Why for AI agents:** Agents frequently modify exports or move files without updating the export map.
-
-**CI only** — requires `dist/` from a build first.
-
-**Script:** See [scripts/publint-all.sh](../scripts/publint-all.sh)
-
----
-
-## 8. Commitlint — Commit Message Standards
-
-**What:** Validates commit messages follow Conventional Commits format.
-
-**Why for AI agents:** Without enforcement, agents produce inconsistent formats.
-
-**Format:** `type(scope): description`
-- Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`
-- Scopes: Your package names + `deps`, `ci`, `release`
-
-**Config:** See [reference/single-package/commitlint.config.ts](../reference/single-package/commitlint.config.ts)
-
----
-
-## 9. Vitest — Related Test Execution
-
-**What:** Runs only tests that import changed files, not the full suite.
-
-**Why for AI agents:** Fast feedback — seconds, not minutes.
-
-**Coverage ratcheting:** `autoUpdate: true` means thresholds only go UP, never down.
-
-**Config:** See [reference/single-package/vitest.config.ts](../reference/single-package/vitest.config.ts)
-
----
-
-## 10. Turborepo — Cached Parallel Builds
-
-**What:** Builds all packages in dependency order with caching. Second build: ~29ms vs ~14s cold.
-
-**Why for AI agents:** Agents run `npm run build` frequently. Caching keeps feedback tight.
-
-**Monorepo only.** Not needed for single-package projects.
-
-**Config:** See [reference/monorepo/turbo.json](../reference/monorepo/turbo.json)
-
----
-
-## 11. Import Ordering
-
-**What:** Enforces consistent import order: builtins → external → internal → relative.
-
-**Options:**
-- **ESLint plugin** (`eslint-plugin-import-x`) — recommended
-- **Prettier plugin** (`@trivago/prettier-plugin-sort-imports`) — alternative
-
-Pick one, not both.
-
----
-
-## 12. Security Scanning
-
-**What:** `npm audit --audit-level=high` in CI catches known vulnerabilities.
-
-**Automated updates:** Use Dependabot or Renovate for automatic dependency update PRs.
-
----
-
-## ~~13. Agent Instructions~~
-
-**Removed.** Agent instruction files (CLAUDE.md, GEMINI.md, etc.) are no longer part of the guardrail stack. They were causing agents to pollute target repos with generic templates. Instead, create project-specific agent instructions manually if needed.
-
-
-## DevDependencies Reference
-
-All tools in one install command:
-
-```bash
-npm install -D \
-  prettier lint-staged lefthook \
-  @commitlint/cli @commitlint/config-conventional \
-  eslint typescript-eslint eslint-plugin-boundaries eslint-config-prettier \
-  knip syncpack publint \
-  vitest turbo typescript
+# Tool reference
+
+What each tool does, where it is configured, and when it runs. Why these tools: [decision 0001](./decisions/0001-engine.md).
+
+| Tool | Post-edit hook | Stop hook | Pre-commit | Pre-push / CI |
+| --- | --- | --- | --- | --- |
+| Oxlint (type-aware) | edited file | changed files | staged files | all |
+| Disable check | edited file | changed files | staged files | all |
+| dependency-cruiser | | changed files | staged files | all |
+| Knip | | | | all |
+| `tsc` | | yes | | yes |
+| Vitest | | related tests | | with coverage |
+| Prettier | | | write staged | check all |
+| gitleaks | | | staged | full history (CI) |
+| commitlint | | | message | PR range (CI) |
+| syncpack (monorepo) | | | | via `lint` script |
+
+## guardrails.mjs
+
+`scripts/guardrails.mjs` is the one entry point. Hooks, package scripts and CI all call it, so behavior is the same under every package manager.
+
+```text
+check [--changed | --files a.ts b.ts] [--strict-baseline]
+baseline (--init | --tighten | --reset)
+verify
+format --files a.ts b.ts
+exec <bin> [args...]
+hook (post-edit | stop)        reads the hook JSON on stdin
 ```
+
+- `check` collects findings from Oxlint, dependency-cruiser, Knip (full runs only) and the disable check. Each finding has a key `tool:rule|file`. It fails if any key's count is above the baseline.
+- `--strict-baseline` also fails when the baseline is looser than the code (CI uses this). It needs a full check, so it refuses `--changed` and `--files`.
+- `verify` runs the `format:check`, `typecheck`, `lint` and `test:coverage` scripts in order, skipping any that are not defined.
+- `exec` runs a binary from `node_modules/.bin` (used for commitlint).
+- Source directories default to `src`, `packages`, `apps` and `libs`. Override with `"guardrails": { "src": [...] }` in `package.json`.
+
+## Oxlint
+
+Config: `.oxlintrc.json`. Runs with `--type-aware` (via `oxlint-tsgolint`) and `--report-unused-disable-directives`.
+
+- Categories `correctness` and `suspicious` are errors.
+- Type safety: `no-explicit-any`, `no-non-null-assertion`, `consistent-type-assertions` (no `{} as Foo`), `no-unsafe-*`, `restrict-template-expressions`, `ban-ts-comment` (`@ts-expect-error` needs a 10+ character reason).
+- Promises: `no-floating-promises`, `no-misused-promises`, `await-thenable`.
+- Discipline: `max-lines` 400, `max-lines-per-function` 60, `max-params` 4, `max-depth` 3, `complexity` 12, `max-nested-callbacks` 3, `no-console`.
+- Style that matters: `eqeqeq`, `no-param-reassign`, `unicorn/filename-case` (kebab), `prefer-node-protocol`, `import/no-duplicates`.
+- Tests: `vitest/no-focused-tests`, `vitest/expect-expect`.
+- Overrides: tests drop the size limits, `no-explicit-any`, `no-non-null-assertion` and four `no-unsafe-*` rules; plain JS drops `no-unsafe-*`; scripts and config files drop the size limits, `complexity` and `no-console`.
+
+`max-params` is set to `off` when a decorator-based DI container is detected (NestJS, InversifyJS, tsyringe, Angular), because Oxlint counts constructor parameters with no exemption. See [Retrofit](./retrofit.md#di-constructors-and-max-params).
+
+Not in Oxlint, and not in the defaults: `naming-convention`, `import/order`, `no-restricted-syntax`, sonarjs. sonarjs can be enabled through Oxlint's alpha JS plugins with the TS 6 alias.
+
+## TypeScript
+
+- `@typescript/native` is `npm:typescript@^7`. Its `tsc` binary is what `typecheck` runs.
+- `typescript` is `npm:@typescript/typescript6@^6`. Its binary is `tsc6`, so it does not shadow `tsc`. It exists because tools that call the TypeScript API (dependency-cruiser, Knip, JS lint plugins) cannot load TS 7, which has no API.
+- Strict flags: `strict`, `noUncheckedIndexedAccess`, `noImplicitOverride`, `noPropertyAccessFromIndexSignature`, `verbatimModuleSyntax`, `isolatedModules`, `erasableSyntaxOnly`. Module is `nodenext`, target `es2024`.
+- If the project uses `enum` or `namespace`, the skill leaves out `erasableSyntaxOnly`.
+
+## dependency-cruiser
+
+Config: `.dependency-cruiser.mjs` (plain JS, so rules are generated from a list).
+
+- Single package: `LAYERS`, lowest first. A layer may import layers below it. Also `no-circular`, `not-to-unresolvable`, `not-to-dev-dep`, `no-non-package-json`, `not-to-test`.
+- Monorepo: `TIERS`, lowest first. A package may import lower tiers only, never its own tier or higher. Also `no-circular`, `not-to-unresolvable`, `no-relative-cross-package`, `no-non-package-json`.
+
+See [Architecture tiers](./architecture-tiers.md).
+
+## Knip
+
+Config: `knip.json`. Finds unused files, exports and dependencies. Runs only on full checks (pre-push and CI), because it needs the whole graph. `ignoreDependencies` lists tools that are used by binary or alias, not import (`oxlint`, `@typescript/native`, `vite`, ...). In monorepos it is configured per workspace.
+
+## Vitest
+
+Config: `vitest.config.ts`. Vitest 5 with `@vitest/coverage-v8`. `vite` is listed explicitly because it is a Vitest 5 peer and Yarn 1 does not install peers.
+
+Coverage thresholds start at 80 lines, 75 branches, 80 functions, 80 statements on new projects. A retrofit sets them to measured values. `baseline --tighten` runs `test:coverage` with `GUARDRAILS_RATCHET=1`, which turns on `autoUpdate` and writes the measured (floored) numbers back into the config. Thresholds never go down on their own.
+
+## Prettier
+
+Config: `.prettierrc.json`, `.prettierignore`. Single quotes, trailing commas, width 100, LF. Oxlint has no formatting rules, so there is nothing to reconcile.
+
+## lefthook
+
+Config: `lefthook.yml`. Installed by the `prepare` script.
+
+- `pre-commit` (piped): Prettier writes staged files and re-stages them, then `check --files` on staged files, then gitleaks on staged changes.
+- `commit-msg`: commitlint.
+- `pre-push`: `verify`.
+
+No husky, no lint-staged. lefthook passes `{staged_files}` directly.
+
+## gitleaks
+
+A Go binary, installed outside npm. Pre-commit scans staged changes with `--redact`. CI scans the full history.
+
+## commitlint
+
+Config: `commitlint.config.mjs`, extending `@commitlint/config-conventional`.
+
+## Monorepo only
+
+- **turbo 2.11:** `turbo.json` defines `build` (depends on `^build`) and `typecheck`. Requires a `packageManager` field.
+- **syncpack 15:** `.syncpackrc.json` pins workspace dependencies to `workspace:*` (`*` on npm and Yarn 1) and keeps one version of every other dependency.
+- **`source` export condition:** packages export `"source": "./src/index.ts"`. `tsc`, Vitest and dependency-cruiser resolve it, so types are live without a build. See [Monorepo setup](./monorepo-setup.md).
+
+## Agent files
+
+- `AGENTS.md`: a managed block with the gate table, commands and rules. `CLAUDE.md` contains `@AGENTS.md`.
+- `.claude/settings.json`: PostToolUse and Stop hooks, plus deny rules for bypasses and baseline edits.
+- `.codex/hooks.json`: the same hooks for Codex.
+
+See [Agent loop](./agent-loop.md).

@@ -1,191 +1,130 @@
 ---
 name: adding-a-package
 description: >
-  Use when creating a new workspace package in a monorepo.
-  Covers package creation, tier assignment, and all config updates required.
+  Add a new workspace package to a guardrailed TypeScript monorepo so that typecheck, tests,
+  dependency-cruiser tiers, Knip and syncpack all pick it up. Use when creating a package or
+  app under packages/ or apps/, or when a new package is invisible to the guardrails.
 ---
 
-## Overview
+# Adding a package
 
-Adding a new package to a monorepo guarded by this stack requires updating **5 config files** in addition to creating the package itself. Skip any of these and the pre-commit hooks will catch it — but it's faster to do it right the first time.
+Use this in a monorepo that `setup-guardrails` has already set up. A new package needs four
+things:
+- a `package.json` with a `source` export condition
+- a `tsconfig.json` that extends the base and typechecks source and tests, plus a
+  `tsconfig.build.json` that emits `dist` without tests
+- an entry in the dependency-cruiser tiers
+- a dependency entry in each package that consumes it
 
-## Step 1: Detect Project Context
+Turbo, Vitest, Knip, Oxlint and syncpack find it automatically through the workspace globs.
 
-Before creating anything, read these files to understand the current setup:
-- `package.json` — find the org scope (e.g. `@acme`) from the `name` or `workspaces` field
-- `eslint.config.js` — find the existing tier arrays and boundary elements
-- `knip.json` — find existing workspace entries
-- `commitlint.config.ts` — find existing scopes
+## Steps
 
-Use the detected org scope wherever `@scope` appears below.
+1. **Name and tier.**
+   - **Scope:** read it from the root `package.json` or a sibling package, e.g. `@acme`.
+   - **Name:** kebab-case.
+   - **Tier:** pick one with the `enforce-architecture` table, and confirm it with the user when it
+     isn't obvious.
+2. **Create the directory.**
+   - `packages/<name>` for a library, `apps/<name>` for something deployable.
+   - Write the four files below.
+   - Replace `@acme/example` with `@<scope>/<name>`.
+   - Apps that run on Node can drop `exports` and add a `start` script.
+3. **Make it buildable on its own.**
+   - **Publishable libraries:** remove `"private": true` and keep `"files": ["dist"]`. Add
+     `publint` and `@arethetypeswrong/cli` to the root devDependencies and a package script
+     `"lint:pkg": "publint && attw --pack ."`. Run it after `build`.
+   - **Internal libraries:** keep `"private": true`. The `source` condition means consumers never
+     need it built for typecheck or tests.
+4. **Register the tier.**
+   - Add the directory to the right `TIERS` entry in `.dependency-cruiser.mjs`.
+   - `apps/*` is already covered by its glob.
+5. **Wire up the consumers.** Add the package to each consumer's `dependencies` using the repo's
+   protocol:
+   - `workspace:*` for pnpm, yarn berry and bun.
+   - `*` for npm and yarn 1.
 
-## Step 2: Create Package Directory
+   Then reinstall with the repo's package manager.
+6. **Add Knip entries only when needed.** Add them only if the package's entry isn't `src/index.ts`
+   (apps: `src/main.ts` or `src/index.ts`), which the workspace globs already cover.
+7. **Verify:**
+   ```bash
+   node scripts/guardrails.mjs verify   # includes syncpack lint via the lint script
+   ```
+   If dependency-cruiser reports `not-to-unresolvable` for the new package, the dependency is
+   missing from the consumer, or you haven't reinstalled.
 
-```
-packages/new-pkg/
-├── package.json
-├── tsconfig.json
-└── src/
-    └── index.ts
-```
+## Templates
 
-### `package.json`
+`package.json`:
+
+<!-- tmpl:templates/package/package.json -->
 ```json
 {
-  "name": "@scope/new-pkg",
-  "version": "0.0.1",
+  "name": "@acme/example",
+  "version": "0.0.0",
   "private": true,
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "source": "./src/index.ts",
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "default": "./dist/index.js"
     }
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "tsc -b",
-    "test": "vitest run"
-  },
-  "dependencies": {},
-  "devDependencies": {}
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json"
+  }
 }
 ```
+<!-- /tmpl -->
 
-Replace `@scope` with the org scope detected in Step 1.
+`tsconfig.json`:
 
-### `tsconfig.json`
+<!-- tmpl:templates/package/tsconfig.json -->
 ```json
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "outDir": "dist",
-    "rootDir": "src"
+    "noEmit": true
   },
-  "include": ["src"],
-  "exclude": ["dist"]
+  "include": ["src"]
 }
 ```
+<!-- /tmpl -->
 
-### `src/index.ts`
-```typescript
+`tsconfig.build.json`:
+
+<!-- tmpl:templates/package/tsconfig.build.json -->
+```json
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "exclude": ["src/**/*.test.ts"]
+}
+```
+<!-- /tmpl -->
+
+`src/index.ts`:
+
+<!-- tmpl:templates/package/src/index.ts -->
+```ts
 export {};
 ```
-
-## Step 3: Assign to Architecture Tier
-
-Decide which tier this package belongs to:
-
-| Tier | Contains | Can Import |
-|------|----------|-----------| 
-| 0 | Pure types, logger, constants | Nothing (leaf) |
-| 1 | Config, helpers, utilities | Tier 0 |
-| 2 | Database, external APIs, queues | Tier 0-1 |
-| 3 | Domain logic, business rules | Tier 0-2 |
-| 4 | Orchestration, wiring | Tier 0-3 |
-| App | CLI, web server, workers | Anything |
-
-If unsure, ask the user. Getting the tier right now prevents painful refactoring later.
-
-## Step 4: Update `eslint.config.js`
-
-Two changes required:
-
-### 4a: Add to tier array
-```javascript
-// Find the appropriate tier array and add the package name:
-const tier2 = ['database', 'external-api', 'new-pkg'];  // ← added
-```
-
-### 4b: Add to boundaries/elements
-```javascript
-settings: {
-  'boundaries/elements': [
-    // ... existing entries ...
-    { type: 'new-pkg', pattern: ['packages/new-pkg/*'], mode: 'folder' },
-  ],
-},
-```
-
-## Step 5: Update `knip.json`
-
-Add the new package to the workspaces entry list:
-
-```json
-{
-  "workspaces": {
-    "packages/new-pkg": {
-      "entry": ["src/index.ts"],
-      "project": ["src/**/*.ts"]
-    }
-  }
-}
-```
-
-## Step 6: Update `commitlint.config.ts`
-
-Add the package name to the allowed scopes:
-
-```typescript
-rules: {
-  'scope-enum': [2, 'always', [
-    // ... existing scopes ...
-    'new-pkg',          // ← add
-  ]],
-}
-```
-
-## Step 7: Add as Dependency (if needed)
-
-If other packages will import from this new package, add it as a dependency:
-
-```json
-{
-  "dependencies": {
-    "@scope/new-pkg": "*"
-  }
-}
-```
-
-For pnpm/yarn, use `"workspace:*"` instead of `"*"`.
-
-Then add a TypeScript project reference in the consuming package's `tsconfig.json`:
-
-```json
-{
-  "references": [
-    { "path": "../new-pkg" }
-  ]
-}
-```
-
-## Step 8: Verify
-
-```bash
-git add -A
-git commit -m "feat(new-pkg): scaffold new package"
-```
-
-The pre-commit hooks will verify:
-- Knip: no unused exports (empty `index.ts` is fine)
-- ESLint: boundary rules are satisfied
-- TypeScript: compiles cleanly
-- Commitlint: scope is valid
-
-If the commit fails, read the errors and fix them.
+<!-- /tmpl -->
 
 ## Checklist
 
-- [ ] Package directory created with `package.json`, `tsconfig.json`, `src/index.ts`
-- [ ] Tier assigned and documented
-- [ ] `eslint.config.js` updated (tier array + boundaries/elements)
-- [ ] `knip.json` updated with workspace entry
-- [ ] `commitlint.config.ts` updated with new scope
-- [ ] Dependencies wired in consuming packages (if applicable)
-- [ ] Commit succeeds with pre-commit hooks
-
-## Related Skills
-
-- **enforce-architecture** — Understanding the tier system
-- **self-correcting-loop** — Handling commit rejections
+- [ ] `package.json` has the `source` export and the `build` and `typecheck` scripts
+- [ ] `tsconfig.json` extends `../../tsconfig.base.json` and includes the tests; `tsconfig.build.json` excludes them
+- [ ] The directory is listed in `TIERS` (libraries)
+- [ ] Consumers declare the dependency with the right protocol, and you reinstalled
+- [ ] `verify` passes

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "workspaces": {
+    ".": {
+      "entry": ["scripts/*.mjs"]
+    },
+    "packages/*": {
+      "entry": ["src/index.ts"],
+      "project": ["src/**/*.{ts,tsx}"]
+    },
+    "apps/*": {
+      "entry": ["src/main.ts", "src/index.ts"],
+      "project": ["src/**/*.{ts,tsx}"]
+    }
+  },
+  "ignoreExportsUsedInFile": true,
+  "ignoreDependencies": [
+    "@commitlint/cli",
+    "@typescript/native",
+    "oxlint",
+    "oxlint-tsgolint",
+    "vite"
+  ]
+}

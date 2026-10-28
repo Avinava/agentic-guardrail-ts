@@ -1,341 +1,953 @@
 ---
 name: setup-guardrails
 description: >
-  Audit and install a self-correcting guardrail stack in any TypeScript project.
-  Four-phase workflow: understand the guardrail system from this repo, inventory
-  the target project, generate a gap analysis, then apply changes — creating missing
-  configs and merging missing sections into existing ones.
+  Audit a TypeScript project and install tool-enforced guardrails for coding agents:
+  Oxlint (type-aware), TypeScript 7 typecheck, dependency-cruiser architecture rules,
+  Knip dead code, Vitest coverage floors, lefthook git hooks, gitleaks, commitlint, CI,
+  and agent hooks that lint every edit. Existing debt is recorded in a ratchet baseline
+  so only new problems block. Use for "set up guardrails", "add linting/hooks for agents",
+  "harden this repo for AI coding", or upgrading a v2 guardrail setup.
 ---
 
-## Overview
+# Setup guardrails
 
-Install or update a self-correcting guardrail stack in a TypeScript project. After setup,
-every `git commit` runs quality checks in parallel (~3s) and rejects bad code. You (the agent)
-see the errors, fix them, and retry.
+You are installing a guardrail stack in **the user's project** (the target), not in this
+skill's repo. Every config below is a template: fit it to the target, then write it.
 
-**Four-phase workflow:**
-1. **Understand** — read this repo's reference configs to know what "correct" looks like
-2. **Inventory** — inspect the target project's current state (configs, deps, code health)
-3. **Gap analysis** — compare current vs. desired; present a structured report; get confirmation
-4. **Apply** — create missing files, merge missing sections into outdated ones, install missing deps
+## What gets installed
 
-**What this skill installs:**
-- Lefthook (parallel pre-commit hooks)
-- Prettier + lint-staged (auto-formatting)
-- ESLint + TypeScript strict + import ordering (code quality)
-- Gitleaks (secret scanning — prevents hardcoded API keys)
-- Commitlint (conventional commits)
-- Vitest (test runner)
-- Knip (dead code detection)
-- ESLint boundaries plugin (architecture enforcement — monorepo only)
-- Syncpack (dependency version consistency — monorepo only)
-- Turborepo (cached parallel builds — monorepo only)
+| Concern | Tool | Runs in |
+| --- | --- | --- |
+| Lint, including type-aware rules | Oxlint + oxlint-tsgolint | edit hook, stop hook, pre-commit, pre-push, CI |
+| Typecheck | `tsc` from TypeScript 7 (`@typescript/native`) | stop hook, pre-push, CI |
+| Architecture (layers or tiers, cycles) | dependency-cruiser | stop hook, pre-commit, pre-push, CI |
+| Dead code and unused dependencies | Knip | pre-push, CI |
+| Bare `eslint-disable` / `oxlint-disable` | `scripts/guardrails.mjs` | everywhere |
+| Formatting | Prettier | pre-commit, CI |
+| Tests and coverage floors | Vitest 5 | stop hook (related tests), pre-push, CI |
+| Secrets | gitleaks | pre-commit, CI |
+| Commit messages | commitlint | commit-msg, CI |
+| Dependency versions (monorepo) | syncpack | pre-push, CI |
+| Task orchestration (monorepo) | turbo | typecheck, build |
+| Agent instructions and hooks | AGENTS.md, Claude Code and Codex hooks | every agent session |
 
-**What this skill does NOT do:**
-- It does NOT create agent instruction files (CLAUDE.md, GEMINI.md, etc.)
-- It does NOT copy template files — all configs are generated based on YOUR project
+Everything runs through one generated script, `scripts/guardrails.mjs`. It works the same under
+npm, pnpm, yarn and bun, and it owns the **ratchet**: every finding is an error, existing ones are
+counted per rule and per file in `guardrails.baseline.json`, and a gate fails only when a count
+goes up.
 
----
+## Skill map
 
-## Skill Selection Guide
+| Goal | Skill |
+| --- | --- |
+| Install or upgrade the stack | `setup-guardrails` (this one) |
+| AGENTS.md, agent hooks, handling a rejected change | `guardrails-loop` |
+| Layer and tier rules, fixing an architecture violation | `enforce-architecture` |
+| Add a workspace package to a monorepo | `adding-a-package` |
+| Check an installed stack for drift, stale versions or a loose baseline | `guardrails-doctor` |
 
-**This skill is always the starting point.** Run it once per project to install the toolchain. After setup, you have several optional skills to extend the stack:
-
-| Goal | Skill | When |
-|------|-------|------|
-| Install the full guardrail stack | **setup-guardrails** (this skill) | Any new or existing TypeScript project — run first |
-| Add LLM discipline rules (complexity, naming, coverage gates) | **enforce-code-discipline** | After `setup-guardrails` — essential for AI-heavy projects |
-| Deep-dive on architecture tier rules | **enforce-architecture** | When debugging boundary violations or onboarding to tier rules |
-| Handle a rejected commit | **self-correcting-loop** | When `git commit` fails after guardrails are installed |
-| Add a new workspace package | **adding-a-package** | In a monorepo, after the root stack is set up |
-
-**Typical setup sequence for an AI-assisted project:**
-
-```
-setup-guardrails          ← installs toolchain and pre-commit hooks (this skill)
-    └─ enforce-code-discipline   ← adds LLM-specific rules and coverage gates
-         └─ enforce-architecture  ← (monorepo only) deep-dives on tier boundaries
-```
-
-> **Not sure whether you need `enforce-code-discipline`?**
-> If human engineers are the primary authors, `setup-guardrails` alone is sufficient.
-> If LLMs frequently write or refactor code in this project, add `enforce-code-discipline` next —
-> it catches complexity creep, naming drift, and coverage regressions that type-checking alone misses.
-
-See [docs/tool-reference.md](../../docs/tool-reference.md) for a deep dive on each guardrail tool and why it was chosen over alternatives.
-
----
+If the other skills aren't installed (you got this file from a URL), download each one the same way
+from `https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/skills/<name>/SKILL.md`
+and read it in full. Don't use a summarizing web-fetch tool: the templates must be copied exactly.
 
 ## Prerequisites
 
-- Node.js 20+ installed
-- A TypeScript project with a `package.json`
-- Git initialized (`git init`)
+- Node.js 22.12 or newer (24 recommended), git initialised, a `package.json`.
+- `gitleaks` on PATH for the pre-commit secret scan (`brew install gitleaks`, or a release binary).
+  If the user can't install it, tell them the `secrets` hook job will fail until they do. Do not
+  remove the job.
 
 ---
 
-## Phase 0: Understand the Guardrail System
+## Phase 1: Detect
 
-**Do this before reading the target project.** Phase 0 builds your mental model of what
-"correct" looks like, so you can do accurate gap analysis in Phase 2.
+Read; don't change anything yet. Record each answer for the gap report.
 
-> **Important:** The reference files show the **complete end-state** after BOTH
-> `setup-guardrails` AND `enforce-code-discipline` have run. Discipline-specific sections
-> (unicorn, sonarjs, jsdoc, complexity limits, coverage thresholds) are added by
-> `enforce-code-discipline`, not by this skill. In Phase 2, use the inline content in THIS
-> file — not the reference files — as your source of truth for what this skill installs.
+1. **Layout.** It's a **monorepo** if there is a `workspaces` field, a `pnpm-workspace.yaml`, or
+   `packages/` or `apps/` with their own `package.json`. Otherwise it's a **single package**. List the
+   workspace directories.
+2. **Package manager.** Check the lockfile: `pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn (run
+   `yarn -v`: 1.x is classic, otherwise berry), `bun.lock` or `bun.lockb` → bun, anything else → npm.
+   - Never switch package managers or create a second lockfile.
+   - Record whether `packageManager` is set in the root `package.json`. turbo 2.11 refuses to run
+     without it.
+3. **Existing tooling.** Look for:
+   - `eslint.config.*` or `.eslintrc*`, and list its plugins
+   - `biome.json`, `.oxlintrc.json`, `.prettierrc*`
+   - husky (`.husky/`) or lint-staged config
+   - `lefthook.yml`, jest config, `vitest.config.*`
+   - `tsconfig*.json` and its `strict` setting
+   - CI workflows under `.github/workflows/`
+   - An existing v2 install from this repo: `eslint-plugin-boundaries` plus `lefthook.yml` with a
+     `lint-deps` job. If found, follow [Migrating from v2](https://github.com/Avinava/agentic-guardrail-ts/blob/main/docs/migrating-from-v2.md) as you
+     apply.
+4. **Frameworks.** Check the dependencies:
+   - React or Next.js: add Oxlint plugins `react`, `jsx-a11y`, `nextjs`, and set `filename-case`
+     to allow PascalCase components.
+   - Vue: `vue`.
+   - Decorator DI (`@nestjs/*`, `inversify`, `tsyringe`, `@angular/core`): set `max-params` to off
+     (see Wave 2).
+5. **Conventions.**
+   - The dominant file-name case in `src/`: kebab, camel or Pascal.
+   - The source directories that act as layers, e.g. `domain/`, `application/`, `infrastructure/`,
+     `ui/`.
+   - Whether code uses `enum`, `namespace` or parameter properties. `erasableSyntaxOnly` rejects
+     them, so leave the flag out if they are present.
+6. **Mode.**
+   - It's **greenfield** if there is little or no code, or a quick look finds nothing a strict setup
+     would flag.
+   - Otherwise it's **retrofit**: don't try to make an existing codebase clean in one go. The
+     baseline records the debt, and later waves burn it down. See
+     [Retrofit](https://github.com/Avinava/agentic-guardrail-ts/blob/main/docs/retrofit.md).
 
-### 0a. Quick project type detection
+## Phase 2: Gap report and checkpoint
 
-Read the target project's `package.json` before fetching anything:
-- **Monorepo** if: `workspaces` field exists, or `turbo.json` / `packages/` / `apps/` directory present
-- **Single-package** otherwise
+Present this, then wait for the user's answer:
 
-This determines which reference directory to fetch next.
+```
+GUARDRAILS PLAN
+Layout:          single package | monorepo (<n> workspaces)
+Package manager: <pm> <version>   packageManager field: present | will add
+Mode:            greenfield | retrofit
+Replacing:       <ESLint/typescript-eslint, husky, lint-staged, jest... or "nothing">
+Keeping:         <tools the project keeps, e.g. ESLint for <plugin> (hybrid)>
 
-### 0b. Fetch reference configs from GitHub
+FILES  create: <list>   merge: <list>   unchanged: <list>
+DEPS   add: <list>   remove (only with your OK): <list>
+ARCHITECTURE  <proposed layers or tiers, lowest first>
+RULE CHOICES  filename case: <case>; max-params: 4 | off (DI); plugins: <list>
+AGENT FILES   AGENTS.md (create | append managed block), CLAUDE.md, .claude/settings.json, .codex/hooks.json
 
-Fetch and read each file fully using raw GitHub URLs.
+Reply YES to apply, or name items to change or skip.
+```
 
-**Single-package** — from `https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/reference/single-package/`:
-- `eslint.config.js`
-- `lefthook.yml`
-- `tsconfig.json`
-- `vitest.config.ts`
-- `commitlint.config.ts`
-- `package.json`
+Ask separately only when you can't infer the answer:
+- **Tiers or layers.** Propose them from the import graph. In a monorepo, a package with no
+  workspace dependencies is tier 0.
+- **Removing an existing linter or hook tool.** Always ask before you remove one.
 
-**Monorepo** — from `https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/reference/monorepo/`:
-- `eslint.config.js`
-- `lefthook.yml`
-- `tsconfig.base.json`
-- `knip.json`
-- `turbo.json`
-- `.syncpackrc.json`
-- `commitlint.config.ts`
-- `vitest.config.ts`
-- `package.json`
+## Phase 3: Apply in waves
 
-Also fetch `docs/known-conflicts.md`:
-`https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/docs/known-conflicts.md`
+Apply the waves in order. After each wave, run its check before moving on. Merge into existing
+files instead of overwriting them:
+- **JSON:** add missing keys and keep the user's values.
+- **YAML:** add missing jobs.
+- **Ignore files:** append missing lines.
+- **Fully managed files** (`scripts/guardrails.mjs`, the AGENTS.md managed block): replace them as
+  a whole.
 
-> If a fetch fails (no network access), continue using the inline templates in this skill
-> as your sole reference for what each config should contain.
+### Wave 1: Foundation
 
-### 0c. What to take away from the reference files
+- Write `.editorconfig`, `.nvmrc`, `.prettierrc.json`, `.prettierignore`, and merge the
+  `.gitignore` lines. Don't add a `.prettierrc.json` if an equivalent Prettier config exists.
+- Merge `package.json`: `type`, `engines`, the `scripts`, and the `devDependencies` from the
+  template for this layout.
+  - **TypeScript aliases.** Keep both alias entries exactly: `typescript` points to
+    `@typescript/typescript6` (the API that tools like dependency-cruiser load) and
+    `@typescript/native` points to TypeScript 7 (the `tsc` binary).
+  - **`vite`.** List it explicitly. Vitest 5 has it as a peer, and Yarn 1 does not install peers.
+  - **`packageManager`.** Set it to the detected manager and version if it's missing.
+  - **Removals.** Remove replaced tools' dependencies only if the user agreed. When removing husky,
+    also run `git config --unset core.hooksPath`, or lefthook's hooks never run.
+  - **Yarn berry:** set `nodeLinker: node-modules` in `.yarnrc.yml`. `guardrails.mjs` runs tools
+    from `node_modules/.bin`, which Plug'n'Play doesn't create.
+- Write the tsconfig:
+  - **Single package:** `tsconfig.json` (typecheck: `src`, `test`, root `*.config.ts`) plus
+    `tsconfig.build.json` (emit).
+  - **Monorepo:** `tsconfig.base.json`, a root `tsconfig.json` for root config files, and one
+    `tsconfig.json` per workspace that extends the base (see `adding-a-package`).
+  - **Merging into an existing tsconfig:** keep `paths`, `jsx` and `lib` additions. Drop `baseUrl`
+    (deprecated in TS 6 and removed in 7) by rewriting `paths` relative to the tsconfig.
+- **Monorepo:** each workspace's `package.json` exports a `source` condition pointing to
+  `src/index.ts`. TypeScript (`customConditions`), Vitest and dependency-cruiser then resolve
+  sibling packages to source, so typecheck and tests need no build first. Workspace dependencies
+  use the protocol the package manager supports:
+  - `workspace:*` for pnpm, yarn berry and bun.
+  - `*` for npm and yarn 1. Change `pinVersion` in `.syncpackrc.json` to match.
+- Write `scripts/guardrails.mjs` (every later wave runs it), `lefthook.yml` and
+  `commitlint.config.mjs`. Writing `lefthook.yml` now means the `prepare` script installs the real
+  hooks instead of a sample config.
+- Install dependencies with the detected package manager.
+- **Check:** run `typecheck`. In retrofit mode, every flag the code doesn't satisfy yet can wait:
+  1. Leave `noUncheckedIndexedAccess`, `noPropertyAccessFromIndexSignature` and
+     `exactOptionalPropertyTypes` out for now.
+  2. Add each one back later in its own wave. **Typecheck must pass. It is never baselined.**
+  3. If the code fails `strict` itself, stop and report to the user. Don't weaken `strict`.
 
-After reading, you should understand:
-- What pre-commit jobs a complete `lefthook.yml` has (including `secrets` and, for monorepo, `lint-deps`)
-- What TypeScript flags are required (`isolatedModules`, `verbatimModuleSyntax`, `incremental`, `erasableSyntaxOnly`)
-- Which ESLint rules belong to THIS skill (import-x rules, runtime safety, boundaries for monorepo) vs. `enforce-code-discipline` (unicorn, sonarjs, jsdoc, complexity limits)
-- What devDependencies the reference `package.json` lists
-- Any known tool conflicts (from `docs/known-conflicts.md`) — especially the ESLint Config Prettier ordering constraint
+### Wave 2: Lint
 
-You are now ready to inspect the target project.
+- Write `.oxlintrc.json` and tailor it:
+  - **`unicorn/filename-case`:** the detected case. Use `{ "cases": { "kebabCase": true,
+    "pascalCase": true } }` when React components are PascalCase.
+  - **`eslint/max-params`:** `"off"` when decorator DI was detected. Oxlint counts constructor
+    parameters and has no exemption. `.oxlintrc.json` accepts comments, so add a `// why`
+    comment next to it.
+  - **`plugins`:** add the framework plugins found in Phase 1.
+- **Replacing ESLint** (with the user's OK): delete the ESLint config and its dependencies. Rename
+  `// eslint-disable` comments to `// oxlint-disable` with the same rule names. Oxlint honours both
+  spellings, so this can wait.
+- **Hybrid** (the project needs an ESLint plugin Oxlint lacks, e.g. a framework or custom local
+  rule):
+  1. Keep ESLint 10 with only those plugins and no type-aware parsing.
+  2. Add `eslint-plugin-oxlint` last in the config to turn off overlapping rules.
+  3. Set `"lint": "node scripts/guardrails.mjs check && eslint ."`.
+- **Check:** `node scripts/guardrails.mjs check`. In greenfield mode, fix everything it reports. In
+  retrofit mode, look at the counts and wait for Wave 6. Ignore `knip` findings until Wave 4
+  writes `knip.json`.
+
+### Wave 3: Architecture
+
+- Write `.dependency-cruiser.mjs` for the layout. Replace the `LAYERS` (single package) or `TIERS`
+  (monorepo) arrays with the structure the user confirmed, lowest first.
+- **Check:** `node scripts/guardrails.mjs check` lists `depcruise` findings. Read every one:
+  - **A real upward import** is debt (retrofit) or must be fixed (greenfield).
+  - **A false positive** means the layers are wrong. Fix the array, not the code.
+
+### Wave 4: Dead code and dependency hygiene
+
+- Write `knip.json` for the layout. Set `entry` to the real entry points (`src/index.ts`, `src/main.ts`, framework
+  entry files; Knip's plugins detect Next.js, Vite and others automatically).
+- **Monorepo:** write `turbo.json` and `.syncpackrc.json`. Run `syncpack lint` and fix version
+  mismatches with `syncpack fix`.
+- **Check:** look for false positives in Knip's findings:
+  - Fix the config (`entry`, `ignoreDependencies`, `ignoreBinaries`).
+  - Don't delete code you don't understand. Leave it in the baseline.
+
+### Wave 5: Tests
+
+- **No test runner yet:** write `vitest.config.ts`.
+- **Jest exists:** ask before migrating. If kept, point the `test` and `test:coverage` scripts at
+  Jest and skip the Vitest coverage ratchet.
+- Coverage thresholds:
+  - **Greenfield:** keep 80 / 75 / 80 / 80.
+  - **Retrofit:** run `test:coverage` once, then set each threshold to the measured value rounded
+    down. Floors only go up from here.
+- **Check:** `test` and `test:coverage` pass.
+
+### Wave 6: Gates
+
+- Confirm the git hooks are installed: `node scripts/guardrails.mjs exec lefthook install`.
+- Write `.github/workflows/ci.yml`. Edit the package manager lines, which are marked in comments:
+  - **pnpm, npm, yarn 1:** as marked.
+  - **yarn berry:** `yarn install --immutable`.
+  - **bun:** replace the pnpm setup step with `oven-sh/setup-bun` (pin it by SHA), drop the
+    setup-node cache, and use `bun install --frozen-lockfile`.
+  For GitLab or other CI, translate it: the gate is `node scripts/guardrails.mjs verify` plus
+  `check --strict-baseline`.
+- **Baseline:**
+  - **Greenfield:** fix findings until `node scripts/guardrails.mjs check` is clean. Don't create a
+    baseline.
+  - **Retrofit:** after the user approves recording the current debt, run
+    `node scripts/guardrails.mjs baseline --init`. Show the per-rule totals:
+    `node -e "const c=require('./guardrails.baseline.json').counts;const t={};for(const[k,n]of Object.entries(c)){const r=k.split('|')[0];t[r]=(t[r]||0)+n}console.table(t)"`
+- **Check:** `node scripts/guardrails.mjs verify` passes.
+
+### Wave 7: Agent loop
+
+Follow the `guardrails-loop` skill, Part A. It writes `AGENTS.md`, `CLAUDE.md`,
+`.claude/settings.json` and `.codex/hooks.json`, and verifies the hooks.
+
+## Phase 4: Verify and report
+
+Run each check and report what actually happened:
+
+1. `node scripts/guardrails.mjs verify` exits 0.
+2. Make a scratch file in a source directory with a function that takes 6 parameters and has an un-awaited
+   promise. Then:
+   - `node scripts/guardrails.mjs check --changed` fails and names both rules.
+   - Delete the file.
+3. `echo "bad message" | node scripts/guardrails.mjs exec commitlint` exits non-zero.
+4. `node scripts/guardrails.mjs check --strict-baseline` passes.
+
+Then summarise:
+- the files written and the dependencies added or removed
+- the mode, and in retrofit mode the baseline totals per rule
+- the coverage floors
+- the follow-ups the user owns: install gitleaks, trust the Codex hooks with `/hooks`, review
+  the tiers
+- the next debt waves (see below)
+
+## Retrofit: burning down the baseline
+
+- **Pick one rule per wave**, highest count first among the ones that are cheap to fix:
+  1. Auto-fixable ones: `node scripts/guardrails.mjs exec oxlint --type-aware --fix`. Review the
+     diff.
+  2. Type safety: `no-unsafe-*`, `no-non-null-assertion`.
+  3. Size and complexity.
+  4. Architecture.
+- **After each wave**, run `baseline --tighten` and commit the new baseline with the fix.
+- **Strict tsconfig flags held back in Wave 1** each get their own wave.
+- **Don't raise a limit** to make a count go away. If a rule doesn't fit, change it with the user.
 
 ---
 
-## Phase 1: Inventory the Target Project
+## Templates
 
-### 1a. Project type
+These are the canonical files. They are rendered from the agentic-guardrail-ts repo's
+`templates/` directory and tested end to end there. Fit them to the target as described above.
 
-**Monorepo** if ANY of these are true:
-- `workspaces` field exists in `package.json`
-- `turbo.json` exists at root
-- `packages/` or `apps/` directory exists
+### Shared (both layouts)
 
-**Single package** otherwise.
-
-### 1b. Package manager
-
-Check which lockfile exists:
-- `pnpm-lock.yaml` → pnpm (use `pnpm add -D`)
-- `yarn.lock` → yarn (use `yarn add -D`)
-- `package-lock.json` or none → npm (use `npm install -D`)
-
-### 1c. Org scope
-
-Look at the `name` field in `package.json`:
-- If it starts with `@something/`, the org scope is `@something`
-- If no scope detected and this is a monorepo, ask the user
-- If single package with no scope, use `@myorg` as a fallback (only matters if they add workspaces later)
-
-### 1d. Existing packages (monorepo only)
-
-List the directories under `packages/` and `apps/`. These become the tier assignments in ESLint config. Ask the user how to classify them (see Phase 3).
-
-### 1e. Config file inventory
-
-For each file below, record: (a) does it exist? (b) if it exists, is it outdated?
-
-**"Outdated" = file exists but is missing these literal strings:**
-
-| File | Outdated if file exists but is MISSING any of these strings |
-|------|-------------------------------------------------------------|
-| `lefthook.yml` | `name: secrets` |
-| `lefthook.yml` (monorepo) | also: `name: lint-deps` |
-| `eslint.config.js` | `'import-x/named'`, `'import-x/default'`, `no-non-null-assertion`, `TSAsExpression > TSAsExpression` |
-| `eslint.config.js` (monorepo) | also: `eslint-plugin-boundaries` |
-| `tsconfig.json` / `tsconfig.base.json` | `"isolatedModules"`, `"verbatimModuleSyntax"`, `"incremental"`, `"erasableSyntaxOnly"` |
-| `package.json` scripts | `"lint:unused"`, `"prettier:check"`, `"prettier:fix"`, `"prepare"` |
-| `.gitignore` | `*.tsbuildinfo` |
-| `commitlint.config.ts` | _(no outdated check — treat as present or missing only)_ |
-| `vitest.config.ts` | _(no outdated check)_ |
-| `knip.json` (monorepo) | _(no outdated check)_ |
-| `.syncpackrc.json` (monorepo) | _(no outdated check)_ |
-| `turbo.json` (monorepo) | _(no outdated check)_ |
-| `scripts/typecheck-staged.sh` (monorepo) | _(exists AND is executable?)_ |
-| `.editorconfig` | _(no outdated check)_ |
-| `.nvmrc` | _(no outdated check)_ |
-| `.prettierrc` | _(no outdated check)_ |
-| `.prettierignore` | _(no outdated check)_ |
-
-### 1f. devDependency audit
-
-Read the target project's `package.json`. For each package below, record whether it is already in `devDependencies`. Phase 3 will install ONLY the missing ones.
-
-**All projects:**
-`lefthook`, `prettier`, `lint-staged`, `eslint`, `typescript`, `vitest`, `knip`,
-`@commitlint/cli`, `@commitlint/config-conventional`, `typescript-eslint`,
-`eslint-config-prettier`, `eslint-plugin-import-x`, `publint`
-
-**Monorepo only (in addition to above):**
-`eslint-plugin-boundaries`, `syncpack`, `turbo`
-
-### 1g. Assess existing codebase health
-
-**⚠ IMPORTANT: Do this BEFORE generating any configs.**
-
-Run a quick health check to classify this as greenfield or retrofit:
-
-1. Check for existing lint configs (`.eslintrc*`, `eslint.config.*`, `.prettierrc*`)
-2. Check for existing TypeScript config strictness — is `strict: true` present?
-3. If an ESLint config exists, run: `npx eslint 'src/**/*.ts' --no-error-on-unmatched-pattern 2>&1 | tail -5`
-4. Count type-safety escapes: `grep -r '@ts-ignore\|@ts-expect-error' src/ | wc -l`
-
-**Classification:**
-- **Greenfield:** No existing lint config, or existing config with <10 violations → proceed normally (all rules at `error`)
-- **Retrofit:** Existing codebase with >10 violations or non-strict TypeScript → use Wave mode
-
-**If retrofit, WARN the user before proceeding:**
-
-> "This is an existing codebase with [N] lint violations and [M] type issues.
-> I'll install guardrails in **Wave mode** — rules start at `warn` so your
-> existing workflow isn't disrupted. You'll then drive each rule category to
-> zero violations via focused refactoring, and flip warn→error one category
-> at a time.
->
-> **What to expect:**
-> - Pre-commit hooks will run but won't block commits initially (warnings, not errors)
-> - A warning budget header in `eslint.config.js` tracks progress toward zero
-> - Each rule category gets its own cleanup wave
-> - Total adoption timeline: days to weeks depending on codebase size
->
-> **The key principle: Tools become gates only when their baseline is exit-0.**
-> A rule moves to `error` only when you have zero violations. Never use
-> `--max-warnings=N` — it decays over time and erodes trust in the tool."
-
-**If retrofit mode:** When generating `eslint.config.js` in Phase 3, set these rules to `warn` instead of `error`:
-- `import-x/default`, `import-x/named`
-- `@typescript-eslint/no-non-null-assertion`
-- `@typescript-eslint/consistent-type-assertions`
-- `no-restricted-syntax` (double-cast)
-- `boundaries/dependencies` (if monorepo)
-
-Rules that ALWAYS start at `error` even on retrofit (they're auto-fixable):
-- `import-x/order`, `import-x/no-duplicates`, `no-console`
-
-Add a **warning budget header** at the top of `eslint.config.js`:
-
+<!-- tmpl:templates/shared/scripts/guardrails.mjs -->
 ```js
-// ── WARNING BUDGET (retrofit mode) ──────────────────────────
-// These rules are at 'warn' until the violation count reaches 0.
-// Drive each to zero, then flip to 'error' in the same commit.
+#!/usr/bin/env node
+// guardrails.mjs: one entry point for the gate, the ratchet and agent hooks.
+// Generated by agentic-guardrail-ts. Edit the rule configs, not this file.
 //
-// Rule                               Count   Target
-// import-x/default                   12      Wave 1
-// import-x/named                     3       Wave 1
-// no-non-null-assertion              47      Wave 2
-// consistent-type-assertions         8       Wave 2
-// boundaries/dependencies            22      Wave 3
-//
-// Last audited: YYYY-MM-DD
-// ─────────────────────────────────────────────────────────────
+//   node scripts/guardrails.mjs check [--changed | --files a.ts b.ts] [--strict-baseline]
+//   node scripts/guardrails.mjs baseline (--init | --tighten | --reset)
+//   node scripts/guardrails.mjs verify
+//   node scripts/guardrails.mjs format --files a.ts b.ts
+//   node scripts/guardrails.mjs exec <bin> [args...]
+//   node scripts/guardrails.mjs hook (post-edit | stop)   reads hook JSON on stdin
+
+import { spawnSync } from 'node:child_process';
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join, relative } from 'node:path';
+
+const ROOT = gitRoot() ?? process.cwd();
+const BASELINE = join(ROOT, 'guardrails.baseline.json');
+const LINT_EXT = /\.(?:[cm]?[jt]sx?)$/;
+const MAX_REASON = 6000;
+
+function gitRoot() {
+  const r = spawnSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' });
+  return r.status === 0 ? realpathSync(r.stdout.trim()) : null;
+}
+
+function run(cmd, args, opts = {}) {
+  const r = spawnSync(cmd, args, {
+    cwd: ROOT,
+    encoding: 'utf8',
+    // node_modules/.bin shims and package managers are .cmd files on Windows.
+    shell: process.platform === 'win32',
+    maxBuffer: 256 * 1024 * 1024,
+    ...opts,
+  });
+  if (r.error) throw new Error(`${cmd}: ${r.error.message}`);
+  return r;
+}
+
+function bin(name) {
+  const p = join(ROOT, 'node_modules', '.bin', process.platform === 'win32' ? `${name}.cmd` : name);
+  return existsSync(p) ? p : null;
+}
+
+function needBin(name) {
+  const p = bin(name);
+  if (!p) throw new Error(`${name} is not installed. Install devDependencies first.`);
+  return p;
+}
+
+function packageManager() {
+  const locks = [
+    ['pnpm-lock.yaml', 'pnpm'],
+    ['yarn.lock', 'yarn'],
+    ['bun.lock', 'bun'],
+    ['bun.lockb', 'bun'],
+  ];
+  return locks.find(([f]) => existsSync(join(ROOT, f)))?.[1] ?? 'npm';
+}
+
+function pkg() {
+  return JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+}
+
+function sourceDirs() {
+  const configured = pkg().guardrails?.src;
+  if (Array.isArray(configured)) return configured;
+  return ['src', 'packages', 'apps', 'libs'].filter((d) => existsSync(join(ROOT, d)));
+}
+
+// Resolve symlinks (e.g. /var -> /private/var on macOS) so hook paths match the git root.
+function rel(file) {
+  const abs = isAbsolute(file) ? file : join(ROOT, file);
+  return relative(ROOT, existsSync(abs) ? realpathSync(abs) : abs)
+    .split('\\')
+    .join('/');
+}
+
+function sourcePaths(files) {
+  return [...new Set(files.map(rel))].filter(
+    (f) => LINT_EXT.test(f) && !f.startsWith('..') && !f.includes('node_modules/'),
+  );
+}
+
+function lintable(files) {
+  return sourcePaths(files).filter((f) => existsSync(join(ROOT, f)));
+}
+
+// NUL-separated so paths git would quote (spaces, non-ASCII) come through verbatim.
+function gitFiles(args) {
+  return run('git', [...args, '-z'])
+    .stdout.split('\0')
+    .filter(Boolean);
+}
+
+// Changed source paths since HEAD, including deleted ones.
+function changedPaths() {
+  const diff = gitFiles(['diff', '--name-only', 'HEAD']);
+  return sourcePaths([...diff, ...gitFiles(['ls-files', '--others', '--exclude-standard'])]);
+}
+
+function changedFiles() {
+  return lintable(changedPaths());
+}
+
+// ── Collectors: each returns [{ key, tool, rule, file, line, message }] ──
+
+function finding(tool, rule, { file, line = 0, message }) {
+  return { key: `${tool}:${rule}|${file}`, tool, rule, file, line, message };
+}
+
+// A tool that crashed prints no JSON; fail loudly instead of reporting "clean".
+function toolJson(tool, r) {
+  try {
+    return JSON.parse(r.stdout);
+  } catch {
+    throw new Error(
+      `${tool} failed (exit ${r.status}):\n${(r.stderr || r.stdout).trim().slice(-2000)}`,
+    );
+  }
+}
+
+function collectOxlint(files) {
+  if (files?.length === 0) return [];
+  const args = [
+    '--type-aware',
+    '--report-unused-disable-directives',
+    '-f',
+    'json',
+    ...(files ?? []),
+  ];
+  const r = run(needBin('oxlint'), args);
+  const out = toolJson('oxlint', r);
+  return out.diagnostics.map((d) =>
+    finding('oxlint', d.code ?? 'unused-disable-directive', {
+      file: rel(d.filename),
+      line: d.labels?.[0]?.span?.line,
+      message: d.message,
+    }),
+  );
+}
+
+function collectDepcruise(files) {
+  const config = [
+    '.dependency-cruiser.mjs',
+    '.dependency-cruiser.cjs',
+    '.dependency-cruiser.js',
+  ].find((f) => existsSync(join(ROOT, f)));
+  const targets = files ?? sourceDirs();
+  if (!config || targets.length === 0) return [];
+  const r = run(needBin('depcruise'), [
+    ...targets,
+    '-c',
+    config,
+    '-T',
+    'json',
+    '--no-ignore-known',
+  ]);
+  const out = toolJson('depcruise', r);
+  return out.summary.violations.map((v) =>
+    finding('depcruise', v.rule.name, {
+      file: rel(v.from),
+      message: v.to === v.from ? v.rule.name : `imports ${v.to}`,
+    }),
+  );
+}
+
+function collectKnip() {
+  if (!bin('knip')) return [];
+  const r = run(needBin('knip'), ['--reporter', 'json', '--no-progress']);
+  const out = toolJson('knip', r);
+  const found = [];
+  for (const issue of out.issues) {
+    for (const [type, items] of Object.entries(issue)) {
+      if (!Array.isArray(items)) continue;
+      for (const item of items) {
+        found.push(
+          finding('knip', type, {
+            file: rel(issue.file),
+            line: item.line,
+            message: item.name ?? type,
+          }),
+        );
+      }
+    }
+  }
+  return found;
+}
+
+const DISABLE = /\/[/*]\s*(?:eslint|oxlint)-disable(?:-next-line|-line)?\b([^\n]*)/g;
+
+function projectFiles() {
+  const untracked = gitFiles(['ls-files', '--others', '--exclude-standard']);
+  return lintable([...gitFiles(['ls-files']), ...untracked]);
+}
+
+function collectDisables(files) {
+  const found = [];
+  for (const file of files ?? projectFiles()) {
+    const lines = readFileSync(join(ROOT, file), 'utf8').split('\n');
+    lines.forEach((text, i) => {
+      for (const m of text.matchAll(DISABLE)) {
+        const [rules, reason] = m[1].replace(/\*\/.*$/, '').split(/\s(?:--|—)\s/);
+        if (rules?.trim() && reason?.trim()) continue;
+        const message = 'name the rule and add "-- <reason>"';
+        found.push(
+          finding('guardrails', 'disable-needs-rule-and-reason', { file, line: i + 1, message }),
+        );
+      }
+    });
+  }
+  return found;
+}
+
+function collect(files) {
+  const scoped = files ? lintable(files) : null;
+  return [
+    ...collectOxlint(scoped),
+    ...collectDepcruise(scoped),
+    ...(scoped ? [] : collectKnip()),
+    ...collectDisables(scoped),
+  ];
+}
+
+// ── Ratchet ──
+
+function readBaseline() {
+  if (!existsSync(BASELINE)) return {};
+  return JSON.parse(readFileSync(BASELINE, 'utf8')).counts ?? {};
+}
+
+function writeBaseline(counts) {
+  const entries = Object.entries(counts).filter(([, n]) => n > 0);
+  const sorted = Object.fromEntries(entries.toSorted(([a], [b]) => a.localeCompare(b)));
+  writeFileSync(BASELINE, `${JSON.stringify({ version: 1, counts: sorted }, null, 2)}\n`);
+  return Object.keys(sorted).length;
+}
+
+function tally(findings) {
+  const counts = {};
+  for (const f of findings) counts[f.key] = (counts[f.key] ?? 0) + 1;
+  return counts;
+}
+
+function compare(findings, baseline, scope) {
+  const counts = tally(findings);
+  const inScope = (key) => !scope || scope.has(key.slice(key.indexOf('|') + 1));
+  const grown = new Set(
+    Object.keys(counts).filter((k) => inScope(k) && counts[k] > (baseline[k] ?? 0)),
+  );
+  const fresh = findings.filter((f) => grown.has(f.key));
+  const stale = scope ? [] : Object.keys(baseline).filter((k) => (counts[k] ?? 0) < baseline[k]);
+  return { fresh, stale, counts };
+}
+
+function format(findings) {
+  return findings
+    .toSorted((a, b) => a.file.localeCompare(b.file) || a.line - b.line)
+    .map((f) => `  ${f.file}:${f.line}  ${f.tool} ${f.rule}  ${f.message}`)
+    .join('\n');
+}
+
+const NEXT =
+  'Fix the code. Do not edit guardrails.baseline.json, raise limits, add bare disables or bypass hooks. ' +
+  'A justified disable names the rule and gives a reason: // oxlint-disable-next-line <rule> -- <why>, <tracking ref>';
+
+function report(fresh, baseline) {
+  const known = Object.values(baseline).reduce((a, b) => a + b, 0);
+  return `guardrails: ${fresh.length} new finding(s) above the baseline (${known} known)\n${format(fresh)}\n${NEXT}`;
+}
+
+// ── Commands ──
+
+function check(argv) {
+  const files = argv.includes('--changed')
+    ? changedFiles()
+    : argv.includes('--files')
+      ? argv.slice(argv.indexOf('--files') + 1)
+      : null;
+  const scope = files ? new Set(lintable(files)) : null;
+  if (scope && argv.includes('--strict-baseline')) {
+    console.error('guardrails: --strict-baseline needs a full check (no --changed or --files)');
+    return 1;
+  }
+  const baseline = readBaseline();
+  const { fresh, stale } = compare(collect(files), baseline, scope);
+  if (fresh.length > 0) {
+    console.error(report(fresh, baseline));
+    return 1;
+  }
+  console.log(`guardrails: clean${scope ? ` (${scope.size} file(s))` : ''}`);
+  if (stale.length > 0) {
+    const msg = `guardrails: ${stale.length} baseline entr(ies) improved. Run: node scripts/guardrails.mjs baseline --tighten`;
+    if (argv.includes('--strict-baseline')) {
+      console.error(msg);
+      return 1;
+    }
+    console.log(msg);
+  }
+  return 0;
+}
+
+function baselineCmd(argv) {
+  const counts = tally(collect(null));
+  if (argv.includes('--tighten')) {
+    const old = readBaseline();
+    const grown = Object.keys(counts).filter((k) => counts[k] > (old[k] ?? 0));
+    if (grown.length > 0) {
+      console.error(
+        `guardrails: cannot tighten, ${grown.length} key(s) grew. Run check and fix them first.`,
+      );
+      return 1;
+    }
+    console.log(`guardrails: baseline tightened (${writeBaseline(counts)} keys)`);
+    return ratchetCoverage();
+  }
+  if (argv.includes('--init') && existsSync(BASELINE)) {
+    console.error('guardrails: baseline exists. Use --tighten, or --reset after human review.');
+    return 1;
+  }
+  if (!argv.includes('--init') && !argv.includes('--reset')) {
+    console.error('guardrails: pass --init, --tighten or --reset');
+    return 1;
+  }
+  console.log(`guardrails: baseline written (${writeBaseline(counts)} keys)`);
+  return 0;
+}
+
+function runScript(name, env = {}) {
+  const pm = packageManager();
+  if (!pkg().scripts?.[name]) return { status: 0, skipped: true };
+  const opts = { stdio: 'inherit', env: { ...process.env, ...env } };
+  return run(pm, ['run', name], opts);
+}
+
+// Lets Vitest raise coverage thresholds in vitest.config.ts to the measured values.
+function ratchetCoverage() {
+  const r = runScript('test:coverage', { GUARDRAILS_RATCHET: '1' });
+  if (r.skipped) return 0;
+  if (r.status !== 0) console.error('guardrails: coverage run failed; thresholds unchanged');
+  return r.status ?? 1;
+}
+
+function verify() {
+  for (const step of ['format:check', 'typecheck', 'lint', 'test:coverage']) {
+    const r = runScript(step);
+    if (r.status !== 0) {
+      console.error(`guardrails: verify failed at "${step}"`);
+      return r.status ?? 1;
+    }
+  }
+  return 0;
+}
+
+function formatFiles(argv) {
+  const files = argv.slice(argv.indexOf('--files') + 1);
+  if (files.length === 0) return 0;
+  return (
+    run(needBin('prettier'), ['--write', '--ignore-unknown', ...files], { stdio: 'inherit' })
+      .status ?? 1
+  );
+}
+
+function exec(argv) {
+  const [name, ...rest] = argv;
+  return run(needBin(name), rest, { stdio: 'inherit' }).status ?? 1;
+}
+
+// ── Agent hooks (Claude Code and Codex share the payload shape we use) ──
+
+function readStdin() {
+  try {
+    return JSON.parse(readFileSync(0, 'utf8') || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function editedFiles(input) {
+  const ti = input.tool_input ?? {};
+  const files = [ti.file_path, ti.path, ...(ti.edits ?? []).map((e) => e.file_path)].filter(
+    Boolean,
+  );
+  const patch = typeof ti.command === 'string' ? ti.command : (ti.input ?? '');
+  for (const m of String(patch).matchAll(/^\*\*\* (?:Add|Update) File: (.+)$/gm))
+    files.push(m[1].trim());
+  return lintable(files);
+}
+
+function postEdit(input) {
+  const files = editedFiles(input);
+  if (files.length === 0) return 0;
+  const findings = [...collectOxlint(files), ...collectDisables(files)];
+  const { fresh } = compare(findings, readBaseline(), new Set(files));
+  if (fresh.length === 0) return 0;
+  console.error(report(fresh, readBaseline()));
+  return 2;
+}
+
+function blockStop(reason) {
+  const text = `Guardrail gate failed for your changes. ${reason}`.slice(0, MAX_REASON);
+  console.log(JSON.stringify({ decision: 'block', reason: text }));
+  return 0;
+}
+
+// Deleting a file can break its importers, so deletions alone still run typecheck.
+function stop(input) {
+  if (input.stop_hook_active || changedPaths().length === 0) return 0;
+  const files = changedFiles();
+  const problems = [];
+  const tc = pkg().scripts?.typecheck ? run(packageManager(), ['run', 'typecheck']) : { status: 0 };
+  if (tc.status !== 0) problems.push(`typecheck failed:\n${(tc.stdout + tc.stderr).trim()}`);
+  const { fresh } = compare(collect(files), readBaseline(), new Set(files));
+  if (fresh.length > 0) problems.push(report(fresh, readBaseline()));
+  const vitest = files.length > 0 ? bin('vitest') : null;
+  if (vitest) {
+    const t = run(vitest, ['related', '--run', '--passWithNoTests', ...files]);
+    if (t.status !== 0)
+      problems.push(`tests failed:\n${(t.stdout + t.stderr).trim().slice(-3000)}`);
+  }
+  return problems.length === 0 ? 0 : blockStop(problems.join('\n\n'));
+}
+
+// A broken tool must still reach the agent as a blocking result, not a silent exit 1.
+function hook([kind]) {
+  const input = readStdin();
+  const handlers = { 'post-edit': postEdit, stop };
+  if (!handlers[kind]) {
+    console.error(`guardrails: unknown hook "${kind}"`);
+    return 1;
+  }
+  try {
+    return handlers[kind](input);
+  } catch (error) {
+    const reason = `The guardrails hook could not run: ${error.message}. Fix the tooling or tell the user; do not skip the gate.`;
+    if (kind === 'post-edit') {
+      console.error(reason);
+      return 2;
+    }
+    return input.stop_hook_active ? 0 : blockStop(reason);
+  }
+}
+
+const COMMANDS = { check, baseline: baselineCmd, verify, format: formatFiles, exec, hook };
+const [command, ...argv] = process.argv.slice(2);
+try {
+  const fn = COMMANDS[command];
+  if (!fn) {
+    console.error(`usage: guardrails.mjs <${Object.keys(COMMANDS).join('|')}>`);
+    process.exitCode = 1;
+  } else {
+    process.exitCode = fn(argv);
+  }
+} catch (error) {
+  console.error(`guardrails: ${error.message}`);
+  process.exitCode = 1;
+}
 ```
+<!-- /tmpl -->
 
----
+<!-- tmpl:templates/shared/.oxlintrc.json -->
+```json
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "import", "oxc", "vitest"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error"
+  },
+  "env": { "node": true, "es2024": true },
+  "ignorePatterns": [
+    "**/dist/**",
+    "**/build/**",
+    "**/coverage/**",
+    "**/.turbo/**",
+    "**/.vitest/**",
+    "**/*.d.ts"
+  ],
+  "rules": {
+    "typescript/no-explicit-any": "error",
+    "typescript/no-non-null-assertion": "error",
+    "typescript/ban-ts-comment": [
+      "error",
+      { "ts-expect-error": "allow-with-description", "minimumDescriptionLength": 10 }
+    ],
+    "typescript/consistent-type-imports": "error",
+    "typescript/consistent-type-assertions": [
+      "error",
+      { "assertionStyle": "as", "objectLiteralTypeAssertions": "never" }
+    ],
+    "typescript/no-floating-promises": "error",
+    "typescript/no-misused-promises": "error",
+    "typescript/await-thenable": "error",
+    "typescript/only-throw-error": "error",
+    "typescript/switch-exhaustiveness-check": "error",
+    "typescript/no-unnecessary-type-assertion": "error",
+    "typescript/no-unsafe-argument": "error",
+    "typescript/no-unsafe-assignment": "error",
+    "typescript/no-unsafe-call": "error",
+    "typescript/no-unsafe-member-access": "error",
+    "typescript/no-unsafe-return": "error",
+    "typescript/restrict-template-expressions": "error",
 
-## Phase 2: Gap Analysis
+    "eslint/max-lines": ["error", { "max": 400, "skipBlankLines": true, "skipComments": true }],
+    "eslint/max-lines-per-function": [
+      "error",
+      { "max": 60, "skipBlankLines": true, "skipComments": true }
+    ],
+    "eslint/max-params": ["error", { "max": 4 }],
+    "eslint/max-depth": ["error", 3],
+    "eslint/complexity": ["error", 12],
+    "eslint/max-nested-callbacks": ["error", 3],
+    "eslint/no-console": "error",
+    "eslint/eqeqeq": ["error", "always", { "null": "ignore" }],
+    "eslint/no-param-reassign": "error",
 
-Using the Phase 1 inventory, compile this report and present it to the user before making any changes:
+    "unicorn/filename-case": ["error", { "case": "kebabCase" }],
+    "unicorn/prefer-node-protocol": "error",
+    "unicorn/no-useless-undefined": ["error", { "checkArguments": false }],
+    "unicorn/throw-new-error": "error",
+    "unicorn/no-abusive-eslint-disable": "error",
 
+    "import/no-duplicates": "error",
+    "import/no-self-import": "error",
+
+    "vitest/no-focused-tests": "error",
+    "vitest/expect-expect": "error"
+  },
+  "overrides": [
+    {
+      "files": ["**/*.test.*", "**/*.spec.*", "**/__tests__/**", "**/test/**", "**/tests/**"],
+      "rules": {
+        "eslint/max-lines": "off",
+        "eslint/max-lines-per-function": "off",
+        "eslint/max-nested-callbacks": "off",
+        "typescript/no-non-null-assertion": "off",
+        "typescript/no-unsafe-assignment": "off",
+        "typescript/no-unsafe-member-access": "off",
+        "typescript/no-unsafe-call": "off",
+        "typescript/no-unsafe-argument": "off",
+        "typescript/no-explicit-any": "off"
+      }
+    },
+    {
+      "files": ["**/*.js", "**/*.mjs", "**/*.cjs", "**/*.jsx"],
+      "rules": {
+        "typescript/no-unsafe-argument": "off",
+        "typescript/no-unsafe-assignment": "off",
+        "typescript/no-unsafe-call": "off",
+        "typescript/no-unsafe-member-access": "off",
+        "typescript/no-unsafe-return": "off"
+      }
+    },
+    {
+      "files": ["scripts/**", "**/bin/**", "*.config.*", "**/*.config.*"],
+      "rules": {
+        "eslint/no-console": "off",
+        "eslint/max-lines": "off",
+        "eslint/max-lines-per-function": "off",
+        "eslint/complexity": "off"
+      }
+    }
+  ]
+}
 ```
-GUARDRAIL GAP ANALYSIS
-======================
-Project type:    [single-package | monorepo]
-Package manager: [npm | pnpm | yarn]
-Mode:            [greenfield | retrofit]
+<!-- /tmpl -->
 
-CONFIG FILES
-  PRESENT AND CORRECT:   [list files]
-  PRESENT BUT OUTDATED:  [list files with specific gap, e.g. "lefthook.yml (missing: secrets job)"]
-  MISSING:               [list files]
+<!-- tmpl:templates/shared/lefthook.yml -->
+```yaml
+# lefthook.yml: git hooks. Every command goes through scripts/guardrails.mjs,
+# so hooks behave the same under npm, pnpm, yarn and bun.
 
-PACKAGE.JSON SCRIPTS
-  PRESENT AND CORRECT:   [list scripts]
-  MISSING:               [list scripts]
+pre-commit:
+  piped: true
+  jobs:
+    - name: format
+      glob: '*.{js,mjs,cjs,jsx,ts,mts,cts,tsx,json,md,yml,yaml,css}'
+      run: node scripts/guardrails.mjs format --files {staged_files}
+      stage_fixed: true
 
-DEVDEPENDENCIES
-  ALREADY INSTALLED:     [list packages]
-  MISSING (to install):  [list packages]
+    - name: guardrails
+      glob: '*.{js,mjs,cjs,jsx,ts,mts,cts,tsx}'
+      run: node scripts/guardrails.mjs check --files {staged_files}
 
-[Retrofit only:]
-EXISTING VIOLATIONS: [N lint violations, M @ts-ignore occurrences]
-STRATEGY: Wave mode — auto-fixable rules at error immediately, others at warn
+    - name: secrets
+      run: gitleaks git --pre-commit --staged --redact --no-banner
+
+pre-push:
+  jobs:
+    - name: verify
+      run: node scripts/guardrails.mjs verify
+
+commit-msg:
+  jobs:
+    - name: commitlint
+      run: node scripts/guardrails.mjs exec commitlint --edit {1}
 ```
+<!-- /tmpl -->
 
-**Then ask:** "Confirm this plan? Reply YES to proceed, or list any items to SKIP."
+<!-- tmpl:templates/shared/commitlint.config.mjs -->
+```js
+export default {
+  extends: ['@commitlint/config-conventional'],
+};
+```
+<!-- /tmpl -->
 
-Wait for user confirmation before proceeding to Phase 3. Record any exclusions.
+<!-- tmpl:templates/shared/.prettierrc.json -->
+```json
+{
+  "singleQuote": true,
+  "trailingComma": "all",
+  "printWidth": 100,
+  "semi": true,
+  "tabWidth": 2,
+  "arrowParens": "always",
+  "endOfLine": "lf"
+}
+```
+<!-- /tmpl -->
 
-This single checkpoint replaces the scattered "ask user" prompts in the old workflow — **EXCEPT** still ask separately about:
-- **Tier assignments** (monorepo only): after YES, ask how to classify each detected package into tiers (see Phase 3, eslint.config.js section)
-- **Enum usage**: ask before writing tsconfig — "Does this project use TypeScript `enum` or `namespace` keywords?"
+`.prettierignore`:
 
----
+<!-- tmpl:templates/shared/.prettierignore -->
+```
+dist
+build
+coverage
+node_modules
+.turbo
+.vitest
+*.min.js
+*.min.css
+pnpm-lock.yaml
+guardrails.baseline.json
+.dependency-cruiser-known-violations.json
+# Add generated or column-aligned files below (see docs/known-conflicts.md)
+```
+<!-- /tmpl -->
 
-## Phase 3: Apply Changes
+`.gitignore` lines to merge:
 
-**File treatment policy:**
-- **MISSING**: Create the file from the inline template in this skill.
-- **PRESENT BUT OUTDATED**: Merge the missing sections into the existing file. Do NOT overwrite content that is already correct. Do NOT overwrite unrelated custom content.
-- **PRESENT AND CORRECT**: Skip silently. No warning needed.
+<!-- tmpl:templates/shared/gitignore.txt -->
+```
+node_modules/
+dist/
+build/
+coverage/
+.turbo/
+.vitest/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+```
+<!-- /tmpl -->
 
-**Merge instructions by file type:**
-
-**`lefthook.yml` — outdated (missing job):**
-Read the existing file. Append the missing job block inside `pre-commit.jobs`, immediately before the `commit-msg` section. Do not modify existing jobs or their order.
-
-**`eslint.config.js` — outdated (missing rule group):**
-Read the existing file. Locate the array passed to `tseslint.config(...)`. Find the `eslintConfigPrettier` entry — it MUST remain the last element (see `docs/known-conflicts.md`, "ESLint Config Prettier × ESLint Rules"). Insert the missing config object(s) immediately BEFORE `eslintConfigPrettier`. Do not modify existing config objects. If the file doesn't use `tseslint.config()`, skip the merge and warn the user that the format is non-standard.
-
-**`tsconfig.json` / `tsconfig.base.json` — outdated (missing flags):**
-Add the missing key-value pairs to `compilerOptions`. Do not remove or modify existing options.
-
-**`package.json` scripts — outdated (missing scripts):**
-Add the missing script entries. Do not overwrite scripts that already exist unless the user confirms.
-
-**`.gitignore` — outdated (missing entries):**
-Append the missing entries. Do not remove existing entries.
-
----
-
-### 3a. Foundation Configs
-
-Create these files in the project root. Apply the file treatment policy (create if missing, skip if present).
-
-### `.editorconfig`
-```ini
+<!-- tmpl:templates/shared/.editorconfig -->
+```
 root = true
 
 [*]
@@ -352,794 +964,529 @@ trim_trailing_whitespace = false
 [{Makefile,*.mk}]
 indent_style = tab
 ```
+<!-- /tmpl -->
 
-### `.nvmrc`
-```
-22
-```
+`.nvmrc`:
 
-### `.prettierrc`
+<!-- tmpl:templates/shared/.nvmrc -->
+```
+24
+```
+<!-- /tmpl -->
+
+### Single package
+
+<!-- tmpl:templates/single/package.json -->
 ```json
 {
-  "singleQuote": true,
-  "trailingComma": "all",
-  "printWidth": 100,
-  "semi": true,
-  "tabWidth": 2,
-  "arrowParens": "always",
-  "endOfLine": "lf"
-}
-```
-
-### `.prettierignore`
-```
-dist
-node_modules
-coverage
-*.min.js
-*.min.css
-.turbo/
-# Add auto-generated or column-aligned files below (see docs/known-conflicts.md):
-```
-
----
-
-### 3b. Pre-Commit Hook Config
-
-### `lefthook.yml`
-
-**For single-package projects:**
-```yaml
-pre-commit:
-  parallel: true
-  jobs:
-    - name: prettier
-      run: npx lint-staged
-
-    - name: lint-unused
-      run: npx knip
-
-    - name: lint
-      glob: "*.{ts,tsx}"
-      run: npx eslint {staged_files}
-
-    - name: typecheck
-      run: npx tsc --noEmit
-
-    - name: test-related
-      glob: "src/**/*.ts"
-      run: npx vitest related {staged_files} --run --passWithNoTests
-
-    - name: secrets
-      run: npx gitleaks@latest detect --staged --no-banner
-
-commit-msg:
-  jobs:
-    - name: commitlint
-      run: npx commitlint --edit {1}
-```
-
-**For monorepo projects:**
-```yaml
-pre-commit:
-  parallel: true
-  jobs:
-    - name: prettier
-      run: npx lint-staged
-
-    - name: lint-unused
-      run: npx knip
-
-    - name: lint-deps
-      run: npx syncpack lint
-
-    - name: lint
-      glob: "*.{ts,tsx}"
-      run: npx eslint {staged_files}
-
-    - name: typecheck
-      glob: "packages/*/src/**/*.ts"
-      run: bash scripts/typecheck-staged.sh
-
-    - name: test-related
-      glob: "packages/*/src/**/*.ts"
-      run: npx vitest related {staged_files} --run --passWithNoTests
-
-    - name: secrets
-      run: npx gitleaks@latest detect --staged --no-banner
-
-commit-msg:
-  jobs:
-    - name: commitlint
-      run: npx commitlint --edit {1}
-```
-
-### `commitlint.config.ts`
-
-Generate the scope list from the actual packages detected in Phase 1d:
-
-```typescript
-import type { UserConfig } from '@commitlint/types';
-
-const config: UserConfig = {
-  extends: ['@commitlint/config-conventional'],
-  rules: {
-    'scope-enum': [2, 'always', [
-      // ← INSERT actual package names detected from packages/ and apps/
-      'deps',
-      'ci',
-      'release',
-    ]],
-    'scope-empty': [1, 'never'],
-    'body-max-line-length': [0, 'always', Infinity],
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
   },
-};
-
-export default config;
-```
-
----
-
-### 3c. Linting & Type-Checking Configs
-
-### `eslint.config.js`
-
-**For single-package projects** (no architecture boundaries):
-
-```javascript
-import tseslint from 'typescript-eslint';
-import importX from 'eslint-plugin-import-x';
-import eslintConfigPrettier from 'eslint-config-prettier';
-
-export default tseslint.config(
-  { ignores: ['**/dist/**', '**/node_modules/**', '**/coverage/**'] },
-
-  ...tseslint.configs.strictTypeChecked,
-  {
-    languageOptions: {
-      parserOptions: {
-        projectService: true,
-      },
-    },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "node scripts/guardrails.mjs check",
+    "lint:tighten": "node scripts/guardrails.mjs baseline --tighten",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "verify": "node scripts/guardrails.mjs verify",
+    "prepare": "lefthook install"
   },
-
-  // Import organization: builtins → external → internal → relative
-  {
-    files: ['src/**/*.ts'],
-    plugins: { 'import-x': importX },
-    rules: {
-      'import-x/order': [
-        'error',
-        {
-          groups: ['builtin', 'external', 'internal', 'parent', 'sibling', 'index'],
-          'newlines-between': 'always',
-          alphabetize: { order: 'asc', caseInsensitive: true },
-        },
-      ],
-      'import-x/no-duplicates': 'error',
-      // Catches stale default/named import shapes — ESM rejects these at runtime
-      'import-x/default': 'error',
-      'import-x/named': 'error',
-    },
-  },
-
-  // Runtime safety — prevent type lies that bypass the compiler
-  {
-    files: ['src/**/*.ts'],
-    rules: {
-      // Prevent ! operator — lies to the compiler about nullability
-      '@typescript-eslint/no-non-null-assertion': 'error',
-      // Prevent {} as Foo shortcuts — use proper construction instead
-      '@typescript-eslint/consistent-type-assertions': ['error', {
-        assertionStyle: 'as',
-        objectLiteralTypeAssertions: 'never',
-      }],
-      // Prevent double-cast (as unknown as T) — bypasses the type system entirely
-      'no-restricted-syntax': ['error',
-        {
-          selector: 'TSAsExpression > TSAsExpression',
-          message: 'Double type assertion bypasses the type system. Narrow properly or add an eslint-disable with a paper trail.',
-        },
-      ],
-    },
-  },
-
-  // Ban console.log
-  {
-    files: ['src/**/*.ts'],
-    ignores: ['**/__tests__/**'],
-    rules: {
-      'no-console': 'error',
-    },
-  },
-
-  eslintConfigPrettier,
-);
-```
-
-**For monorepo projects** (with architecture boundary enforcement):
-
-Generate the tier arrays from the actual packages detected in Phase 1d. Ask the user to classify each package into a tier:
-
-- **Tier 0 (leaf):** No workspace dependencies (types, logger, constants)
-- **Tier 1:** Only depends on tier 0 (config, helpers, utilities)
-- **Tier 2:** Wraps external services (database, API clients)
-- **Tier 3:** Business/domain logic
-- **Tier 4:** Orchestration (wires together multiple domain + infra packages)
-- **App tier:** Deployable applications (no restrictions)
-
-```javascript
-import tseslint from 'typescript-eslint';
-import boundaries from 'eslint-plugin-boundaries';
-import importX from 'eslint-plugin-import-x';
-import eslintConfigPrettier from 'eslint-config-prettier';
-
-// ── Replace with actual scope and packages ──
-const SCOPE = 'DETECTED_SCOPE';  // ← from Phase 1c
-
-const tier0 = [/* actual tier 0 package names */];
-const tier1 = [/* actual tier 1 package names */];
-const tier2 = [/* actual tier 2 package names */];
-const tier3 = [/* actual tier 3 package names */];
-const tier4 = [/* actual tier 4 package names */];
-
-const modules = (names) => names.map((n) => `${SCOPE}/${n}`);
-
-export default tseslint.config(
-  { ignores: ['**/dist/**', '**/node_modules/**', '**/coverage/**'] },
-
-  ...tseslint.configs.strictTypeChecked,
-  {
-    languageOptions: {
-      parserOptions: { projectService: true },
-    },
-  },
-
-  // ── Architecture boundaries ──
-  {
-    files: ['packages/*/src/**/*.ts', 'apps/*/src/**/*.ts'],
-    ignores: ['**/__tests__/**', '**/__mocks__/**'],
-    plugins: { boundaries },
-    settings: {
-      'boundaries/elements': [
-        // ← Generate one entry per package:
-        // { type: 'pkg-name', pattern: ['packages/pkg-name/*'], mode: 'folder' },
-      ],
-    },
-    rules: {
-      'boundaries/dependencies': [
-        'error',
-        {
-          default: 'allow',
-          rules: [
-            // Tier 0: no workspace imports
-            {
-              from: { type: tier0 },
-              disallow: { dependency: { module: `${SCOPE}/*` } },
-            },
-            // Tier 1: only tier 0
-            {
-              from: { type: tier1 },
-              disallow: {
-                dependency: {
-                  module: modules([...tier1, ...tier2, ...tier3, ...tier4]),
-                },
-              },
-            },
-            // Tier 2: only tier 0-1
-            {
-              from: { type: tier2 },
-              disallow: {
-                dependency: {
-                  module: modules([...tier2, ...tier3, ...tier4]),
-                },
-              },
-            },
-            // Tier 3: only tier 0-2
-            {
-              from: { type: tier3 },
-              disallow: {
-                dependency: {
-                  module: modules([...tier3, ...tier4]),
-                },
-              },
-            },
-            // Tier 4: only tier 0-3
-            {
-              from: { type: tier4 },
-              disallow: {
-                dependency: { module: modules([...tier4]) },
-              },
-            },
-          ],
-        },
-      ],
-    },
-  },
-
-  // ── Import organization ──
-  {
-    files: ['packages/*/src/**/*.ts', 'apps/*/src/**/*.ts'],
-    plugins: { 'import-x': importX },
-    rules: {
-      'import-x/order': [
-        'error',
-        {
-          groups: ['builtin', 'external', 'internal', 'parent', 'sibling', 'index'],
-          'newlines-between': 'always',
-          alphabetize: { order: 'asc', caseInsensitive: true },
-        },
-      ],
-      'import-x/no-duplicates': 'error',
-      // Catches stale default/named import shapes — ESM rejects these at runtime
-      'import-x/default': 'error',
-      'import-x/named': 'error',
-    },
-  },
-
-  // ── Runtime safety — prevent type lies that bypass the compiler ──
-  {
-    files: ['packages/*/src/**/*.ts', 'apps/*/src/**/*.ts'],
-    rules: {
-      '@typescript-eslint/no-non-null-assertion': 'error',
-      '@typescript-eslint/consistent-type-assertions': ['error', {
-        assertionStyle: 'as',
-        objectLiteralTypeAssertions: 'never',
-      }],
-      'no-restricted-syntax': ['error',
-        {
-          selector: 'TSAsExpression > TSAsExpression',
-          message: 'Double type assertion bypasses the type system. Narrow properly or add an eslint-disable with a paper trail.',
-        },
-      ],
-    },
-  },
-
-  // ── Ban console.log ──
-  {
-    files: ['packages/*/src/**/*.ts'],
-    ignores: ['**/logger/src/**', '**/__tests__/**'],
-    rules: { 'no-console': 'error' },
-  },
-
-  eslintConfigPrettier,
-);
-```
-
-### TypeScript Configuration
-
-> **ASK THE USER:** "Does this project use TypeScript `enum` or `namespace` keywords?"
-> - If **NO** (recommended): include `"erasableSyntaxOnly": true` — prepares the project for native Node.js TS execution (type stripping)
-> - If **YES**: omit `erasableSyntaxOnly` — enums/namespaces require transpilation and are incompatible with type stripping
-
-**`tsconfig.base.json`** (monorepo only):
-
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "composite": true,
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "noImplicitOverride": true,
-    "noPropertyAccessFromIndexSignature": true,
-    "forceConsistentCasingInFileNames": true,
-    "verbatimModuleSyntax": true,
-    "isolatedModules": true,
-    "erasableSyntaxOnly": true,
-    "incremental": true,
-    "skipLibCheck": true
-  },
-  "exclude": ["node_modules", "**/dist/**"]
-}
-```
-
-For single-package projects, write a `tsconfig.json` instead (with `outDir` and `rootDir`):
-
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "noImplicitOverride": true,
-    "noPropertyAccessFromIndexSignature": true,
-    "forceConsistentCasingInFileNames": true,
-    "verbatimModuleSyntax": true,
-    "isolatedModules": true,
-    "erasableSyntaxOnly": true,
-    "incremental": true,
-    "skipLibCheck": true,
-    "outDir": "dist",
-    "rootDir": "src"
-  },
-  "include": ["src"],
-  "exclude": ["dist", "node_modules"]
-}
-```
-
-**New flags explained:**
-- `isolatedModules` — ensures each file can be compiled independently (required for esbuild/swc compatibility)
-- `erasableSyntaxOnly` — errors on enums/namespaces/parameter properties, enabling native Node.js TS execution
-- `incremental` — caches type-check results for faster rebuilds
-
-If a `tsconfig.json` already exists, apply the merge policy: add any missing flags to `compilerOptions`, do not overwrite existing options.
-
----
-
-### 3d. Code Health Configs (Monorepo Only)
-
-Skip this entire section for single-package projects.
-
-### `knip.json`
-
-Generate workspace entries from the actual packages detected in Phase 1d:
-
-```json
-{
-  "workspaces": {
-    "packages/*": {
-      "entry": ["src/index.ts"],
-      "project": ["src/**/*.ts"]
-    }
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.4",
+    "@types/node": "^24.0.0",
+    "@typescript/native": "npm:typescript@^7.0.2",
+    "@vitest/coverage-v8": "^5.0.5",
+    "dependency-cruiser": "^18.7.0",
+    "knip": "^6.43.0",
+    "lefthook": "^2.2.2",
+    "oxlint": "^1.90.0",
+    "oxlint-tsgolint": "^7.0.2005",
+    "prettier": "^3.9.10",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
   }
 }
 ```
+<!-- /tmpl -->
 
-### `.syncpackrc.json`
-
-Use the detected org scope from Phase 1c:
-
+<!-- tmpl:templates/single/tsconfig.json -->
 ```json
 {
-  "semverGroups": [
+  "compilerOptions": {
+    "target": "es2024",
+    "lib": ["es2024"],
+    "module": "nodenext",
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src", "test", "*.config.ts"]
+}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/single/tsconfig.build.json -->
+```json
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  },
+  "include": ["src"],
+  "exclude": ["**/*.test.ts", "**/__tests__/**"]
+}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/single/.dependency-cruiser.mjs -->
+```js
+// Architecture rules for a single package. Layers are listed lowest first:
+// a layer may import from layers below it, never from layers above it.
+// Adjust LAYERS to the directories this project actually has.
+const LAYERS = [
+  'src/shared',
+  'src/domain',
+  'src/application',
+  'src/infrastructure',
+  'src/interface',
+];
+
+const layerRules = LAYERS.slice(0, -1).map((layer, i) => ({
+  name: `layer-${layer.split('/').pop()}`,
+  comment: `${layer} may only import from layers below it`,
+  severity: 'error',
+  from: { path: `^${layer}/` },
+  to: { path: `^(${LAYERS.slice(i + 1).join('|')})/` },
+}));
+
+/** @type {import('dependency-cruiser').IConfiguration} */
+export default {
+  forbidden: [
+    ...layerRules,
     {
-      "label": "Internal workspace packages use exact versions",
-      "packages": ["DETECTED_SCOPE/**"],
-      "dependencies": ["DETECTED_SCOPE/**"],
-      "dependencyTypes": ["prod", "dev"],
-      "pinVersion": "*"
-    }
+      name: 'no-circular',
+      severity: 'error',
+      from: {},
+      to: { circular: true },
+    },
+    {
+      name: 'not-to-unresolvable',
+      severity: 'error',
+      from: {},
+      to: { couldNotResolve: true },
+    },
+    {
+      name: 'not-to-dev-dep',
+      comment: 'Production code must not import devDependencies',
+      severity: 'error',
+      from: { path: '^src/', pathNot: '\\.(test|spec)\\.[cm]?[jt]sx?$' },
+      to: { dependencyTypes: ['npm-dev'], dependencyTypesNot: ['type-only'] },
+    },
+    {
+      name: 'no-non-package-json',
+      severity: 'error',
+      from: {},
+      to: { dependencyTypes: ['npm-no-pkg', 'npm-unknown'] },
+    },
+    {
+      name: 'not-to-test',
+      severity: 'error',
+      from: { pathNot: '\\.(test|spec)\\.[cm]?[jt]sx?$|^test/' },
+      to: { path: '\\.(test|spec)\\.[cm]?[jt]sx?$|^test/' },
+    },
   ],
-  "versionGroups": [
-    {
-      "label": "All third-party deps should use the same version",
-      "packages": ["**"],
-      "dependencies": ["**"],
-      "dependencyTypes": ["prod", "dev"]
-    }
+  options: {
+    doNotFollow: { path: 'node_modules' },
+    exclude: { path: '(^|/)(dist|build|coverage)/' },
+    tsConfig: { fileName: 'tsconfig.json' },
+    tsPreCompilationDeps: true,
+    enhancedResolveOptions: {
+      exportsFields: ['exports'],
+      conditionNames: ['import', 'require', 'node', 'default', 'types'],
+    },
+  },
+};
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/single/knip.json -->
+```json
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": ["src/index.ts"],
+  "project": ["src/**/*.{ts,tsx}"],
+  "ignoreExportsUsedInFile": true,
+  "ignoreDependencies": [
+    "@commitlint/cli",
+    "@typescript/native",
+    "oxlint",
+    "oxlint-tsgolint",
+    "vite"
   ]
 }
 ```
+<!-- /tmpl -->
 
-Replace `DETECTED_SCOPE` with the actual scope. For pnpm/yarn, change `"pinVersion": "*"` to `"pinVersion": "workspace:*"`.
+<!-- tmpl:templates/single/vitest.config.ts -->
+```ts
+import { defineConfig } from 'vitest/config';
 
-### `turbo.json`
+// Coverage floors only move up. `guardrails.mjs baseline --tighten` runs coverage with
+// GUARDRAILS_RATCHET=1, which lets Vitest raise the thresholds below to what is measured.
+const ratchet = process.env['GUARDRAILS_RATCHET'] === '1';
 
+export default defineConfig({
+  test: {
+    include: ['src/**/*.test.{ts,tsx}', 'test/**/*.test.{ts,tsx}'],
+    coverage: {
+      provider: 'v8',
+      include: ['src/**/*.{ts,tsx}'],
+      reporter: ['text-summary', 'lcov'],
+      thresholds: {
+        lines: 80,
+        branches: 75,
+        functions: 80,
+        statements: 80,
+        autoUpdate: ratchet ? (next: number): number => Math.floor(next) : false,
+      },
+    },
+  },
+});
+```
+<!-- /tmpl -->
+
+### Monorepo
+
+<!-- tmpl:templates/monorepo/package.json -->
 ```json
 {
-  "$schema": "https://turbo.build/schema.json",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "tsc --noEmit && turbo run typecheck",
+    "lint": "node scripts/guardrails.mjs check && syncpack lint",
+    "lint:tighten": "node scripts/guardrails.mjs baseline --tighten",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "verify": "node scripts/guardrails.mjs verify",
+    "prepare": "lefthook install"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.4",
+    "@types/node": "^24.0.0",
+    "@typescript/native": "npm:typescript@^7.0.2",
+    "@vitest/coverage-v8": "^5.0.5",
+    "dependency-cruiser": "^18.7.0",
+    "knip": "^6.43.0",
+    "lefthook": "^2.2.2",
+    "oxlint": "^1.90.0",
+    "oxlint-tsgolint": "^7.0.2005",
+    "prettier": "^3.9.10",
+    "syncpack": "^15.3.3",
+    "turbo": "^2.11.10",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  }
+}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/monorepo/tsconfig.base.json -->
+```json
+{
+  "compilerOptions": {
+    "target": "es2024",
+    "lib": ["es2024"],
+    "module": "nodenext",
+    "types": ["node"],
+    "customConditions": ["source"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  }
+}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/monorepo/tsconfig.json -->
+```json
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["*.config.ts"]
+}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/monorepo/.dependency-cruiser.mjs -->
+```js
+// Architecture rules for a monorepo. Workspace directories are grouped into tiers, lowest
+// first. A package may import from packages in lower tiers only: never from its own tier,
+// never from a higher one. Adjust TIERS to this repo's packages (globs allowed: 'apps/*').
+const TIERS = [
+  ['packages/types'], // tier 0: no workspace dependencies
+  ['packages/core'], // tier 1: may import tier 0
+  ['apps/*'], // apps: may import any package, never another app
+];
+
+const toRegex = (dir) => dir.replaceAll('*', '[^/]+');
+const group = (dirs) => `(${dirs.map(toRegex).join('|')})`;
+
+const tierRules = TIERS.map((tier, i) => ({
+  name: `tier-${i}`,
+  comment: `${tier.join(', ')} may only import from lower tiers`,
+  severity: 'error',
+  from: { path: `^${group(tier)}/` },
+  to: { path: `^${group(TIERS.slice(i).flat())}/`, pathNot: '^$1/' },
+}));
+
+/** @type {import('dependency-cruiser').IConfiguration} */
+export default {
+  forbidden: [
+    ...tierRules,
+    {
+      name: 'no-circular',
+      severity: 'error',
+      from: {},
+      to: { circular: true },
+    },
+    {
+      name: 'not-to-unresolvable',
+      severity: 'error',
+      from: {},
+      to: { couldNotResolve: true },
+    },
+    {
+      name: 'no-relative-cross-package',
+      comment: 'Import other workspace packages by name, not by relative path',
+      severity: 'error',
+      from: { path: '^(packages|apps)/([^/]+)/' },
+      to: { path: '^(packages|apps)/', pathNot: '^$1/$2/', dependencyTypes: ['local'] },
+    },
+    {
+      name: 'no-non-package-json',
+      severity: 'error',
+      from: {},
+      to: { dependencyTypes: ['npm-no-pkg', 'npm-unknown'] },
+    },
+  ],
+  options: {
+    doNotFollow: { path: 'node_modules' },
+    exclude: { path: '(^|/)(dist|build|coverage)/' },
+    tsConfig: { fileName: 'tsconfig.base.json' },
+    tsPreCompilationDeps: true,
+    combinedDependencies: true,
+    enhancedResolveOptions: {
+      exportsFields: ['exports'],
+      conditionNames: ['source', 'import', 'require', 'node', 'default', 'types'],
+    },
+  },
+};
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/monorepo/knip.json -->
+```json
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "workspaces": {
+    ".": {
+      "entry": ["scripts/*.mjs"]
+    },
+    "packages/*": {
+      "entry": ["src/index.ts"],
+      "project": ["src/**/*.{ts,tsx}"]
+    },
+    "apps/*": {
+      "entry": ["src/main.ts", "src/index.ts"],
+      "project": ["src/**/*.{ts,tsx}"]
+    }
+  },
+  "ignoreExportsUsedInFile": true,
+  "ignoreDependencies": [
+    "@commitlint/cli",
+    "@typescript/native",
+    "oxlint",
+    "oxlint-tsgolint",
+    "vite"
+  ]
+}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/monorepo/turbo.json -->
+```json
+{
+  "$schema": "https://turborepo.com/schema.json",
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
     },
     "typecheck": {
-      "dependsOn": ["^build"],
-      "outputs": []
-    },
-    "test": {
-      "dependsOn": ["^build"],
-      "outputs": ["coverage/**"]
-    },
-    "lint": {
-      "dependsOn": [],
       "outputs": []
     }
   }
 }
 ```
+<!-- /tmpl -->
 
----
+<!-- tmpl:templates/monorepo/.syncpackrc.json -->
+```json
+{
+  "$schema": "./node_modules/syncpack/schema.json",
+  "versionGroups": [
+    {
+      "label": "Workspace packages depend on each other through the workspace protocol",
+      "dependencies": ["$LOCAL"],
+      "dependencyTypes": ["!local"],
+      "pinVersion": "workspace:*"
+    },
+    {
+      "label": "Every other dependency uses one version across the repo",
+      "dependencies": ["**"],
+      "packages": ["**"]
+    }
+  ]
+}
+```
+<!-- /tmpl -->
 
-### 3e. Test Config
-
-### `vitest.config.ts`
-
-```typescript
+<!-- tmpl:templates/monorepo/vitest.config.ts -->
+```ts
 import { defineConfig } from 'vitest/config';
 
+// Coverage floors only move up. `guardrails.mjs baseline --tighten` runs coverage with
+// GUARDRAILS_RATCHET=1, which lets Vitest raise the thresholds below to what is measured.
+const ratchet = process.env['GUARDRAILS_RATCHET'] === '1';
+
 export default defineConfig({
+  // Resolve workspace packages to their TypeScript source (the "source" export condition).
+  resolve: { conditions: ['source'] },
+  ssr: { resolve: { conditions: ['source'] } },
   test: {
-    globals: true,
-    include: ['src/**/*.test.ts'],
+    include: ['{packages,apps}/*/src/**/*.test.{ts,tsx}'],
     coverage: {
       provider: 'v8',
-      reporter: ['text', 'lcov'],
+      include: ['{packages,apps}/*/src/**/*.{ts,tsx}'],
+      reporter: ['text-summary', 'lcov'],
+      thresholds: {
+        lines: 80,
+        branches: 75,
+        functions: 80,
+        statements: 80,
+        autoUpdate: ratchet ? (next: number): number => Math.floor(next) : false,
+      },
     },
   },
 });
 ```
+<!-- /tmpl -->
 
-For monorepos, update the `include` pattern:
-```typescript
-include: ['packages/*/src/**/*.test.ts', 'apps/*/src/**/*.test.ts'],
+### CI
+
+<!-- tmpl:templates/ci/ci.yml -->
+```yaml
+# .github/workflows/ci.yml: the same gate as `git push`, plus a secret scan.
+# Actions are pinned by commit SHA; Renovate or Dependabot keeps the pins current.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # pnpm only: remove this step for npm, yarn or bun.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm # npm | pnpm | yarn
+
+      - run: pnpm install --frozen-lockfile # npm ci | yarn install --frozen-lockfile
+
+      - name: Verify (format, typecheck, guardrails, tests with coverage)
+        run: node scripts/guardrails.mjs verify
+
+      - name: Baseline is tight
+        run: node scripts/guardrails.mjs check --strict-baseline
+
+      - name: Commit messages
+        if: github.event_name == 'pull_request'
+        run: >-
+          node scripts/guardrails.mjs exec commitlint
+          --from ${{ github.event.pull_request.base.sha }}
+          --to ${{ github.event.pull_request.head.sha }}
+
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GITLEAKS_VERSION: 8.30.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+      - name: Scan history
+        run: gitleaks git --redact --no-banner --log-opts="--all"
 ```
-
-> **Coverage thresholds are intentionally omitted here.** They are set by the `enforce-code-discipline` skill, which baselines them against your current coverage in retrofit mode, or sets hard gates (80% lines/functions/statements, 75% branches) in greenfield mode. Run that skill after this one.
-
----
-
-### 3f. Helper Scripts (Monorepo Only)
-
-Skip this step for single-package projects.
-
-### `scripts/typecheck-staged.sh`
-
-```bash
-#!/usr/bin/env bash
-# Type-check only the packages that have staged changes.
-set -euo pipefail
-
-STAGED=$(git diff --cached --name-only --diff-filter=d | grep -oP 'packages/[^/]+' | sort -u)
-if [ -z "$STAGED" ]; then
-  echo "No packages with staged changes — skipping typecheck."
-  exit 0
-fi
-
-for pkg in $STAGED; do
-  if [ -f "$pkg/tsconfig.json" ]; then
-    echo "Type-checking $pkg..."
-    npx tsc -b "$pkg" --noEmit
-  fi
-done
-```
-
-Make it executable: `chmod +x scripts/typecheck-staged.sh`
-
-### `scripts/publint-all.sh`
-
-```bash
-#!/usr/bin/env bash
-# Run publint against every workspace package that has a dist/ folder.
-set -euo pipefail
-
-EXIT_CODE=0
-for pkg in packages/*/; do
-  if [ -d "$pkg/dist" ]; then
-    echo "publint: $pkg"
-    npx publint "$pkg" || EXIT_CODE=1
-  fi
-done
-
-exit $EXIT_CODE
-```
-
-Make it executable: `chmod +x scripts/publint-all.sh`
-
----
-
-### 3g. Update package.json
-
-### 3g-i. Add lint-staged config
-
-```json
-{
-  "lint-staged": {
-    "*.{ts,tsx,js,jsx,mjs,cjs,json,md,css,html,yml,yaml}": "prettier --write"
-  }
-}
-```
-
-### 3g-ii. Add npm scripts
-
-**Single package:**
-```json
-{
-  "scripts": {
-    "build": "tsc",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "lint": "eslint 'src/**/*.ts'",
-    "lint:unused": "knip",
-    "prettier:check": "prettier --check '**/*.{ts,js,json,md,yml}'",
-    "prettier:fix": "prettier --write '**/*.{ts,js,json,md,yml}'",
-    "prepare": "lefthook install"
-  }
-}
-```
-
-**Monorepo:**
-```json
-{
-  "scripts": {
-    "build": "turbo run build",
-    "typecheck": "turbo run typecheck",
-    "test": "vitest run",
-    "lint": "eslint 'packages/*/src/**/*.ts'",
-    "lint:unused": "knip",
-    "lint:deps": "syncpack lint",
-    "lint:packages": "bash scripts/publint-all.sh",
-    "prettier:check": "prettier --check '**/*.{ts,js,json,md,yml}'",
-    "prettier:fix": "prettier --write '**/*.{ts,js,json,md,yml}'",
-    "prepare": "lefthook install"
-  }
-}
-```
-
-Apply the merge policy — add missing scripts, do NOT overwrite scripts that already exist unless the user confirms.
-
----
-
-### 3h. Install Missing devDependencies
-
-Install ONLY the packages identified as missing in Phase 1f. Do not reinstall packages that are already present.
-
-**All projects (install only what is missing from this list):**
-```bash
-npm install -D lefthook prettier lint-staged eslint typescript vitest knip @commitlint/cli @commitlint/config-conventional typescript-eslint eslint-config-prettier eslint-plugin-import-x publint
-```
-
-**Monorepo only — add these if missing:**
-```bash
-npm install -D eslint-plugin-boundaries syncpack turbo
-```
-
-Adapt for detected package manager:
-- pnpm: `pnpm add -D ...`
-- yarn: `yarn add -D ...`
-
----
-
-### 3i. Initialize Git Hooks
-
-```bash
-npx lefthook install
-```
-
-This creates `.git/hooks/` symlinks that make pre-commit checks fire automatically. This command is idempotent — safe to run even if hooks were already installed.
-
----
-
-### 3j. Merge or Create `.gitignore`
-
-If `.gitignore` exists, append any missing entries. If it doesn't exist, create it:
-
-```
-node_modules/
-dist/
-coverage/
-*.tsbuildinfo
-.turbo/
-.env
-.env.local
-```
-
----
-
-## Phase 4: Verify
-
-### 4a. Run verification commit
-
-```bash
-git add -A
-git commit --allow-empty -m "chore: verify guardrail setup"
-```
-
-**Greenfield success criteria:**
-- All checks pass with zero warnings and zero errors
-- The commit succeeds — setup is complete
-
-**Retrofit success criteria:**
-- Pre-commit hooks run without errors (warnings are expected and tracked)
-- Warning budget header in `eslint.config.js` is accurate and honest
-- No rule was force-flipped to `error` at a non-zero baseline
-- Auto-fixable rules (formatting, import ordering) are already at `error`
-- User understands the wave sequencing plan (see below)
-
-If the commit fails, read the errors and fix them — **this is the self-correcting loop in action.**
-
-### 4b. Verification checklist
-
-- [ ] `lefthook.yml` exists with `name: secrets` job
-- [ ] For monorepo: `lefthook.yml` has `name: lint-deps` job
-- [ ] `npx lefthook install` succeeded (`.git/hooks/` entries created)
-- [ ] `eslint.config.js` exists with `import-x/named`, `import-x/default`, `no-non-null-assertion`, `TSAsExpression > TSAsExpression`
-- [ ] For monorepo: `eslint.config.js` imports `eslint-plugin-boundaries`
-- [ ] `.prettierrc` exists
-- [ ] `commitlint.config.ts` exists with actual package scopes
-- [ ] `vitest.config.ts` exists with correct `include` pattern
-- [ ] `tsconfig` includes `"isolatedModules"`, `"verbatimModuleSyntax"`, `"incremental"` (and `"erasableSyntaxOnly"` if user confirmed no enums)
-- [ ] `.editorconfig` exists
-- [ ] `.nvmrc` exists
-- [ ] `package.json` has `lint:unused`, `prettier:check`, `prettier:fix`, `prepare` scripts
-- [ ] `git commit --allow-empty` passes without hook errors
-- [ ] Lockfile updated with new devDependencies (including `eslint-plugin-import-x`)
-- [ ] For monorepo: `tsconfig.base.json`, `knip.json`, `.syncpackrc.json`, `turbo.json` exist
-- [ ] For monorepo: `scripts/typecheck-staged.sh` exists and is executable
-- [ ] For retrofit: warning budget header present and honest; no rule at `error` with non-zero violations
-
-### 4c. Adoption summary
-
-After the verification commit succeeds, report:
-
-```
-SETUP COMPLETE
-==============
-Files created:    [N] new files
-Files updated:    [Y] existing files with merged sections
-Files unchanged:  [Z] already correct
-Deps installed:   [W] new packages
-```
-
----
-
-## Wave Sequencing (Retrofit Projects)
-
-After initial setup in retrofit mode, drive each rule category to zero violations one wave at a time. Do NOT mix waves — complete one before starting the next.
-
-### Wave 1: Auto-fixable rules (usually same-day)
-- `import-x/order` → run `npx eslint --fix` → already at error
-- `import-x/no-duplicates` → run `npx eslint --fix` → already at error
-- Prettier issues → run `npx prettier --write .` → already enforced
-- Update the warning budget header with post-fix counts
-
-### Wave 2: Import correctness (1–3 days)
-- `import-x/default` + `import-x/named` → fix each import mismatch manually
-- Common fix: change `import Foo from './bar'` to `import { Foo } from './bar'`
-- For React.lazy consumers: use `.then((m) => ({ default: m.NamedExport }))`
-- When count reaches 0 → flip to `error` in the same commit
-- Commit message: `refactor(lint): flip import-x/default warn→error (0 violations)`
-
-### Wave 3: Type safety (3–7 days)
-- `no-non-null-assertion` → replace `!` with proper null checks (`if`, `??`, optional chaining)
-- `consistent-type-assertions` → replace `{} as Foo` with proper construction or factory functions
-- `no-restricted-syntax` (double-cast) → narrow types properly instead of `as unknown as T`
-- When count reaches 0 → flip to `error`
-
-### Wave 4: Architecture boundaries (1–2 weeks, monorepo only)
-- `boundaries/dependencies` → refactor cross-tier imports
-- Move shared code to lower-tier packages
-- Use dependency injection where direct import is impossible
-- When count reaches 0 → flip to `error`
-
-### After each wave
-1. Update the warning budget header with the new counts
-2. Commit the rule flip with a clear message
-3. The pre-commit hook now enforces the rule — no regression possible
-4. Move to the next wave
-
-See [reference/retrofit-rollout.md](../../reference/retrofit-rollout.md) for a complete worked example.
-
-## Related Skills
-
-Pick the right skill for your situation:
-
-- **Setting up an AI-assisted project from scratch, or adding guardrails to an existing codebase?**
-  → You're in the right place. Complete this skill, then run `enforce-code-discipline`.
-
-- **LLMs frequently write or refactor code in this project?**
-  → After setup, run `enforce-code-discipline` to add complexity limits, naming conventions, and coverage gates.
-  These rules specifically target the patterns LLMs produce that type-checking alone misses.
-
-- **Monorepo with multiple packages and you need to control which can import which?**
-  → After setup, read `enforce-architecture` to understand and configure your tier boundary rules.
-  It explains rule intentions, common violations, and how to handle legitimate exceptions.
-
-- **`git commit` was rejected after guardrails were installed?**
-  → See `self-correcting-loop` — it walks through reading hook output, fixing the issue, and retrying
-  without fighting the tools.
-
-- **Adding a new workspace package to an existing monorepo?**
-  → See `adding-a-package` — it wires up the tsconfig, ESLint boundaries entry, and Turborepo task
-  for the new package without breaking the existing ones.
+<!-- /tmpl -->

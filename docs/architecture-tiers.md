@@ -1,115 +1,73 @@
-# Architecture Tiers
+# Architecture tiers and layers
 
-How to design your dependency hierarchy and enforce it with `eslint-plugin-boundaries`.
+Agents do not know your architecture. Asked to add a feature, they import whatever is closest, including from code that should depend on them. dependency-cruiser turns the intended direction into a rule that fails with the file and the rule name.
 
-## The Problem
+One rule covers both cases: **code may import from lower levels only.**
 
-AI coding agents have **no understanding of your architecture**. When asked to "add a feature to package X," an agent will happily import from a higher-tier orchestration package — creating a circular dependency. The boundaries plugin stops this with a clear error message the agent can act on.
+## Single package: layers
 
-## How Tiers Work
-
-```
-                    ┌─────────────┐
-    Tier 5 (apps)   │  cli / web  │  ← can import ANYTHING
-                    └──────┬──────┘
-                           │
-    Tier 4 (orchestration) │ orchestrator  ← can import tier 0–3
-                           │
-    Tier 3 (domain)        │ domain-logic, processing  ← can import tier 0–2
-                           │
-    Tier 2 (infra)         │ database, external-api  ← can import tier 0–1
-                           │
-    Tier 1 (utils)         │ config, helpers  ← can import tier 0
-                           │
-    Tier 0 (leaf)          │ shared-types, logger  ← NO workspace imports
-                    ───────┴──────────
-```
-
-**One rule governs everything:** A tier can import from any LOWER tier, never from its own tier or higher.
-
-## Designing Your Tiers
-
-### Step 1: Identify Leaf Packages
-
-Leaf packages have **no workspace dependencies**. They are pure utilities that everything else can use:
-- Type definitions
-- Logging
-- Constants
-- Pure utility functions
-
-These are **Tier 0**.
-
-### Step 2: Work Upward
-
-For each remaining package, ask: "What workspace packages does this depend on?"
-
-- If it only depends on Tier 0 → it's Tier 1
-- If it depends on Tier 0 + Tier 1 → it's Tier 2
-- Continue until you reach your apps
-
-### Step 3: Validate No Circular Dependencies
-
-Draw your dependency graph. If package A depends on package B and B depends on A, they must be in the same package or one must be split.
-
-### Step 4: Map to ESLint Config
+`.dependency-cruiser.mjs` lists directories lowest first:
 
 ```js
-// eslint.config.js
-const SCOPE = '@your-org';
-
-const tier0 = ['shared-types', 'logger'];
-const tier1 = ['config', 'helpers'];
-const tier2 = ['database', 'external-api'];
-const tier3 = ['domain-logic', 'processing'];
-const tier4 = ['orchestrator'];
+const LAYERS = [
+  'src/shared',
+  'src/domain',
+  'src/application',
+  'src/infrastructure',
+  'src/interface',
+];
 ```
 
-Then configure the boundary rules:
-- Tier 0: disallow ALL `@your-org/*` imports
-- Tier 1: disallow `@your-org/{tier1, tier2, tier3, tier4}` imports
-- Tier 2: disallow `@your-org/{tier2, tier3, tier4}` imports
-- And so on...
-- Apps (top tier): no restrictions
+`src/domain` may import `src/shared`. It may not import `src/application`, `src/infrastructure` or `src/interface`. Each generated rule is named after the layer it protects (`layer-domain`). The skill maps this list to the directories your project actually has.
 
-## Real-World Example
+## Monorepo: tiers
 
-### Before Guardrails
-```
-packages/database/src/client.ts:
-  import { formatLog } from '@acme/orchestrator';  // ← WRONG! Tier 2 importing Tier 4
-```
-
-### What the Agent Sees
-```
-error  Import @acme/orchestrator is not allowed from packages/database (tier 2).
-       @acme/orchestrator is tier 4. A package can only import from lower tiers.
-       boundaries/dependencies
-```
-
-### After the Agent Self-Corrects
-```
-packages/database/src/client.ts:
-  import { formatLog } from '@acme/logger';  // ← Correct! Tier 2 importing Tier 0
-```
-
-## For Single-Package Projects
-
-If you don't have a monorepo, you can still use boundaries to enforce module isolation within a single package:
+`TIERS` lists workspace directories lowest first. Globs are allowed.
 
 ```js
-{
-  'boundaries/elements': [
-    { type: 'domain', pattern: ['src/domain/*'], mode: 'folder' },
-    { type: 'infra', pattern: ['src/infra/*'], mode: 'folder' },
-    { type: 'api', pattern: ['src/api/*'], mode: 'folder' },
-  ]
-}
+const TIERS = [
+  ['packages/types', 'packages/logger'], // tier 0: no workspace dependencies
+  ['packages/config'],                   // tier 1
+  ['packages/billing', 'packages/ledger'], // tier 2
+  ['apps/*'],                            // apps
+];
 ```
 
-Rule: `domain/` should never import from `api/` or `infra/`.
+A package may import packages in lower tiers only. It may not import a package in its own tier, which also means one app never imports another. Rules are named `tier-0`, `tier-1`, and so on.
 
-## Further Reading
+## Designing tiers
 
-- [eslint-plugin-boundaries docs](https://github.com/javierbrea/eslint-plugin-boundaries)
-- [Tool Reference](./tool-reference.md) — full ESLint config
-- [Monorepo Setup](./monorepo-setup.md) — workspace configuration
+1. **Find the leaves.** Packages with no workspace dependencies (types, logging, constants, pure utilities) are tier 0.
+2. **Work upward.** A package that depends only on tier 0 is tier 1. One that depends on tier 1 is tier 2. Continue to the apps.
+3. **Resolve cycles.** If two packages need each other, they belong together, or the shared part moves into a lower package.
+4. **Keep tiers wide and few.** Three to five tiers is typical. Same-tier imports are forbidden, so put packages in the same tier only when they are true peers.
+
+Layers in a single package follow the same steps with directories.
+
+## What the agent sees
+
+```text
+guardrails: 1 new finding(s) above the baseline (0 known)
+  packages/ledger/src/post.ts:0  depcruise tier-2  imports packages/billing/src/index.ts
+```
+
+`packages/ledger` and `packages/billing` are both tier 2. The fix is to move the shared type or function down to a tier 0 or tier 1 package, or to pass it in from the app that already depends on both.
+
+## Other rules
+
+| Rule | Variant | Catches |
+| --- | --- | --- |
+| `no-circular` | both | Import cycles |
+| `not-to-unresolvable` | both | Imports that do not resolve |
+| `no-non-package-json` | both | Packages imported but not declared (phantom deps) |
+| `not-to-dev-dep` | single | Production code importing a devDependency |
+| `not-to-test` | single | Production code importing test files |
+| `no-relative-cross-package` | monorepo | `../../other-package/src/x` instead of the package name |
+
+## Existing violations
+
+On an existing codebase, current violations go into the baseline like any other finding. Fix them by cluster: most violations come from a few package pairs. See [Retrofit](./retrofit.md#wave-3-architecture).
+
+## Changing the map
+
+Adding a directory or package, or moving one between tiers, is an edit to `LAYERS` or `TIERS`. Use the `enforce-architecture` skill for reviews and changes, and the `adding-a-package` skill for new workspace packages. Raising a package's tier to make an import legal is a design change: a human should approve it.

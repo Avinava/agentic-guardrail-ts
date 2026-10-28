@@ -1,0 +1,19 @@
+{
+  "variant": "monorepo",
+  "packageManager": "pnpm",
+  "coverageFloor": 0,
+  "violations": [
+    "depcruise:tier-0|packages/types/src/index.ts",
+    "depcruise:no-circular|packages/core/src/index.ts"
+  ],
+  "extraViolation": {
+    "file": "packages/core/src/extra.ts",
+    "content": "export function many(a: number, b: number, c: number, d: number, e: number): number {\n  return a + b + c + d + e;\n}\n"
+  },
+  "fix": [
+    "packages/types/src/index.ts",
+    "packages/types/package.json"
+  ],
+  "reinstallAfterViolations": true,
+  "importedFile": "packages/types/src/index.ts"
+}

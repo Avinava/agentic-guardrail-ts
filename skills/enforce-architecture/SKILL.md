@@ -1,147 +1,137 @@
 ---
 name: enforce-architecture
 description: >
-  Use when adding imports, creating packages, or reviewing code to ensure
-  tiered dependency rules are followed. Read this to understand the tier system.
+  Layer and tier rules for a guardrailed TypeScript repo, enforced by dependency-cruiser.
+  Use before adding an import across directories or packages, when a `depcruise` finding
+  (layer-*, tier-*, no-circular, not-to-dev-dep, no-relative-cross-package) blocks you,
+  when classifying a new package, or when changing the layer or tier map.
 ---
 
-## Overview
+# Enforce architecture
 
-This project enforces a **tiered dependency hierarchy** using `eslint-plugin-boundaries`. Every package is assigned to a tier. A package can import from any **lower** tier, but **never** from its own tier or higher.
-
-This prevents circular dependencies, enforces separation of concerns, and makes the codebase navigable.
-
-## The Tiers
+Imports flow **downward only**. dependency-cruiser checks this on every commit, in the stop hook
+and in CI. Rules live in `.dependency-cruiser.mjs` at the repo root:
+- **Single package:** a `LAYERS` array of source directories, lowest first.
+- **Monorepo:** a `TIERS` array of workspace directories, lowest first.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Apps (deployable apps)             ← can import anything │
-├─────────────────────────────────────────────────────────┤
-│  Tier 4: orchestration              ← imports 0-3        │
-├─────────────────────────────────────────────────────────┤
-│  Tier 3: domain/business logic      ← imports 0-2        │
-├─────────────────────────────────────────────────────────┤
-│  Tier 2: infrastructure (DB, APIs)  ← imports 0-1        │
-├─────────────────────────────────────────────────────────┤
-│  Tier 1: config, helpers, utils     ← imports 0 only     │
-├─────────────────────────────────────────────────────────┤
-│  Tier 0: types, logger, constants   ← NO workspace deps  │
-└─────────────────────────────────────────────────────────┘
+apps/*             deployable apps: may import any package, never another app
+tier N             may import tiers 0..N-1, never its own tier, never above
+...
+tier 1             config, helpers, adapters to tier 0
+tier 0             types, constants, pure utilities: no workspace dependencies
 ```
 
-**To see your project's actual tier assignments**, read the `eslint.config.js` file at the project root. The tier arrays (`tier0`, `tier1`, etc.) list which packages belong to each tier.
+A single package works the same way with directories, for example
+`src/shared` < `src/domain` < `src/application` < `src/infrastructure` < `src/interface`.
 
-## Before Writing an Import
+## Before you write an import
 
-**ALWAYS check the tier rules before adding an import statement.**
+1. Find the layer or tier of the file you are editing and of the module you want, using
+   `.dependency-cruiser.mjs`.
+2. **The target is strictly lower:** go ahead.
+3. **The target is the same tier** (a different package) **or higher:** stop. Use one of these
+   instead:
+   - **Move the shared code down.** Extract the type, constant or pure function into a lower
+     layer or a tier-0 package that both sides can import.
+   - **Invert the dependency.** Define an interface in the lower layer and implement it in the
+     higher one. Pass the implementation in through the constructor, a parameter or a composition
+     root.
+   - **Ask whether the classification is wrong.** If a package keeps needing a peer, the tiers may
+     be off. Propose a change to the user. Don't edit the arrays yourself to get green.
+4. **In a monorepo, import other packages by name** (`@acme/core`), never by relative path into
+   another package. `no-relative-cross-package` enforces this. Then add the dependency to the
+   importing package's `package.json`.
 
-Ask yourself:
-1. What tier is the file I'm editing in?
-2. What tier is the package I'm importing from?
-3. Is the imported tier **strictly lower** than my tier?
+## Reading a finding
 
-If #3 is NO → **stop**. The import is illegal. Find another way:
-- Move shared code to a lower-tier package
-- Create a new leaf package at tier 0
-- Use dependency injection (pass the dependency as a parameter)
-- Ask the user if the tier assignment should change
-
-## When ESLint Catches a Violation
-
-If you see an error like:
 ```
-error  'boundaries/dependencies' - Not allowed to import '@scope/database' from 'helpers'
+packages/types/src/index.ts:0  depcruise tier-0  imports packages/core/src/index.ts
+src/domain/pricing.ts:0  depcruise layer-domain  imports src/infrastructure/order-store.ts
+packages/core/src/index.ts:0  depcruise no-circular  imports packages/types/src/index.ts
 ```
 
-Read carefully — common mistakes:
-- Importing from the **same tier** (e.g. tier 1 → tier 1): illegal
-- Importing **upward** (e.g. tier 2 → tier 3): illegal
-- Test files are excluded from boundary checks — this is intentional
+| Rule | Meaning | Fix |
+| --- | --- | --- |
+| `tier-N` / `layer-<name>` | Upward or same-tier import | Move code down, or invert the dependency |
+| `no-circular` | A cycle | Extract the shared part. The finding is reported on one file in the cycle. |
+| `not-to-unresolvable` | Import doesn't resolve | Fix the path. In a monorepo, add the dependency and reinstall. |
+| `not-to-dev-dep` (single package) | Production code imports a devDependency | Move it to `dependencies`, or keep it in tests only |
+| `no-non-package-json` | Imported package isn't declared | Add it to the importing package's `package.json` |
+| `no-relative-cross-package` (monorepo) | `../../other-package/src/x` | Import by package name |
 
-## Classifying a New Package
+To see the whole graph:
+```bash
+node scripts/guardrails.mjs exec depcruise src -c .dependency-cruiser.mjs -T text
+```
+Use `packages apps` instead of `src` in a monorepo.
 
-When creating a new package, assign it to the correct tier:
+## Classifying a new package (monorepo)
 
-| If the package... | Assign to |
-|-------------------|-----------| 
-| Has NO workspace dependencies | Tier 0 |
-| Only depends on types/logger | Tier 1 |
-| Wraps external services (DB, API, queue) | Tier 2 |
-| Contains business/domain logic | Tier 3 |
-| Orchestrates multiple domain + infra packages | Tier 4 |
-| Is a deployable app (CLI, web server, worker) | App tier |
+| The package... | Tier |
+| --- | --- |
+| has no workspace dependencies (types, constants, pure utils) | 0 |
+| wraps config, logging or tier-0 helpers | 1 |
+| talks to external systems (DB, HTTP, queues) | 2 |
+| holds domain or business logic | 3 |
+| orchestrates domain and infrastructure | 4 |
+| is deployable (CLI, server, worker, web app) | `apps/*` |
 
-Then update `eslint.config.js`:
-1. Add the package name to the correct tier array
-2. Add an entry to `boundaries/elements` with the correct pattern
+Add the directory to the right `TIERS` entry in `.dependency-cruiser.mjs`. A tier with more than
+8 to 10 packages is too broad: split it.
 
-## Common Violations and Fixes
+## Dependency injection and `max-params`
 
-### "I need types from a higher-tier package"
-Extract the types into a tier 0 package (e.g. `shared-types`). Both packages can then import from tier 0.
+Constructor injection fits this architecture. Oxlint's `max-params` counts constructor
+parameters, though, and it has no exemption.
+- **Decorator DI container** (NestJS, InversifyJS, tsyringe, Angular): `setup-guardrails` turns
+  `max-params` off, with a comment explaining why.
+- **No container:** prefer a single `deps` object. It reads better and keeps `max-params` on for
+  everything else. Assign it in the body: `erasableSyntaxOnly` rejects parameter properties.
 
-### "Two packages at the same tier need to share code"
-Create a new package at a lower tier and have both import from it.
+  ```ts
+  class OrderService {
+    private readonly deps: OrderDeps;
+    constructor(deps: OrderDeps) {
+      this.deps = deps;
+    }
+  }
+  ```
 
-### "The tier assignment feels wrong"
-Discuss with the user. Sometimes a package is misclassified. Reclassifying early is cheap; reclassifying after 50 imports is expensive.
+## Escape hatches leave a paper trail
 
-### "Tests need to import across tiers"
-Test files (`__tests__/**`) are excluded from boundary checks. This is intentional — tests can import anything.
+A disable is a last resort. It's acceptable only when the code is right and the rule can't express
+that. Every disable must:
+1. name the specific rule,
+2. give the reason after ` -- `, and
+3. give a tracking reference (an issue, ADR or tech-debt entry).
 
-## Red Flags
+```ts
+// good
+// oxlint-disable-next-line typescript/no-explicit-any -- third-party form API is untyped; tracked in #142
+const form: FormApi<any> = createForm(config);
 
-| Situation | Problem |
-|-----------|---------|
-| Tier 0 package has workspace dependencies | Tier 0 must be pure leaf packages |
-| More than 8-10 packages in a single tier | Tier is too broad — split it |
-| App tier importing directly from tier 0 | Not wrong, but consider if an orchestrator should exist |
-| Circular dependency warnings | Architecture violation — restructure needed |
-
-## Escape Hatches and Paper Trails
-
-Sometimes you genuinely need to disable a rule. That's OK — but every escape hatch must leave a paper trail.
-
-Every `eslint-disable` comment MUST include:
-
-1. **The specific rule** being disabled (never bare `// eslint-disable-next-line`)
-2. **A reason** explaining why narrowing is impossible
-3. **A tracking reference** (issue link, doc section, or `tech-debt.md` entry)
-
-### Examples
-
-```typescript
-// GOOD — full paper trail
-// eslint-disable-next-line @typescript-eslint/no-explicit-any — UseFormReturn<any>
-// is polymorphic by design; see tech-debt.md#rhf-any-wrapper, tracked in #142
-const form: UseFormReturn<any> = useForm(config);
-
-// BAD — no context, no trail, future contributor has no idea why
-// eslint-disable-next-line
+// rejected by the gate (guardrails disable-needs-rule-and-reason)
+// oxlint-disable-next-line
 const data = getResponse() as any;
-
-// BAD — has the rule but no reason
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const result: any = parseInput(raw);
 ```
 
-### Convention
+There is no disable comment for architecture findings. A real exception goes through the user:
+1. Add a narrowly scoped `pathNot` to the rule.
+2. Write a comment in `.dependency-cruiser.mjs` that names the reason and the tracking reference.
+3. Review it like any other exception.
 
-- **No bare disables.** Every `eslint-disable` without a reason is a future mystery.
-- **Cross-link to `tech-debt.md`** when the disable represents known debt (see [reference/tech-debt.md](../../reference/tech-debt.md) for the template).
-- **Quarterly audit:** search for `eslint-disable` and verify each still has a valid reason + tracking reference. Prune any that no longer apply.
+Audit the escape hatches regularly:
+`rg -n "(eslint|oxlint)-disable" --glob '!node_modules'`. Remove the ones that no longer apply.
 
-### If You're the Agent
+## Red flags
 
-Before adding an `eslint-disable`, ask yourself:
-1. Can I fix the code to satisfy the rule instead?
-2. If not, can I narrow the disable to a specific rule (not a blanket disable)?
-3. Have I documented why this specific case can't be fixed?
-4. Have I added a tracking reference so a human can find and evaluate this later?
+- **A tier-0 package with workspace dependencies:** it isn't tier 0.
+- **Two packages in the same tier that keep needing each other:** they're one package, or they're
+  missing a lower shared package.
+- **`no-circular` findings in the baseline:** fix them first. Cycles make every other refactor
+  harder.
+- **An app importing another app:** extract a package.
 
-If the answer to any of 2–4 is no, fix that before committing.
-
-## Related Skills
-
-- **setup-guardrails** — Initial ESLint boundaries setup
-- **adding-a-package** — Full checklist for adding packages with tier assignment
+Related skills: `setup-guardrails` (installs dependency-cruiser), `adding-a-package` (new
+workspace), `guardrails-loop` (responding to a rejected change).

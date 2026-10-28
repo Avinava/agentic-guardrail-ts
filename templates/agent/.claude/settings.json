@@ -1,0 +1,41 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR}/scripts/guardrails.mjs\" hook post-edit",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR}/scripts/guardrails.mjs\" hook stop",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "deny": [
+      "Bash(git * --no-verify*)",
+      "Bash(git commit -n*)",
+      "Bash(git commit * -n*)",
+      "Bash(*LEFTHOOK=0*)",
+      "Bash(*LEFTHOOK_EXCLUDE=*)",
+      "Bash(* core.hooksPath*)",
+      "Bash(* core.hookspath*)",
+      "Bash(*guardrails.mjs baseline --init*)",
+      "Bash(*guardrails.mjs baseline --reset*)",
+      "Edit(guardrails.baseline.json)"
+    ]
+  }
+}

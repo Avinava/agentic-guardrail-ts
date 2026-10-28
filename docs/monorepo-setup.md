@@ -1,155 +1,95 @@
-# Monorepo Setup
+# Monorepo setup
 
-Complete guide for setting up guardrails in a TypeScript monorepo with workspaces.
+What the `monorepo` templates add on top of the shared ones. The `setup-guardrails` skill detects workspaces and applies these. Use the `adding-a-package` skill for new packages afterwards.
 
-## Prerequisites
+## Layout
 
-- Completed the [Getting Started](./getting-started.md) guide, OR
-- Used the [setup-guardrails](../skills/setup-guardrails/SKILL.md) skill (agent-first), OR
-- Run the `init.sh` script and chose **Monorepo** as the project type
-
-## Workspace Configuration
-
-### npm
-
-```json
-// root package.json
-{
-  "workspaces": ["packages/*", "apps/*"]
-}
+```text
+package.json            workspaces, packageManager, root scripts and all tooling devDependencies
+pnpm-workspace.yaml     pnpm only
+tsconfig.base.json      shared compiler options, customConditions: ["source"]
+tsconfig.json           root: only *.config.ts
+turbo.json              build and typecheck tasks
+.syncpackrc.json        one version per dependency
+.dependency-cruiser.mjs tiers
+knip.json               per-workspace entries
+vitest.config.ts        one root config for all packages
+packages/<name>/        libraries
+apps/<name>/            deployables
 ```
 
-### pnpm
+## Root package.json
 
-```yaml
-# pnpm-workspace.yaml
-packages:
-  - "packages/*"
-  - "apps/*"
-```
+- `packageManager` is required by turbo 2 (for example `"pnpm@<version>"` or `"yarn@1.22.22"`).
+- Scripts: `typecheck` runs `tsc --noEmit` for the root configs, then `turbo run typecheck`. `lint` runs `guardrails.mjs check` and `syncpack lint`.
+- All guardrail tools are root devDependencies. Packages declare only what they import.
 
-### yarn
+## Packages
 
-```json
-// root package.json
-{
-  "workspaces": ["packages/*", "apps/*"]
-}
-```
-
-## Package Structure
-
-Every package needs a properly configured `package.json`:
+Each package exports its TypeScript source under a `source` condition, ahead of the built output:
 
 ```json
 {
-  "name": "@your-org/shared-types",
-  "version": "0.1.0",
+  "name": "@acme/billing",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "source": "./src/index.ts",
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc --noEmit"
-  }
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": { "@acme/types": "workspace:*" }
 }
 ```
 
-And a `tsconfig.json` that extends the base:
+Two tsconfigs per package, so tests are typechecked but never emitted. `tsconfig.json`
+(typecheck, includes tests):
 
 ```json
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "outDir": "dist",
-    "rootDir": "src"
-  },
-  "include": ["src"],
-  "references": [
-    { "path": "../shared-types" }
-  ]
+  "compilerOptions": { "noEmit": true },
+  "include": ["src"]
 }
 ```
 
-## Root package.json Scripts
+`tsconfig.build.json` (emit `dist/`, no tests):
 
 ```json
 {
-  "name": "@your-org/monorepo",
-  "private": true,
-  "workspaces": ["packages/*", "apps/*"],
-  "scripts": {
-    "build": "turbo run build",
-    "typecheck": "turbo run typecheck",
-    "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
-    "lint": "eslint 'packages/*/src/**/*.ts' 'apps/*/src/**/*.ts'",
-    "lint:unused": "knip",
-    "lint:deps": "syncpack lint",
-    "lint:packages": "bash scripts/publint-all.sh",
-    "lint:boundaries": "eslint --config eslint.config.js 'packages/*/src/**/*.ts'",
-    "prettier:check": "prettier --check '**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,css,html,yml,yaml}'",
-    "prettier:fix": "prettier --write '**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,css,html,yml,yaml}'",
-    "prepare": "lefthook install"
-  },
-  "lint-staged": {
-    "*.{ts,tsx,js,jsx,mjs,cjs,json,md,css,html,yml,yaml}": "prettier --write"
-  }
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": false, "rootDir": "src", "outDir": "dist" },
+  "exclude": ["src/**/*.test.ts"]
 }
 ```
 
-## Customizing Knip for Your Workspaces
+## The `source` condition
 
-Add one entry per package to `knip.json`:
+`tsconfig.base.json` sets `customConditions: ["source"]`, Vitest sets `resolve.conditions: ["source"]`, and dependency-cruiser lists `source` first in `conditionNames`. All three resolve `@acme/types` to its `src/index.ts`.
 
-```json
-{
-  "workspaces": {
-    ".": {
-      "entry": ["scripts/*.{js,mjs,ts}"],
-      "project": ["scripts/**/*.{js,cjs,mjs,ts}"]
-    },
-    "packages/shared-types": {},
-    "packages/config": {},
-    "packages/logger": {
-      "ignoreDependencies": ["pino-pretty"]
-    },
-    "packages/database": {},
-    "apps/cli": {
-      "entry": ["src/commands/**/*.ts", "bin/*.js"]
-    },
-    "apps/web": {
-      "project": ["src/**/*.{ts,tsx,js,jsx}"],
-      "ignoreDependencies": ["@emotion/react"]
-    }
-  }
-}
-```
+The result: types are live across packages without a build, `typecheck` does not depend on `^build`, and tests run against source. Published consumers do not know the `source` condition and get `dist/`.
 
-Empty `{}` entries use Knip's auto-detection (100+ framework plugins).
+## turbo
 
-## Common AI Agent Mistakes in Monorepos
+`build` depends on `^build` and caches `dist/**`. `typecheck` has no dependencies, thanks to the `source` condition. Add more tasks as the repo needs them.
 
-| Mistake | Guardrail That Catches It |
-|---------|--------------------------|
-| Import from wrong tier | ESLint + boundaries |
-| Unused export after refactor | Knip |
-| Version mismatch in deps | Syncpack |
-| Broken package.json exports | Publint |
-| Inconsistent formatting | Prettier |
-| console.log instead of logger | ESLint no-console |
-| Floating promise | TypeScript-ESLint strict |
-| Wrong commit scope | Commitlint |
+## syncpack
 
-## Next Steps
+Two groups: workspace packages pin to `workspace:*` (`*` on npm and Yarn 1), and every other dependency has one version across the repo. For pnpm catalogs see [Package managers](./package-managers.md#catalogs).
 
-- [Architecture Tiers](./architecture-tiers.md) — how to design your dependency hierarchy
-- [Tool Reference](./tool-reference.md) — deep dive on each tool's configuration
-- [CI Pipeline](./ci-pipeline.md) — GitHub Actions setup
+## Knip
+
+`knip.json` sets entries per workspace: `src/index.ts` for packages, `src/main.ts` or `src/index.ts` for apps. Adjust when a package has more entry points (CLI bins, workers).
+
+## Vitest
+
+One root config covers `{packages,apps}/*/src/**/*.test.ts`. Coverage is measured across all packages with one set of thresholds. If packages need different floors, use Vitest projects and give each its own thresholds.
+
+## Tiers
+
+Map packages to tiers in `.dependency-cruiser.mjs`. See [Architecture tiers](./architecture-tiers.md).

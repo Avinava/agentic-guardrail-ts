@@ -1,154 +1,75 @@
-# Getting Started
+# Getting started
 
-Set up automated guardrails for your TypeScript project in under 10 minutes.
+## 1. Install the skills
 
-## Prerequisites
+Pick one.
 
-- **Node.js 20+** (see `.nvmrc`)
-- **Git** initialized in your project
-- A `package.json` in your project root
+**Paste into any agent.** The agent installs the skills into the project and reads the setup skill straight from disk, so it works without restarting the session:
 
-## Agent-First Setup (Recommended)
+```text
+Set up guardrails in this project. Run `npx skills add Avinava/agentic-guardrail-ts -y`,
+then read .agents/skills/setup-guardrails/SKILL.md in full and follow it.
+```
 
-Tell your AI coding agent:
+`npx skills add` writes the five skills to `.agents/skills/` (read by Codex, Gemini CLI, Cursor and others) links them into `.claude/skills/` for Claude Code, and records the source in `skills-lock.json`. Commit all three so teammates' agents get the same skills, or add them to `.gitignore`.
 
-> Fetch and follow the instructions from
-> `https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/skills/setup-guardrails/SKILL.md`
-> to set up TypeScript guardrails in this project.
+**Claude Code plugin.** Installs once for your user, in every project:
 
-The agent will detect your project type, fetch configs, install dependencies, and set up git hooks — all automatically.
+```text
+/plugin marketplace add Avinava/agentic-guardrail-ts
+/plugin install agentic-guardrail-ts@agentic-guardrail-ts
+```
 
-## Manual Setup
+Update later with `/plugin marketplace update agentic-guardrail-ts`.
+
+**Without the skills CLI.** Have the agent download the skill instead of fetching it as a web page. Web-fetch tools often summarize pages, and the skill is mostly exact config files:
+
+```text
+Download https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/skills/setup-guardrails/SKILL.md
+with curl into a temp file, read all of it, and follow it to set up guardrails in this project.
+```
+
+## 2. Before you run it
+
+- Commit or stash your work. The skill edits many files.
+- Install gitleaks (`brew install gitleaks`, or a release binary).
+- Use Node 22.12 or newer.
+- Monorepos need a `packageManager` field in the root `package.json` (turbo requires it).
+
+## 3. Run setup
+
+Ask the agent: "set up guardrails". The `setup-guardrails` skill works in phases:
+
+1. **Audit.** It detects single package or monorepo, the package manager, workspace layout, DI framework and existing tooling (including a v2 setup).
+2. **Gap report.** It lists what is present and correct, present but outdated, and missing. It stops here for your confirmation.
+3. **Apply.** It writes the configs, merges `package.json` scripts and devDependencies, maps your directories to layers or tiers, and installs.
+4. **Verify.** It runs the gate. On an existing codebase it records current findings with `baseline --init` and sets coverage floors to measured values.
+
+Then run the `guardrails-loop` skill (setup offers it) to install `AGENTS.md` and the agent hooks.
+
+## 4. Commit the result
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/Avinava/agentic-guardrail-ts/main/scripts/init.sh)
+git add -A
+git commit -m "chore: adopt guardrails"
 ```
 
-The interactive script will:
-1. Detect your existing `package.json` (if present)
-2. Ask for project type (single package or monorepo)
-3. Ask for package manager (npm / pnpm / yarn)
-4. Ask for your npm org scope — auto-detected if possible
-5. Copy all config files with your scope substituted
-6. Optionally install devDependencies and git hooks
+The commit itself goes through the new hooks. That is the first real test.
 
-## What Gets Created
+## Daily commands
 
-```
-your-project/
-├── .editorconfig          # Editor whitespace/encoding
-├── .nvmrc                 # Pinned Node.js version
-├── .prettierrc            # Formatting rules
-├── .prettierignore        # Files to skip formatting
-├── commitlint.config.ts   # Commit message rules
-├── eslint.config.js       # ESLint + TypeScript strict + boundaries
-├── knip.json              # Dead code detection
-├── lefthook.yml           # Pre-commit hook orchestration
-├── tsconfig.base.json     # TypeScript strict settings
-├── vitest.config.ts       # Test runner + coverage
-└── scripts/
-    ├── typecheck-staged.sh
-    └── publint-all.sh
-```
+| Command | What it does |
+| --- | --- |
+| `node scripts/guardrails.mjs check` | Oxlint, dependency-cruiser, Knip and disable checks, compared to the baseline |
+| `node scripts/guardrails.mjs check --changed` | The same, limited to files changed since `HEAD` |
+| `node scripts/guardrails.mjs verify` | The pre-push gate: format check, typecheck, lint, tests with coverage. CI adds a baseline-tightness check and secret scans |
+| `node scripts/guardrails.mjs baseline --tighten` | Lock in fixed findings and raise coverage floors |
 
-Monorepo projects also get `.syncpackrc.json` and `turbo.json`.
+Package scripts wrap these: `lint`, `lint:tighten`, `verify`, `typecheck`, `test:coverage`.
 
-## Add Scripts to package.json
+## Next
 
-After setup, add these scripts to your `package.json`:
-
-```json
-{
-  "scripts": {
-    "build": "tsc",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
-    "lint": "eslint 'src/**/*.ts'",
-    "lint:unused": "knip",
-    "lint:deps": "syncpack lint",
-    "prettier:check": "prettier --check '**/*.{ts,tsx,js,json,md,yml,yaml}'",
-    "prettier:fix": "prettier --write '**/*.{ts,tsx,js,json,md,yml,yaml}'",
-    "prepare": "lefthook install"
-  },
-  "lint-staged": {
-    "*.{ts,tsx,js,jsx,mjs,cjs,json,md,css,html,yml,yaml}": "prettier --write"
-  }
-}
-```
-
-## Customize for Your Project
-
-### 1. ESLint Boundaries (eslint.config.js)
-
-For a single package, simplify the boundaries config or remove it entirely. The TypeScript strict rules still apply.
-
-For monorepos, replace the example tier arrays with YOUR actual package names. Look for the `CUSTOMIZE` comments in the file.
-
-### 2. Commitlint Scopes (commitlint.config.ts)
-
-Replace the scope-enum array with scopes relevant to your project:
-
-```ts
-'scope-enum': [2, 'always', ['core', 'api', 'ui', 'deps', 'ci', 'release']]
-```
-
-### 3. Knip Workspaces (knip.json)
-
-For a single package, simplify to:
-
-```json
-{
-  "$schema": "https://unpkg.com/knip@latest/schema.json",
-  "entry": ["src/index.ts"],
-  "project": ["src/**/*.ts"],
-  "ignoreExportsUsedInFile": true
-}
-```
-
-## Verify It Works
-
-Make an intentional mistake and try to commit:
-
-```bash
-# Add a console.log (banned by ESLint)
-echo 'console.log("oops");' >> src/index.ts
-git add .
-git commit -m "test: verify guardrails"
-
-# ✗ ESLint will catch console.log
-# The commit will be REJECTED with clear error messages
-```
-
-Fix the issue and retry — that's the self-correcting loop.
-
-## If Your Project Isn't Greenfield
-
-If you're adding guardrails to an **existing codebase**, expect lint to surface a backlog of violations. This is normal — the tools are showing you what was invisible before.
-
-**Do NOT reach for `--max-warnings=N`.** It decays silently and erodes trust in the entire tool stack.
-
-Instead, the `setup-guardrails` skill detects your baseline and installs in **retrofit mode**:
-- Rules that can be auto-fixed (formatting, import ordering) start at `error` immediately
-- Rules that require manual refactoring start at `warn` with a tracked warning budget
-- You drive each rule category to zero via focused waves, then flip `warn` → `error`
-
-**The key principle:** Tools become gates only when their baseline is exit-0.
-
-See the [Retrofit Rollout Guide](../reference/retrofit-rollout.md) for a complete worked example with wave-by-wave instructions and timeline expectations.
-
-## Next Steps
-
-- [Tool Reference](./tool-reference.md) — deep dive on each of the 13 tools
-- [Architecture Tiers](./architecture-tiers.md) — how to design your dependency hierarchy
-- [Monorepo Setup](./monorepo-setup.md) — if you have workspaces
-- [CI Pipeline](./ci-pipeline.md) — GitHub Actions configuration
-- [Troubleshooting](./troubleshooting.md) — common issues
-
-## Skills Reference
-
-For agent-driven workflows, point your agent at:
-- [setup-guardrails](../skills/setup-guardrails/SKILL.md) — full installation
-- [enforce-architecture](../skills/enforce-architecture/SKILL.md) — tier rules
-- [self-correcting-loop](../skills/self-correcting-loop/SKILL.md) — commit feedback loop
-- [adding-a-package](../skills/adding-a-package/SKILL.md) — new workspace packages
+- Existing codebase: [Retrofit](./retrofit.md)
+- Coming from v2: [Migrating from v2](./migrating-from-v2.md)
+- Monorepo: [Monorepo setup](./monorepo-setup.md)
+- When something fails: [Troubleshooting](./troubleshooting.md)

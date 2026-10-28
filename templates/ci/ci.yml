@@ -1,0 +1,63 @@
+# .github/workflows/ci.yml: the same gate as `git push`, plus a secret scan.
+# Actions are pinned by commit SHA; Renovate or Dependabot keeps the pins current.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # pnpm only: remove this step for npm, yarn or bun.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm # npm | pnpm | yarn
+
+      - run: pnpm install --frozen-lockfile # npm ci | yarn install --frozen-lockfile
+
+      - name: Verify (format, typecheck, guardrails, tests with coverage)
+        run: node scripts/guardrails.mjs verify
+
+      - name: Baseline is tight
+        run: node scripts/guardrails.mjs check --strict-baseline
+
+      - name: Commit messages
+        if: github.event_name == 'pull_request'
+        run: >-
+          node scripts/guardrails.mjs exec commitlint
+          --from ${{ github.event.pull_request.base.sha }}
+          --to ${{ github.event.pull_request.head.sha }}
+
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GITLEAKS_VERSION: 8.30.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+      - name: Scan history
+        run: gitleaks git --redact --no-banner --log-opts="--all"
