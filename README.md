@@ -60,16 +60,20 @@ Full details: [Tool reference](docs/tool-reference.md).
 
 ## How the loop works
 
-```text
-agent edits a file
-  -> post-edit hook: Oxlint + disable check on that file      (seconds, report goes back to the agent)
-agent says it is done
-  -> stop hook: typecheck, check on changed files, related tests  (blocks "done" until clean)
-git commit
-  -> lefthook: Prettier, check on staged files, gitleaks, commitlint
-git push / CI
-  -> verify: format check, typecheck, full check, tests with coverage
-     (CI also requires a tight baseline and scans history for secrets)
+```mermaid
+flowchart TD
+    edit(["Agent edits a file"]) --> post["<b>Post-edit hook</b><br/>Oxlint + disable check on that file"]
+    post -- clean --> stop["<b>Stop hook</b>, when the agent says it is done<br/>typecheck, check on changed files, related tests"]
+    stop -- clean --> pre["<b>git commit</b>: lefthook<br/>Prettier, check on staged files, gitleaks, commitlint"]
+    pre -- clean --> verify["<b>git push</b>: lefthook verify<br/>format check, typecheck, full check, tests with coverage"]
+    verify -- clean --> ci["<b>CI</b><br/>verify, tight baseline, commitlint over the PR, gitleaks over history"]
+    ci -- clean --> merge(["Merge"])
+    post -- finding --> fix["Agent reads the rule ID<br/>and fixes the code"]
+    stop -- "finding: done is blocked" --> fix
+    pre -- "finding: commit refused" --> fix
+    verify -- "finding: push refused" --> fix
+    ci -- "finding: PR is red" --> fix
+    fix --> edit
 ```
 
 Each layer catches what the one before missed. The agent sees the rule ID and file in every rejection and fixes the code. See [Agent loop](docs/agent-loop.md).
