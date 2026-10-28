@@ -25,7 +25,8 @@ const only = args.filter((a) => !a.startsWith('--'));
 
 const INSTALL = {
   npm: ['npm', ['install', '--no-audit', '--no-fund', '--loglevel=error']],
-  pnpm: ['pnpm', ['install', '--reporter=silent']],
+  // pnpm defaults to a frozen lockfile under CI=true, and the fixtures change dependencies.
+  pnpm: ['pnpm', ['install', '--reporter=silent', '--no-frozen-lockfile']],
   yarn: ['yarn', ['install', '--silent']],
 };
 
@@ -154,7 +155,8 @@ class Fixture {
     cpSync(join(this.src, 'violations'), this.dir, { recursive: true });
     if (this.expected.reinstallAfterViolations) {
       const [cmd, cmdArgs] = INSTALL[this.expected.packageManager];
-      sh(this.dir, cmd, cmdArgs);
+      const install = sh(this.dir, cmd, cmdArgs);
+      this.assert(install.status === 0, `violations: ${cmd} reinstall`, install.out);
     }
     const r = this.g(['check']);
     this.assert(r.status === 1, 'violations: check fails', r.out);
