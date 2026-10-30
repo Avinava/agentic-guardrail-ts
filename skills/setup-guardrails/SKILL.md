@@ -803,7 +803,9 @@ function writeBaseline(counts, metrics = {}) {
   const body = { version: 1, counts: sorted };
   if (Object.keys(metrics).length > 0) body.metrics = metrics;
   // Remember which pack tools were on, so a later run can say which ones are new.
-  const tools = [...new Set([...(readBaselineFile().tools ?? []), ...packToolIds()])].toSorted();
+  const tools = [...new Set([...(readBaselineFile().tools ?? []), ...packToolIds()])].toSorted(
+    (a, b) => a.localeCompare(b),
+  );
   if (tools.length > 0) body.tools = tools;
   writeFileSync(BASELINE, `${JSON.stringify(body, null, 2)}\n`);
   return Object.keys(sorted).length;
