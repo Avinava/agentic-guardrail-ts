@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 15
     env:
       # This job runs every enabled pack's cheap checks (as in v3), so install the tools of every pack
-      # you enabled (shellcheck, uv, cargo, ...). The expensive ci-stage tools (test suites, org
+      # you enabled (shellcheck, uv, cargo, ...); each pack's ci.yml job has the install steps. The expensive ci-stage tools (test suites, org
       # runs) are not run here: each pack's own job (templates/packs/*/ci.yml) runs them once, with
       # its toolchain. `guardrails.mjs check --strict-baseline` fails if an enabled pack with such
       # tools has no job. Remove this line only if this single job runs everything.

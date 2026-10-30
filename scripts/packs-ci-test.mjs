@@ -67,7 +67,10 @@ describe('the ci stage is never silently skipped', () => {
   it('prints what was deferred on a local check', () => {
     const r = g(['check']);
     assert.equal(r.status, 0);
-    assert.match(r.out, /deferred: pytest-cov \(set GUARDRAILS_CI=1 or run in CI\)/);
+    assert.match(
+      r.out,
+      /deferred: pytest-cov \(set GUARDRAILS_CI=1 to run them, with GUARDRAILS_PACKS=<pack> to limit the run; CI runs them\)/,
+    );
   });
 
   it('--strict-baseline fails while a ci tool is deferred', () => {
@@ -173,7 +176,7 @@ describe('pack selection', () => {
     const r = g(['check'], { GUARDRAILS_PACKS: 'core' });
     assert.equal(r.status, 0, r.out);
     assert.deepEqual(calls('shellcheck'), []);
-    assert.match(r.out, /pack shell is not run here \(GUARDRAILS_PACKS\): run by verify/);
+    assert.match(r.out, /packs not run here \(GUARDRAILS_PACKS\): .*shell/);
   });
 
   it("does not report another job's baseline entries as stale", () => {
@@ -191,36 +194,56 @@ describe('pack selection', () => {
   });
 });
 
-describe('strict mode checks that a CI job owns every ci-stage pack', () => {
+describe('the CI ownership read is advisory and never gates', () => {
   beforeEach(() => {
     put('pyproject.toml', '[tool.coverage.run]\nsource = ["src"]\n');
     coverage(90);
     ci(['baseline', '--init']);
   });
 
-  it('a configured pack that no job selects fails, naming the pack', () => {
+  it('strict passes whatever the workflow files say (or do not say)', () => {
+    assert.equal(ci(['check', '--strict-baseline']).status, 0);
     workflow({ verify: ['GUARDRAILS_CI_PACKS: none'] });
-    const r = ci(['check', '--strict-baseline']);
-    assert.equal(r.status, 1);
-    assert.match(r.out, /pack python has ci-stage tools \(pytest-cov\) but no CI job selects it/);
-  });
-
-  it('passes when exactly one job selects it', () => {
-    workflow({ verify: ['GUARDRAILS_CI_PACKS: none'], python: ['GUARDRAILS_PACKS: python'] });
+    assert.equal(ci(['check', '--strict-baseline']).status, 0);
+    workflow({ a: ['GUARDRAILS_PACKS: python'], b: [] });
     assert.equal(ci(['check', '--strict-baseline']).status, 0);
   });
 
-  it('fails when two jobs would run the same expensive tools', () => {
-    workflow({ a: ['GUARDRAILS_PACKS: python'], b: [] });
-    const r = ci(['check', '--strict-baseline']);
-    assert.equal(r.status, 1);
-    assert.match(r.out, /would run 2 times, in: a \(.*\), b \(/);
+  it('ci-jobs warns, names the pack, says it is best effort, and exits 0', () => {
+    workflow({ verify: ['GUARDRAILS_CI_PACKS: none'] });
+    const r = g(['ci-jobs']);
+    assert.equal(r.status, 0);
+    assert.match(r.out, /best-effort read of GitHub Actions and GitLab files only/);
+    assert.match(
+      r.out,
+      /warning: pack python has ci-stage tools \(pytest-cov\) and no job appears to select it/,
+    );
   });
 
-  it('fails when there is no CI workflow at all', () => {
-    const r = ci(['check', '--strict-baseline']);
-    assert.equal(r.status, 1);
-    assert.match(r.out, /no CI job running guardrails\.mjs was found/);
+  it('is quiet about a pack that exactly one job appears to select', () => {
+    workflow({ verify: ['GUARDRAILS_CI_PACKS: none'], python: ['GUARDRAILS_PACKS: python'] });
+    assert.doesNotMatch(g(['ci-jobs']).out, /warning/);
+  });
+
+  it('warns when two jobs appear to select the same pack', () => {
+    workflow({ a: ['GUARDRAILS_PACKS: python'], b: [] });
+    assert.match(g(['ci-jobs']).out, /2 jobs appear to select it: a \(.*\), b \(/);
+  });
+
+  it('does not count a job that only runs verify, or a mention in a comment', () => {
+    put(
+      '.github/workflows/ci.yml',
+      'name: CI\njobs:\n  release:\n    env:\n      GUARDRAILS_PACKS: python\n    steps:\n      - run: node scripts/guardrails.mjs verify\n  noted:\n    steps:\n      # node scripts/guardrails.mjs check\n      - run: echo hi\n',
+    );
+    assert.match(g(['ci-jobs']).out, /no job appears to select it/);
+  });
+
+  it('reads an inline NAME=value on the command line', () => {
+    put(
+      '.github/workflows/ci.yml',
+      'name: CI\njobs:\n  py:\n    steps:\n      - run: GUARDRAILS_CI=1 GUARDRAILS_PACKS=python node scripts/guardrails.mjs check --strict-baseline\n  base:\n    steps:\n      - run: GUARDRAILS_CI_PACKS=none node scripts/guardrails.mjs check\n',
+    );
+    assert.doesNotMatch(g(['ci-jobs']).out, /warning/);
   });
 
   it('reads GitLab jobs too', () => {
@@ -228,14 +251,14 @@ describe('strict mode checks that a CI job owns every ci-stage pack', () => {
       '.gitlab-ci.yml',
       'stages: [test]\nverify:\n  variables:\n    GUARDRAILS_CI_PACKS: none\n  script:\n    - node scripts/guardrails.mjs check\npython:\n  variables:\n    GUARDRAILS_PACKS: python\n  script:\n    - node scripts/guardrails.mjs check --strict-baseline\n',
     );
-    assert.equal(ci(['check', '--strict-baseline']).status, 0);
+    assert.doesNotMatch(g(['ci-jobs']).out, /warning/);
   });
 
-  it('ci-jobs prints the same verdict', () => {
-    workflow({ verify: ['GUARDRAILS_CI_PACKS: none'] });
-    assert.equal(g(['ci-jobs']).status, 1);
-    workflow({ verify: ['GUARDRAILS_CI_PACKS: none'], python: ['GUARDRAILS_PACKS: python'] });
-    assert.equal(g(['ci-jobs']).status, 0);
+  it('says plainly when it cannot read the CI system', () => {
+    put('azure-pipelines.yml', 'trigger: [main]\n');
+    const r = g(['ci-jobs']);
+    assert.equal(r.status, 0);
+    assert.match(r.out, /could not read this CI system: azure-pipelines\.yml/);
   });
 });
 
@@ -245,22 +268,51 @@ describe('selections that run nothing', () => {
   });
 
   it('under strict, a selected pack with no configured tool fails (its config was removed)', () => {
-    workflow({ python: ['GUARDRAILS_PACKS: python'] });
     const r = ci(['check', '--strict-baseline'], { GUARDRAILS_PACKS: 'python' });
     assert.equal(r.status, 1);
     assert.match(r.out, /pack python is selected by GUARDRAILS_PACKS but has no configured tool/);
   });
 
-  it('a pack left out of this job that no job runs fails under strict', () => {
+  it('without strict, the same selection is not an error', () => {
+    assert.equal(g(['check'], { GUARDRAILS_PACKS: 'python' }).status, 0);
+  });
+
+  it('names the packs a job does not run, and never fails for them', () => {
     put('.shellcheckrc', 'shell=bash\n');
     put('a.sh', 'echo hi\n');
     fake('shellcheck', { stdout: '{"comments":[]}' });
     fake('shfmt', { stdout: '' });
-    workflow({ ts: ['GUARDRAILS_PACKS: ts'] });
     const r = g(['check', '--strict-baseline'], { GUARDRAILS_PACKS: 'ts' });
-    assert.equal(r.status, 1);
-    assert.match(r.out, /pack shell is not run here.*no CI job selects it/);
-    assert.match(r.out, /pack shell is configured but no CI job runs it/);
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /packs not run here \(GUARDRAILS_PACKS\): shell/);
+  });
+});
+
+describe('GUARDRAILS_CI_PACKS', () => {
+  it('rejects an unknown pack name', () => {
+    assert.match(
+      g(['check'], { GUARDRAILS_CI_PACKS: 'python,nope' }).out,
+      /GUARDRAILS_CI_PACKS names unknown pack\(s\): nope/,
+    );
+  });
+
+  it('cannot claim a pack that GUARDRAILS_PACKS excludes, and warns that its tools will not run', () => {
+    put('pyproject.toml', '[tool.coverage.run]\nsource = ["src"]\n');
+    coverage(90);
+    const r = g(['check'], {
+      CI: 'true',
+      GUARDRAILS_PACKS: 'core,ts',
+      GUARDRAILS_CI_PACKS: 'python',
+    });
+    assert.equal(r.status, 0, r.out);
+    assert.match(
+      r.out,
+      /warning: GUARDRAILS_CI_PACKS names python but GUARDRAILS_PACKS excludes it/,
+    );
+    assert.deepEqual(
+      calls('uv').filter((a) => a[1] === 'pytest'),
+      [],
+    );
   });
 });
 
@@ -318,6 +370,16 @@ describe('fix commands name the ci stage and pack', () => {
   });
 });
 
+describe('--init without a baseline', () => {
+  it('says it wrote one, never "unchanged"', () => {
+    put('platformio.ini', '[env:uno]\ncheck_tool = cppcheck\n');
+    fake('pio', { stdout: '[]' });
+    const r = g(['baseline', '--init']);
+    assert.match(r.out, /baseline written/);
+    assert.doesNotMatch(r.out, /unchanged/);
+  });
+});
+
 describe('pre-push never runs the ci stage', () => {
   it('verify ignores a CI variable exported on the machine', () => {
     put('pyproject.toml', '[tool.coverage.run]\nsource = ["src"]\n');
@@ -356,17 +418,18 @@ describe('generated CI workflow', () => {
     const owners = (pack) =>
       r.out.split('\n').filter((l) => new RegExp(`ci-stage tools of [^;]*\\b${pack}\\b`).test(l));
     for (const pack of stacks) assert.equal(owners(pack).length, 1, `${pack}: ${owners(pack)}`);
-    assert.match(r.out, / verify: runs [^;]*; ci-stage tools of no pack/);
+    assert.match(r.out, / verify: appears to run [^;]*; ci-stage tools of no pack/);
+    assert.doesNotMatch(r.out, /warning/);
   });
 
-  it('dropping a pack job is caught', () => {
+  it('dropping a pack job is warned about (advisory, exit 0)', () => {
     configure();
     generate(stacks.filter((p) => p !== 'salesforce'));
     const r = g(['ci-jobs']);
-    assert.equal(r.status, 1);
+    assert.equal(r.status, 0);
     assert.match(
       r.out,
-      /pack salesforce has ci-stage tools \(apex-coverage\) but no CI job selects it/,
+      /warning: pack salesforce has ci-stage tools \(apex-coverage\) and no job appears to select it/,
     );
   });
 });

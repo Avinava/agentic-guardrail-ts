@@ -15,6 +15,8 @@
       - name: Python guardrails (ruff, pyright, tach, deptry, vulture, coverage floor)
         run: node scripts/guardrails.mjs check --strict-baseline
         env:
-          # Only this pack runs in this job; the verify job in ci.yml runs core and ts.
+          # This job runs only the python pack, with its toolchain installed above, and owns its expensive
+          # ci-stage tools. The verify job in ci.yml also runs this pack's cheap checks, so it needs
+          # this pack's tools installed too: copy the install steps above into it.
           GUARDRAILS_PACKS: python
           GUARDRAILS_CI: '1'
