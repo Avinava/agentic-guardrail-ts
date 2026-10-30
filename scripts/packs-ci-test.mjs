@@ -58,7 +58,10 @@ describe('the ci stage is never silently skipped', () => {
 
   it('GUARDRAILS_CI=0 forces it off even in CI', () => {
     g(['check'], { CI: 'true', GUARDRAILS_CI: '0' });
-    assert.deepEqual(calls('pytest'), []);
+    assert.deepEqual(
+      calls('uv').filter((a) => a[1] === 'pytest'),
+      [],
+    );
   });
 
   it('prints what was deferred on a local check', () => {
@@ -321,7 +324,10 @@ describe('pre-push never runs the ci stage', () => {
     coverage(90);
     g(['verify'], { CI: 'true' });
     g(['verify'], { GUARDRAILS_CI: '1' });
-    assert.deepEqual(calls('pytest'), []);
+    assert.deepEqual(
+      calls('uv').filter((a) => a[1] === 'pytest'),
+      [],
+    );
   });
 });
 

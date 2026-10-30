@@ -207,7 +207,10 @@ describe('python pack, review fixes', () => {
     cov(90);
     g(['check']);
     g(['check', '--files', 'tests/test_a.py']);
-    assert.deepEqual(calls('pytest'), []);
+    assert.deepEqual(
+      calls('uv').filter((a) => a[1] === 'pytest'),
+      [],
+    );
     ci(['baseline', '--init']);
     assert.equal(calls('uv').filter((a) => a[1] === 'pytest').length, 1);
   });
