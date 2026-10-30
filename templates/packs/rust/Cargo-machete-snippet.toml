@@ -1,0 +1,4 @@
+# Add to Cargo.toml to switch on `cargo machete` (unused dependencies). Ignore crates that are
+# used only through macros or build scripts, naming the reason in a comment.
+[package.metadata.cargo-machete]
+ignored = []

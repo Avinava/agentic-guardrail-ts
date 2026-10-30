@@ -1,0 +1,15 @@
+# deny.toml: its presence switches on `cargo deny check` (advisories, licenses, bans, sources).
+# Create the full file with `cargo deny init`, then keep these minimum policies.
+[advisories]
+version = 2
+
+[licenses]
+version = 2
+allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "ISC", "Unicode-3.0"]
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

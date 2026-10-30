@@ -303,3 +303,49 @@ Tool interactions that surprise people, and what to do about them.
 **Symptom:** valid SQL reports parse errors (PRS) on every file.
 
 **Resolution:** set the right `dialect` in `.sqlfluff`. sqlfluff cannot lint SQL it cannot parse, and templated files (dbt, Jinja) need `templater` set.
+
+## cargo fmt and Prettier
+
+**Symptom:** a Rust file is rewritten by two formatters.
+
+**Resolution:** none, if `.prettierignore` skips Rust. Prettier does not format `.rs` files, and `cargo fmt` is the only formatter for them.
+
+## clippy, `-D warnings` and a new toolchain
+
+**Symptom:** the build breaks after a Rust upgrade with a new clippy lint.
+
+**Resolution:** fix the code, or pin the toolchain in `rust-toolchain.toml` and upgrade it in its own commit. Do not remove `-D warnings`.
+
+## cargo-deny and cargo-machete
+
+**Symptom:** machete reports a dependency that deny's policy expects, or the reverse.
+
+**Resolution:** they check different things (unused versus allowed). A dependency used only by a build script or a macro goes in `ignored` under `[package.metadata.cargo-machete]`, with a comment.
+
+## dart format and Prettier
+
+**Symptom:** Prettier or editorconfig-checker disagrees with `dart format`.
+
+**Resolution:** `dart format` wins for `.dart` files. Keep `.dart` out of Prettier's scope, and let `.editorconfig` set no width for `*.dart`.
+
+## flutter analyze versus dart analyze
+
+**Symptom:** analysis results differ between the two commands.
+
+**Why:** `flutter analyze` resolves the Flutter SDK; a plain `dart analyze` in a Flutter package can miss it. The pack picks `flutter analyze` when `pubspec.yaml` declares `sdk: flutter`.
+
+**Resolution:** none. Do not run the other command by hand and trust it.
+
+## clang-format and PlatformIO
+
+**Symptom:** clang-format rewrites vendored libraries under `lib/` or `.pio/`.
+
+**Resolution:** add a `.clang-format-ignore` file (clang-format 18 and later) or a `DisableFormat: true` section for vendored folders. The pack only checks files git tracks.
+
+## pio check needs a toolchain download
+
+**Symptom:** the first `pio check` is slow or fails offline.
+
+**Why:** it downloads cppcheck or clang-tidy.
+
+**Resolution:** expected on the first run. It runs on pre-push and CI only. Cache `~/.platformio` in CI.

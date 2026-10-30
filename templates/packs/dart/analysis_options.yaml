@@ -1,0 +1,16 @@
+# analysis_options.yaml: its presence switches on the Dart pack (dart format, dart/flutter
+# analyze, and the Flutter coverage floor).
+include: package:flutter_lints/flutter.yaml
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+  errors:
+    missing_required_param: error
+    missing_return: error
+linter:
+  rules:
+    - avoid_print
+    - prefer_const_constructors
+    - require_trailing_commas

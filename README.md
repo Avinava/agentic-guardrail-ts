@@ -72,6 +72,9 @@ The engine is language-agnostic. Each stack is a pack of tools that switch on wh
 | `shell` | `*.sh`, `*.bash` | shellcheck, shfmt | opt-in |
 | `docker` | `Dockerfile*`, `*compose*.yml` | hadolint, `docker compose config` | opt-in |
 | `sql` | `*.sql` | sqlfluff | opt-in |
+| `rust` | `Cargo.toml` | cargo fmt, clippy, cargo-deny, cargo-machete | opt-in |
+| `dart` | `pubspec.yaml`, `*.dart` | dart format, dart or flutter analyze, Flutter coverage floor | opt-in |
+| `cpp` | `platformio.ini`, `.clang-format`, `*.cpp` | clang-format, pio check | opt-in |
 
 ## How the loop works
 

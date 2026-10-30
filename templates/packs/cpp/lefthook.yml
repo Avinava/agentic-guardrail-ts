@@ -1,0 +1,6 @@
+# lefthook additions for the C++ pack. Merge under pre-commit.jobs in lefthook.yml.
+pre-commit:
+  jobs:
+    - name: cpp
+      glob: '*.{c,cc,cpp,cxx,h,hh,hpp,ino}'
+      run: node scripts/guardrails.mjs check --files {staged_files}

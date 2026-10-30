@@ -16,6 +16,9 @@ Everything beyond the original TypeScript stack is **opt-in**. A tool switches o
 | `shell` | `*.sh`, `*.bash` | shellcheck, shfmt | opt-in |
 | `docker` | `Dockerfile*`, `*compose*.yml` | hadolint, `docker compose config` | opt-in |
 | `sql` | `*.sql` | sqlfluff | opt-in |
+| `rust` | `Cargo.toml` | cargo fmt, clippy, cargo-deny, cargo-machete | opt-in |
+| `dart` | `pubspec.yaml`, `*.dart` | dart format, dart or flutter analyze, Flutter coverage floor | opt-in |
+| `cpp` | `platformio.ini`, `.clang-format`, `*.cpp` | clang-format, pio check | opt-in |
 
 More packs are added below as they ship.
 
@@ -181,6 +184,42 @@ Templates: `templates/packs/sql/`. Switched on by `.sqlfluff`, which also sets t
 
 Runs `sqlfluff lint --format json`. Linting only; `sqlfluff fix` is left to a human. Install: `uv tool install sqlfluff` or `pip install sqlfluff`.
 
+## rust
+
+Templates: `templates/packs/rust/`. Each tool has its own switch file.
+
+| Tool | Config (switch) | Findings | Stages |
+| --- | --- | --- | --- |
+| cargo fmt | `rustfmt.toml` | `cargo-fmt:format\|file` | commit, push |
+| clippy | `clippy.toml` | `clippy:<lint>\|file` | commit, push |
+| cargo-deny | `deny.toml` | `cargo-deny:policy\|deny.toml` | push |
+| cargo-machete | `[package.metadata.cargo-machete]` in `Cargo.toml` | `cargo-machete:unused-dependency\|Cargo.toml` | push |
+
+cargo fmt runs `cargo fmt --check`. clippy runs `cargo clippy --all-targets --message-format json -- -D warnings`, so every warning is an error, keyed by lint name. A clippy run that cannot compile fails the gate instead of passing. cargo-deny runs `cargo deny check` and reports one finding for the whole policy, with the tool's output attached. cargo-machete lists unused dependencies.
+
+## dart
+
+Templates: `templates/packs/dart/`. Switched on by `analysis_options.yaml`.
+
+| Tool | Findings | Stages |
+| --- | --- | --- |
+| dart-format | `dart-format:format\|file` | commit, push |
+| dart-analyze | `dart-analyze:<code>\|file` | commit, push |
+| flutter-coverage | metric `flutter-coverage` (up) | push |
+
+dart-format runs `dart format --output=none --set-exit-if-changed`. dart-analyze runs `dart analyze --format=machine` in a plain Dart package and `flutter analyze --no-pub` when `pubspec.yaml` declares `sdk: flutter`. flutter-coverage runs `flutter test --coverage`, reads `coverage/lcov.info` and ratchets the line coverage upward; it does nothing in a non-Flutter package.
+
+## cpp
+
+Templates: `templates/packs/cpp/`, for C and C++ including PlatformIO firmware.
+
+| Tool | Config (switch) | Findings | Stages |
+| --- | --- | --- | --- |
+| clang-format | `.clang-format` | `clang-format:format\|file` | commit, push |
+| pio-check | `check_tool` in `platformio.ini` | `pio-check:<tool>.<id>\|file` | push |
+
+clang-format runs `clang-format --dry-run --Werror`; each misformatted line is one finding. pio-check runs `pio check --skip-packages --json-output` with cppcheck or clang-tidy (`check_tool`). It downloads toolchains, so it is pre-push and CI only.
+
 ## Verified against real tools
 
 Each tool was run through `guardrails.mjs` with the shipped template config where it was installed. Everything else is covered only by the fake-output unit tests in `scripts/packs-*-test.mjs`, which use output copied from real runs where we had it, and from the tool's documentation otherwise.
@@ -199,3 +238,7 @@ Each tool was run through `guardrails.mjs` with the shipped template config wher
 | `docker compose config` | run for real |
 | hadolint | not run (not installed; JSON fields from its documented format) |
 | sqlfluff | not run (not installed; fake output of `--format json`) |
+| `cargo fmt --check`, `cargo clippy` (1.93) | run for real |
+| cargo-deny (needs the advisory database), cargo-machete (not installed) | not run (fake output) |
+| dart format, dart analyze, flutter analyze, flutter test --coverage | not run (the SDK shim is not configured here; fake output) |
+| clang-format, `pio check` | not run (clang-format not installed; `pio check` needs a toolchain download; fake output) |

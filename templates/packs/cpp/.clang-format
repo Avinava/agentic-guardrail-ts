@@ -1,0 +1,5 @@
+# .clang-format: its presence switches on `clang-format --dry-run --Werror` for C and C++.
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 100
+SortIncludes: CaseSensitive

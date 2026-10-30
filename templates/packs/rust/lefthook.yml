@@ -1,0 +1,7 @@
+# lefthook additions for the Rust pack. Merge under pre-commit.jobs in lefthook.yml.
+# cargo fmt runs on staged files; clippy, deny and machete are whole-crate checks for pre-push.
+pre-commit:
+  jobs:
+    - name: rust
+      glob: '*.rs'
+      run: node scripts/guardrails.mjs check --files {staged_files}

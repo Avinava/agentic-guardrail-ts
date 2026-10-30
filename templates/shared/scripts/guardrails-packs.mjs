@@ -920,4 +920,230 @@ const sql = {
   ],
 };
 
-export const PACKS = [core, ts, python, mule, salesforce, shell, docker, sql];
+// ── rust (Cargo) ──
+
+const RS_EXT = /\.rs$/;
+
+const rust = {
+  id: 'rust',
+  detect: [/(^|\/)Cargo\.toml$/],
+  tools: [
+    {
+      id: 'cargo-fmt',
+      optIn: ['rustfmt.toml', '.rustfmt.toml'],
+      exts: RS_EXT,
+      stages: ['commit', 'push'],
+      whole: true,
+      run: () => ({ cmd: 'cargo', args: ['fmt', '--check'] }),
+      parse: lines(/^Diff in (.+?):\d+/, ([, file]) => ({
+        rule: 'format',
+        file,
+        message: 'run cargo fmt',
+      })),
+    },
+    {
+      // -D warnings turns every warning into an error. 101 is cargo's "compilation failed" exit.
+      id: 'clippy',
+      optIn: ['clippy.toml', '.clippy.toml'],
+      exts: RS_EXT,
+      stages: ['commit', 'push'],
+      whole: true,
+      ok: [0, 101],
+      run: () => ({
+        cmd: 'cargo',
+        args: ['clippy', '--all-targets', '--message-format', 'json', '--', '-D', 'warnings'],
+      }),
+      // --all-targets compiles a file once per target, so the same lint can print twice.
+      parse: (out) => {
+        const seen = new Map();
+        for (const l of out.stdout.split('\n')) {
+          if (!l.startsWith('{')) continue;
+          const d = json('clippy', l);
+          const m = d.message;
+          const span = m?.spans?.find((s) => s.is_primary);
+          if (d.reason !== 'compiler-message' || !m.code || !span) continue;
+          const found = {
+            rule: m.code.code,
+            file: span.file_name,
+            line: span.line_start,
+            message: m.message,
+          };
+          seen.set(`${found.rule}|${found.file}|${found.line}`, found);
+        }
+        return [...seen.values()];
+      },
+    },
+    {
+      id: 'cargo-deny',
+      optIn: ['deny.toml'],
+      stages: ['push'],
+      whole: true,
+      run: () => ({ cmd: 'cargo', args: ['deny', 'check'] }),
+      parse: (out) =>
+        out.status === 0
+          ? []
+          : [{ rule: 'policy', file: 'deny.toml', message: tail(out.stderr || out.stdout) }],
+    },
+    {
+      // Unused dependencies. Switched on by [package.metadata.cargo-machete] in Cargo.toml.
+      id: 'cargo-machete',
+      optIn: [{ file: 'Cargo.toml', has: /cargo-machete/ }],
+      stages: ['push'],
+      whole: true,
+      run: () => ({ cmd: 'cargo', args: ['machete'] }),
+      parse: (out) => {
+        let manifest = 'Cargo.toml';
+        return out.stdout.split('\n').flatMap((l) => {
+          const header = /^\S+ -- (.+):$/.exec(l);
+          if (header) manifest = header[1].replace(/^\.\//, '');
+          const dep = /^\t(\S+)$/.exec(l);
+          return dep
+            ? [
+                {
+                  rule: 'unused-dependency',
+                  file: manifest,
+                  message: `unused dependency ${dep[1]}`,
+                },
+              ]
+            : [];
+        });
+      },
+    },
+  ],
+};
+
+// ── dart and flutter ──
+
+const DART_EXT = /\.dart$/;
+const DART_MARKER = ['analysis_options.yaml'];
+const isFlutter = (h) => h.exists('pubspec.yaml') && /sdk:\s*flutter/.test(h.read('pubspec.yaml'));
+
+const dart = {
+  id: 'dart',
+  detect: [/(^|\/)pubspec\.yaml$/, DART_EXT],
+  tools: [
+    {
+      id: 'dart-format',
+      optIn: DART_MARKER,
+      exts: DART_EXT,
+      stages: ['commit', 'push'],
+      run: ({ files }) => ({
+        cmd: 'dart',
+        args: ['format', '--output=none', '--set-exit-if-changed', ...(files ?? ['.'])],
+      }),
+      parse: lines(/^Changed (.+)$/, ([, file]) => ({
+        rule: 'format',
+        file,
+        message: 'run dart format',
+      })),
+    },
+    {
+      // dart analyze --format=machine prints SEVERITY|TYPE|CODE|FILE|LINE|COLUMN|LENGTH|MESSAGE.
+      // Flutter projects use `flutter analyze`, which has no machine format.
+      id: 'dart-analyze',
+      optIn: DART_MARKER,
+      exts: DART_EXT,
+      stages: ['commit', 'push'],
+      whole: true,
+      ok: [0, 1, 2, 3],
+      run: ({ h }) =>
+        isFlutter(h)
+          ? { cmd: 'flutter', args: ['analyze', '--no-pub'] }
+          : { cmd: 'dart', args: ['analyze', '--format=machine'] },
+      parse: (out, { h }) =>
+        isFlutter(h)
+          ? lines(
+              /^\s*(?:error|warning|info) • (.+?) • (.+?):(\d+):\d+ • (\S+)/,
+              ([, message, file, row, rule]) => ({
+                rule,
+                file,
+                line: +row,
+                message,
+              }),
+            )(out)
+          : lines(
+              /^(?:ERROR|WARNING|INFO)\|[^|]*\|([^|]*)\|([^|]*)\|(\d+)\|\d+\|\d+\|(.*)$/,
+              ([, rule, file, row, message]) => ({
+                rule: rule.toLowerCase(),
+                file,
+                line: +row,
+                message,
+              }),
+            )({ stdout: `${out.stdout}\n${out.stderr}` }),
+    },
+    {
+      // Coverage may only go up. Flutter packages only (`flutter test --coverage`).
+      id: 'flutter-coverage',
+      optIn: DART_MARKER,
+      stages: ['push'],
+      metric: {
+        name: 'flutter-coverage',
+        direction: 'up',
+        unit: '%',
+        advice: 'Add tests for the new code.',
+      },
+      measure: ({ h }) => {
+        if (!isFlutter(h)) return null;
+        const r = h.run('flutter', ['test', '--coverage']);
+        if (r.status !== 0)
+          throw new Error(`flutter test failed (exit ${r.status}):\n${tail(r.stdout || r.stderr)}`);
+        const sum = (tag) =>
+          h
+            .read('coverage/lcov.info')
+            .split('\n')
+            .filter((l) => l.startsWith(`${tag}:`))
+            .reduce((n, l) => n + Number(l.slice(tag.length + 1)), 0);
+        const found = sum('LF');
+        return { value: found === 0 ? 100 : (sum('LH') / found) * 100 };
+      },
+    },
+  ],
+};
+
+// ── cpp and PlatformIO firmware ──
+
+const CPP_EXT = /\.(?:c|cc|cpp|cxx|h|hh|hpp|ino)$/;
+
+const cpp = {
+  id: 'cpp',
+  detect: [/(^|\/)platformio\.ini$/, /(^|\/)\.clang-format$/, CPP_EXT],
+  tools: [
+    {
+      id: 'clang-format',
+      optIn: ['.clang-format'],
+      exts: CPP_EXT,
+      stages: ['commit', 'push'],
+      run: ({ files, h }) => {
+        const sources = files ?? h.projectFiles(CPP_EXT);
+        return sources.length === 0
+          ? null
+          : { cmd: 'clang-format', args: ['--dry-run', '--Werror', ...sources] };
+      },
+      parse: lines(
+        /^(.+?):(\d+):\d+: (?:error|warning): code should be clang-formatted/,
+        ([, file, row]) => ({ rule: 'format', file, line: +row, message: 'run clang-format -i' }),
+        'stderr',
+      ),
+    },
+    {
+      // Static analysis through `pio check` (cppcheck or clang-tidy, chosen by check_tool in
+      // platformio.ini). It downloads toolchains, so it is pre-push and CI only.
+      id: 'pio-check',
+      optIn: [{ file: 'platformio.ini', has: /^check_tool\s*=/m }],
+      stages: ['push'],
+      whole: true,
+      run: () => ({ cmd: 'pio', args: ['check', '--skip-packages', '--json-output'] }),
+      parse: (out) =>
+        json('pio check', out.stdout).flatMap((env) =>
+          (env.defects ?? []).map((d) => ({
+            rule: `${env.tool ?? 'pio'}.${d.id ?? d.category ?? d.severity}`,
+            file: d.file,
+            line: d.line,
+            message: d.message,
+          })),
+        ),
+    },
+  ],
+};
+
+export const PACKS = [core, ts, python, mule, salesforce, shell, docker, sql, rust, dart, cpp];

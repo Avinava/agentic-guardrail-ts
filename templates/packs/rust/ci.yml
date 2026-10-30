@@ -1,0 +1,17 @@
+# Job to add to .github/workflows/ci.yml for the Rust pack. cargo-deny and cargo-machete are
+# installed with cargo install --locked (cache ~/.cargo/bin in a real pipeline).
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - run: cargo install --locked cargo-deny cargo-machete
+      - name: Rust guardrails (fmt, clippy, deny, machete)
+        run: node scripts/guardrails.mjs check --strict-baseline
