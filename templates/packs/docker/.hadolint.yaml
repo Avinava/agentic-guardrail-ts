@@ -1,0 +1,7 @@
+# .hadolint.yaml: hadolint config. Its presence switches on the Docker pack (hadolint, plus
+# `docker compose config` validation of compose files).
+failure-threshold: warning
+trustedRegistries:
+  - docker.io
+  - ghcr.io
+ignored: []

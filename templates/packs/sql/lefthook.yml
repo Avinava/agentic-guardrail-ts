@@ -1,0 +1,6 @@
+# lefthook additions for the SQL pack. Merge under pre-commit.jobs in lefthook.yml.
+pre-commit:
+  jobs:
+    - name: sql
+      glob: '*.sql'
+      run: node scripts/guardrails.mjs check --files {staged_files}

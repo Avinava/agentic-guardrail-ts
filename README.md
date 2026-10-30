@@ -69,6 +69,9 @@ The engine is language-agnostic. Each stack is a pack of tools that switch on wh
 | `python` | `pyproject.toml`, `uv.lock` | ruff (lint, format), pyright, tach, deptry, vulture, pytest coverage floor | opt-in |
 | `mule` | `mule-artifact.json`, `src/main/mule/*.xml` | mule-lint, Mule XML format check, properties secrets, MUnit through Maven | opt-in |
 | `salesforce` | `sfdx-project.json`, `*.cls`, `*.trigger` | Code Analyzer (PMD, ESLint, retire-js), prettier-apex, metadata checks, Apex coverage floor | opt-in |
+| `shell` | `*.sh`, `*.bash` | shellcheck, shfmt | opt-in |
+| `docker` | `Dockerfile*`, `*compose*.yml` | hadolint, `docker compose config` | opt-in |
+| `sql` | `*.sql` | sqlfluff | opt-in |
 
 ## How the loop works
 

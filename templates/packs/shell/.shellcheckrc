@@ -1,0 +1,6 @@
+# .shellcheckrc: shellcheck config. Its presence switches on the shell pack (shellcheck, shfmt).
+# Every disable needs a reason on the line above, for example:
+#   # shellcheck disable=SC2034 -- exported for the sourced file, see docs/adr/0007.md
+shell=bash
+external-sources=true
+enable=require-variable-braces

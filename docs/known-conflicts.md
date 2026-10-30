@@ -269,3 +269,37 @@ Tool interactions that surprise people, and what to do about them.
 **Symptom:** pre-commit takes over ten seconds on a Salesforce repo.
 
 **Resolution:** expected. It runs only on the staged files and never in the edit hook. Narrow `ignores` in `code-analyzer.yml` for generated folders.
+
+## shfmt and .editorconfig
+
+**Symptom:** shfmt wants different indentation from the one you use.
+
+**Why:** shfmt reads its indent settings from `.editorconfig`, the same file editorconfig-checker enforces.
+
+**Resolution:** set `indent_style` and `indent_size` for `*.sh` in `.editorconfig`; do not pass flags to shfmt.
+
+## shellcheck disables
+
+**Symptom:** a `# shellcheck disable=` line is rejected in review.
+
+**Resolution:** the repo rule applies: name the code and the reason on the same line (`# shellcheck disable=SC2034 -- exported for the sourced file`). The shellcheck gate does not enforce the reason, so reviewers do.
+
+## hadolint and docker compose config
+
+**Symptom:** a compose file with a `build:` section is flagged by one tool and not the other.
+
+**Why:** they check different things. hadolint lints Dockerfiles. `docker compose config` validates the compose file (schema, interpolation) and does not read the Dockerfile.
+
+**Resolution:** none. Both run.
+
+## compose config needs variables
+
+**Symptom:** `compose-config:invalid` complaining about a missing variable.
+
+**Resolution:** give the variable a default in the file (`${PORT:-8080}`) or commit a `.env.example` and set the variable in CI. Do not commit real values.
+
+## sqlfluff dialect
+
+**Symptom:** valid SQL reports parse errors (PRS) on every file.
+
+**Resolution:** set the right `dialect` in `.sqlfluff`. sqlfluff cannot lint SQL it cannot parse, and templated files (dbt, Jinja) need `templater` set.

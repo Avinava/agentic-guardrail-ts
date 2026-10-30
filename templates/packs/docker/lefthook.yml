@@ -1,0 +1,6 @@
+# lefthook additions for the Docker pack. Merge under pre-commit.jobs in lefthook.yml.
+pre-commit:
+  jobs:
+    - name: docker
+      glob: '{Dockerfile*,*.Dockerfile,*compose*.yml,*compose*.yaml}'
+      run: node scripts/guardrails.mjs check --files {staged_files}

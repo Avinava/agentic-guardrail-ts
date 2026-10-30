@@ -13,6 +13,9 @@ Everything beyond the original TypeScript stack is **opt-in**. A tool switches o
 | `python` | `pyproject.toml`, `uv.lock` | ruff (lint, format), pyright, tach, deptry, vulture, pytest coverage floor | opt-in |
 | `mule` | `mule-artifact.json`, `src/main/mule/*.xml` | mule-lint, Mule XML format check, properties secrets, MUnit through Maven | opt-in |
 | `salesforce` | `sfdx-project.json`, `*.cls`, `*.trigger` | Code Analyzer (PMD, ESLint, retire-js), prettier-apex, metadata checks, Apex coverage floor | opt-in |
+| `shell` | `*.sh`, `*.bash` | shellcheck, shfmt | opt-in |
+| `docker` | `Dockerfile*`, `*compose*.yml` | hadolint, `docker compose config` | opt-in |
+| `sql` | `*.sql` | sqlfluff | opt-in |
 
 More packs are added below as they ship.
 
@@ -146,6 +149,38 @@ Templates: `templates/packs/salesforce/`. For Salesforce DX projects (`sfdx-proj
 
 **apex-coverage** runs `sf apex run test --test-level RunLocalTests --code-coverage --json` against the org named in `guardrails/apex-coverage.json`, fails if any test fails, and ratchets the org-wide coverage upward. It needs an authenticated scratch org or sandbox. Never point it at production; the setup skill confirms the org before writing the file.
 
+## shell
+
+Templates: `templates/packs/shell/`. Both tools switch on with `.shellcheckrc`.
+
+| Tool | Findings | Stages |
+| --- | --- | --- |
+| shellcheck | `shellcheck:SCxxxx\|file` | edit, commit, push |
+| shfmt | `shfmt:format\|file` | commit, push |
+
+shellcheck runs as `shellcheck -f json1`. shfmt runs `shfmt -l` and reads its indent settings from `.editorconfig`. Both cover `*.sh` and `*.bash`; extensionless scripts are not discovered. Install: `brew install shellcheck shfmt`, or `apt-get install shellcheck shfmt` in CI.
+
+## docker
+
+Templates: `templates/packs/docker/`. Both tools switch on with `.hadolint.yaml`.
+
+| Tool | Findings | Stages |
+| --- | --- | --- |
+| hadolint | `hadolint:<DLxxxx or SCxxxx>\|Dockerfile` | commit, push |
+| compose-config | `compose-config:invalid\|compose file` | commit, push |
+
+hadolint runs as `hadolint --format json` on `Dockerfile*` and `*.Dockerfile`. compose-config runs `docker compose -f <file> config --quiet` once per compose file, which validates the schema and variable interpolation and needs no running daemon. Install hadolint with `brew install hadolint` or a release binary; `docker` is already on CI runners.
+
+## sql
+
+Templates: `templates/packs/sql/`. Switched on by `.sqlfluff`, which also sets the dialect.
+
+| Tool | Findings | Stages |
+| --- | --- | --- |
+| sqlfluff | `sqlfluff:<rule code>\|file` | commit, push |
+
+Runs `sqlfluff lint --format json`. Linting only; `sqlfluff fix` is left to a human. Install: `uv tool install sqlfluff` or `pip install sqlfluff`.
+
 ## Verified against real tools
 
 Each tool was run through `guardrails.mjs` with the shipped template config where it was installed. Everything else is covered only by the fake-output unit tests in `scripts/packs-*-test.mjs`, which use output copied from real runs where we had it, and from the tool's documentation otherwise.
@@ -159,3 +194,8 @@ Each tool was run through `guardrails.mjs` with the shipped template config wher
 | Maven and MUnit | not run (fake `mvn` only); the coverage floor is enforced by Maven |
 | `sf code-analyzer` (Code Analyzer 0.49 engines) and the metadata checks | run for real |
 | prettier-apex, `sf apex run test` (needs an org) | not run (fake output only) |
+| shellcheck 0.11 | run for real |
+| shfmt | not run (not installed; fake output of `shfmt -l`) |
+| `docker compose config` | run for real |
+| hadolint | not run (not installed; JSON fields from its documented format) |
+| sqlfluff | not run (not installed; fake output of `--format json`) |

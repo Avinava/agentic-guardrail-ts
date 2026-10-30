@@ -794,4 +794,130 @@ const salesforce = {
   ],
 };
 
-export const PACKS = [core, ts, python, mule, salesforce];
+// ── shell ──
+
+const SH_EXT = /\.(?:sh|bash)$/;
+const SH_MARKER = ['.shellcheckrc'];
+
+const shell = {
+  id: 'shell',
+  detect: [SH_EXT, /(^|\/)\.shellcheckrc$/],
+  tools: [
+    {
+      id: 'shellcheck',
+      optIn: SH_MARKER,
+      exts: SH_EXT,
+      stages: ['edit', 'commit', 'push'],
+      run: ({ files, h }) => {
+        const scripts = files ?? h.projectFiles(SH_EXT);
+        return scripts.length === 0
+          ? null
+          : { cmd: 'shellcheck', args: ['-f', 'json1', ...scripts] };
+      },
+      parse: (out) =>
+        (json('shellcheck', out.stdout).comments ?? []).map((c) => ({
+          rule: `SC${c.code}`,
+          file: c.file,
+          line: c.line,
+          message: c.message,
+        })),
+    },
+    {
+      // Formatting from .editorconfig (shfmt reads indent settings there).
+      id: 'shfmt',
+      optIn: SH_MARKER,
+      exts: SH_EXT,
+      stages: ['commit', 'push'],
+      run: ({ files, h }) => {
+        const scripts = files ?? h.projectFiles(SH_EXT);
+        return scripts.length === 0 ? null : { cmd: 'shfmt', args: ['-l', ...scripts] };
+      },
+      parse: lines(/^(.+\.(?:sh|bash))$/, ([, file]) => ({
+        rule: 'format',
+        file,
+        message: 'run shfmt -w',
+      })),
+    },
+  ],
+};
+
+// ── docker ──
+
+const DOCKERFILE = /(^|\/)(?:Dockerfile[^/]*|[^/]*\.Dockerfile)$/;
+const COMPOSE = /(^|\/)(?:docker-)?compose[^/]*\.ya?ml$/;
+const DOCKER_MARKER = ['.hadolint.yaml', '.hadolint.yml'];
+
+const docker = {
+  id: 'docker',
+  detect: [DOCKERFILE, COMPOSE],
+  tools: [
+    {
+      id: 'hadolint',
+      optIn: DOCKER_MARKER,
+      exts: DOCKERFILE,
+      stages: ['commit', 'push'],
+      run: ({ files, h }) => {
+        const images = files ?? h.projectFiles(DOCKERFILE);
+        return images.length === 0
+          ? null
+          : { cmd: 'hadolint', args: ['--format', 'json', ...images] };
+      },
+      parse: (out) =>
+        json('hadolint', out.stdout || '[]').map((d) => ({
+          rule: d.code,
+          file: d.file,
+          line: d.line,
+          message: d.message,
+        })),
+    },
+    {
+      // `docker compose config` validates the file and its interpolation; it needs no daemon.
+      id: 'compose-config',
+      optIn: DOCKER_MARKER,
+      exts: COMPOSE,
+      stages: ['commit', 'push'],
+      perFile: true,
+      run: ({ files }) => ({
+        cmd: 'docker',
+        args: ['compose', '-f', files[0], 'config', '--quiet'],
+      }),
+      parse: (out, { files }) =>
+        out.status === 0
+          ? []
+          : [{ rule: 'invalid', file: files[0], message: tail(out.stderr || out.stdout) }],
+    },
+  ],
+};
+
+// ── sql ──
+
+const SQL_EXT = /\.sql$/;
+
+const sql = {
+  id: 'sql',
+  detect: [SQL_EXT, /(^|\/)\.sqlfluff$/],
+  tools: [
+    {
+      // The dialect and rules come from .sqlfluff.
+      id: 'sqlfluff',
+      optIn: ['.sqlfluff'],
+      exts: SQL_EXT,
+      stages: ['commit', 'push'],
+      run: ({ files }) => ({
+        cmd: 'sqlfluff',
+        args: ['lint', '--format', 'json', ...(files ?? ['.'])],
+      }),
+      parse: (out) =>
+        json('sqlfluff', out.stdout || '[]').flatMap((f) =>
+          f.violations.map((v) => ({
+            rule: v.code,
+            file: f.filepath,
+            line: v.start_line_no ?? v.line_no,
+            message: v.description,
+          })),
+        ),
+    },
+  ],
+};
+
+export const PACKS = [core, ts, python, mule, salesforce, shell, docker, sql];
