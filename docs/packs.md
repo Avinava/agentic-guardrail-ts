@@ -12,6 +12,7 @@ Everything beyond the original TypeScript stack is **opt-in**. A tool switches o
 | `ts` | `package.json`, `tsconfig*.json` | Oxlint, dependency-cruiser, Knip, disable check, Prettier, Vitest floors | on in every v3 install (switched on by `.oxlintrc.json`, `.dependency-cruiser.mjs`, `knip.json`) |
 | `python` | `pyproject.toml`, `uv.lock` | ruff (lint, format), pyright, tach, deptry, vulture, pytest coverage floor | opt-in |
 | `mule` | `mule-artifact.json`, `src/main/mule/*.xml` | mule-lint, Mule XML format check, properties secrets, MUnit through Maven | opt-in |
+| `salesforce` | `sfdx-project.json`, `*.cls`, `*.trigger` | Code Analyzer (PMD, ESLint, retire-js), prettier-apex, metadata checks, Apex coverage floor | opt-in |
 
 More packs are added below as they ship.
 
@@ -126,6 +127,25 @@ Templates: `templates/packs/mule/`. For MuleSoft applications (a `mule-artifact.
 
 **munit** runs `mvn test` for each `pom.xml` that configures `munit-maven-plugin`, on full checks only. The coverage floor is `requiredApplicationCoverage` in the pom (see `pom-munit-snippet.xml`), so a coverage miss fails `mvn test`. That number is not part of the baseline; raise it in the pom by hand when coverage improves.
 
+## salesforce
+
+Templates: `templates/packs/salesforce/`. For Salesforce DX projects (`sfdx-project.json`, Apex `.cls` and `.trigger`, LWC). Everything uses `sf`, never `sfdx`.
+
+| Tool | Config (switch) | Findings | Stages |
+| --- | --- | --- | --- |
+| code-analyzer | `code-analyzer.yml` | `code-analyzer:<engine>.<rule>\|file` | commit, push |
+| prettier-apex | `.prettierrc` with `prettier-plugin-apex` | `prettier-apex:format\|file` | commit, push |
+| sf-metadata | `code-analyzer.yml` | `sf-metadata:missing-meta-xml\|file`, `stale-api-version` | commit, push |
+| apex-coverage | `guardrails/apex-coverage.json` | metric `apex-coverage` (up) | push |
+
+**code-analyzer** is `sf code-analyzer run` (PMD for Apex, ESLint for LWC, retire-js, regex). The engine passes the staged files with `--target` and reads the results file it writes. It takes about ten seconds, so it is not in the edit hook. Rule selection and overrides live in `code-analyzer.yml`.
+
+**prettier-apex** checks `.cls`, `.trigger` and `.apex` files with `prettier --list-different`. LWC JS, HTML and CSS are covered by the base Prettier check.
+
+**sf-metadata** checks that every class and trigger has its `-meta.xml` and that no `apiVersion` is older than `sourceApiVersion` in `sfdx-project.json`.
+
+**apex-coverage** runs `sf apex run test --test-level RunLocalTests --code-coverage --json` against the org named in `guardrails/apex-coverage.json`, fails if any test fails, and ratchets the org-wide coverage upward. It needs an authenticated scratch org or sandbox. Never point it at production; the setup skill confirms the org before writing the file.
+
 ## Verified against real tools
 
 Each tool was run through `guardrails.mjs` with the shipped template config where it was installed. Everything else is covered only by the fake-output unit tests in `scripts/packs-*-test.mjs`, which use output copied from real runs where we had it, and from the tool's documentation otherwise.
@@ -137,3 +157,5 @@ Each tool was run through `guardrails.mjs` with the shipped template config wher
 | ruff 0.16.9, pyright 1.1.414, tach 0.35.3, deptry 0.25.1, vulture 2.16, pytest-cov through uv 0.12.21 | run for real (ruff format output changed in 0.16, which the parser handles) |
 | mule-lint 2.3.0 (lint and `format --check`), the properties secret check | run for real |
 | Maven and MUnit | not run (fake `mvn` only); the coverage floor is enforced by Maven |
+| `sf code-analyzer` (Code Analyzer 0.49 engines) and the metadata checks | run for real |
+| prettier-apex, `sf apex run test` (needs an org) | not run (fake output only) |

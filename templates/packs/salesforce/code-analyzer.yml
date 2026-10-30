@@ -1,0 +1,16 @@
+# code-analyzer.yml: Salesforce Code Analyzer config (sf code-analyzer). Its presence switches on
+# the Salesforce pack. Engines: PMD for Apex, ESLint for LWC, retire-js, regex.
+# Reference: run `sf code-analyzer config` to print every option with its default.
+log_level: 3
+rules:
+  pmd:
+    ApexSharingViolations:
+      severity: 2
+engines:
+  eslint:
+    auto_discover_eslint_config: true
+ignores:
+  files:
+    - '**/node_modules/**'
+    - '**/*.test.js'
+    - '**/__tests__/**'

@@ -1,0 +1,5 @@
+{
+  "targetOrg": "ci-scratch",
+  "testLevel": "RunLocalTests",
+  "waitMinutes": 60
+}

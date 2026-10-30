@@ -1545,7 +1545,154 @@ const mule = {
   ],
 };
 
-export const PACKS = [core, ts, python, mule];
+// ── salesforce: Apex, LWC, metadata (always `sf`, never `sfdx`) ──
+
+const APEX_EXT = /\.(?:cls|trigger|apex)$/;
+const SF_CODE = /\.(?:cls|trigger|apex|js|html|cmp|page|component)$/;
+const SF_MARKER = ['code-analyzer.yml', 'code-analyzer.yaml'];
+
+// The package directories of sfdx-project.json (force-app by default), or the repo root.
+const packageDirs = (h) => {
+  if (!h.exists('sfdx-project.json')) return ['.'];
+  const paths = (
+    json('sfdx-project.json', h.read('sfdx-project.json')).packageDirectories ?? []
+  ).map((p) => p.path);
+  return paths.length > 0 ? paths : ['.'];
+};
+
+const salesforce = {
+  id: 'salesforce',
+  detect: [/(^|\/)sfdx-project\.json$/, /\.(?:cls|trigger)$/],
+  tools: [
+    {
+      // Salesforce Code Analyzer: PMD for Apex, ESLint for LWC, retire-js, regex rules. About ten
+      // seconds a run, so it is a pre-commit and CI check, not an edit hook.
+      id: 'code-analyzer',
+      optIn: SF_MARKER,
+      exts: SF_CODE,
+      stages: ['commit', 'push'],
+      // The workspace is the package directories of sfdx-project.json, so tooling files such as
+      // scripts/ are not analysed as LWC.
+      run: ({ files, tmp, h }) => {
+        const dirs = packageDirs(h);
+        const inside = (files ?? []).filter((f) => dirs.some((d) => f.startsWith(`${d}/`)));
+        if (files && inside.length === 0) return null;
+        return {
+          cmd: 'sf',
+          args: [
+            'code-analyzer',
+            'run',
+            ...dirs.flatMap((d) => ['--workspace', d]),
+            ...inside.flatMap((f) => ['--target', f]),
+            '--output-file',
+            tmp('code-analyzer.json'),
+          ],
+        };
+      },
+      parse: (out, { tmp, h }) => {
+        if (!h.exists(tmp('code-analyzer.json'))) {
+          throw new Error(
+            `sf code-analyzer wrote no results (exit ${out.status}):\n${tail(out.stderr)}`,
+          );
+        }
+        return json('code-analyzer', h.read(tmp('code-analyzer.json'))).violations.map((v) => {
+          const at = v.locations[v.primaryLocationIndex ?? 0];
+          return {
+            rule: `${v.engine}.${v.rule}`,
+            file: at.file,
+            line: at.startLine,
+            message: v.message,
+          };
+        });
+      },
+    },
+    {
+      // Apex formatting through prettier-plugin-apex. LWC JS, HTML and CSS are covered by the
+      // base Prettier check (`format:check`).
+      id: 'prettier-apex',
+      optIn: [
+        { file: '.prettierrc', has: /prettier-plugin-apex/ },
+        { file: '.prettierrc.json', has: /prettier-plugin-apex/ },
+      ],
+      exts: APEX_EXT,
+      stages: ['commit', 'push'],
+      run: ({ files, h }) => {
+        const apex = files ?? h.projectFiles(APEX_EXT);
+        return apex.length === 0
+          ? null
+          : { cmd: h.needBin('prettier'), args: ['--list-different', '--ignore-unknown', ...apex] };
+      },
+      parse: lines(/^([^[\s].*)$/, ([, file]) => ({
+        rule: 'format',
+        file,
+        message: 'run prettier --write',
+      })),
+    },
+    {
+      // Metadata sanity: every class and trigger has its -meta.xml, and no apiVersion is older
+      // than sourceApiVersion in sfdx-project.json.
+      id: 'sf-metadata',
+      optIn: SF_MARKER,
+      exts: /\.(?:cls|trigger)$/,
+      stages: ['commit', 'push'],
+      scan: ({ files, h }) => {
+        const project = h.exists('sfdx-project.json')
+          ? json('sfdx-project.json', h.read('sfdx-project.json'))
+          : {};
+        const want = Number.parseFloat(project.sourceApiVersion);
+        const code = files ?? h.projectFiles(/\.(?:cls|trigger)$/);
+        return code.flatMap((file) => {
+          const meta = `${file}-meta.xml`;
+          if (!h.exists(meta))
+            return [{ rule: 'missing-meta-xml', file, message: `${file} has no ${meta}` }];
+          const version = /<apiVersion>([\d.]+)<\/apiVersion>/.exec(h.read(meta))?.[1];
+          if (!want || !version || Number.parseFloat(version) >= want) return [];
+          const message = `apiVersion ${version} is older than sourceApiVersion ${project.sourceApiVersion}`;
+          return [{ rule: 'stale-api-version', file: meta, message }];
+        });
+      },
+    },
+    {
+      // Apex coverage floor from an org test run (`sf apex run test`). Needs an authenticated
+      // test org named in guardrails/apex-coverage.json; never point it at production.
+      id: 'apex-coverage',
+      optIn: ['guardrails/apex-coverage.json'],
+      stages: ['push'],
+      metric: {
+        name: 'apex-coverage',
+        direction: 'up',
+        unit: '%',
+        advice: 'Add Apex tests for the new code.',
+      },
+      measure: ({ h }) => {
+        const cfg = json('apex-coverage.json', h.read('guardrails/apex-coverage.json'));
+        const r = h.run('sf', [
+          'apex',
+          'run',
+          'test',
+          '--target-org',
+          cfg.targetOrg,
+          '--test-level',
+          cfg.testLevel ?? 'RunLocalTests',
+          '--code-coverage',
+          '--wait',
+          String(cfg.waitMinutes ?? 60),
+          '--json',
+        ]);
+        const summary = json('sf apex run test', r.stdout).result?.summary;
+        if (!summary)
+          throw new Error(
+            `sf apex run test returned no summary (exit ${r.status}):\n${tail(r.stdout)}`,
+          );
+        if (summary.outcome !== 'Passed')
+          throw new Error(`Apex tests ${summary.outcome}: ${summary.failing} failing`);
+        return { value: Number.parseFloat(summary.orgWideCoverage) };
+      },
+    },
+  ],
+};
+
+export const PACKS = [core, ts, python, mule, salesforce];
 ```
 <!-- /tmpl -->
 

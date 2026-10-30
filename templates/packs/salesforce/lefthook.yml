@@ -1,0 +1,8 @@
+# lefthook additions for the Salesforce pack. Merge under pre-commit.jobs in lefthook.yml.
+# Code Analyzer takes about ten seconds, so it runs once per commit on the staged files and
+# never in the edit hook. The Apex coverage floor needs an org, so it runs in CI only.
+pre-commit:
+  jobs:
+    - name: salesforce
+      glob: '*.{cls,trigger,apex,js,html,cmp,xml}'
+      run: node scripts/guardrails.mjs check --files {staged_files}

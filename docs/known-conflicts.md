@@ -241,3 +241,31 @@ Tool interactions that surprise people, and what to do about them.
 **Why:** mule-lint also flags plaintext secrets in config files. mule-secrets additionally covers YAML and any secret-looking key whatever its format, and it runs in the edit hook.
 
 **Resolution:** fix the value once (placeholder or `![...]`); both findings go away. If the double count bothers you, set `CFG-003` to `"enabled": false` in `.mulelintrc.json` with a comment in the PR.
+
+## Code Analyzer and Prettier on LWC
+
+**Symptom:** an LWC file passes Code Analyzer and fails Prettier, or the reverse.
+
+**Why:** Code Analyzer's ESLint engine checks code quality, not formatting. Prettier owns formatting, and the base `format:check` covers LWC JS, HTML and CSS. The `prettier-apex` tool covers Apex only.
+
+**Resolution:** none. If an ESLint config adds formatting rules, turn them off there (eslint-config-prettier style), as in the rest of this repo.
+
+## sf, not sfdx
+
+**Symptom:** a script or a CI step calls `sfdx force:...`.
+
+**Resolution:** use `sf` (`sf code-analyzer run`, `sf apex run test`). The pack's commands are all `sf`.
+
+## Apex coverage needs an org
+
+**Symptom:** `check` fails with an authentication error from `sf apex run test`.
+
+**Why:** the coverage floor runs the tests in the org named in `guardrails/apex-coverage.json`.
+
+**Resolution:** authenticate that org first (`sf org login web --alias ci-scratch`). Never use a production org. To skip the floor, delete `guardrails/apex-coverage.json`.
+
+## Code Analyzer is slow
+
+**Symptom:** pre-commit takes over ten seconds on a Salesforce repo.
+
+**Resolution:** expected. It runs only on the staged files and never in the edit hook. Narrow `ignores` in `code-analyzer.yml` for generated folders.
