@@ -354,7 +354,7 @@ Tool interactions that surprise people, and what to do about them.
 
 **Symptom:** `check --strict-baseline` in CI says `python-coverage is not recorded`, or a local `check` never mentions the Apex or Flutter coverage floor.
 
-**Why:** test suites, org runs and toolchain downloads (`pytest-cov`, `munit`, `apex-coverage`, `flutter-coverage`, `pio-check`) run only when `GUARDRAILS_CI=1`, which the CI step sets. A local pre-push does not run them. Their stored numbers are left alone locally.
+**Why:** test suites, org runs and toolchain downloads (`pytest-cov`, `munit`, `apex-coverage`, `flutter-coverage`, `pio-check`) run only in the ci stage: `GUARDRAILS_CI=1`, or the `CI` variable that GitHub Actions and GitLab set (`GUARDRAILS_CI=0` forces it off). A local pre-push does not run them and prints `deferred: ...`; `--strict-baseline` fails while any are deferred. Their stored numbers and finding keys are left alone locally.
 
 **Resolution:** record them once with `GUARDRAILS_CI=1 node scripts/guardrails.mjs baseline --tighten`. `baseline --reset` keeps CI-only metrics that it did not measure.
 
@@ -381,3 +381,11 @@ Tool interactions that surprise people, and what to do about them.
 **Why:** the engine prefixes such names so no tool can read them as options.
 
 **Resolution:** none; this is intended.
+
+## Expensive tools ran twice, or in a job without the toolchain
+
+**Symptom:** a multi-stack pipeline runs `pytest` or the Apex tests twice, or the base job fails for lack of `uv` or an org login.
+
+**Why:** every job that runs `check` runs every configured pack unless told otherwise.
+
+**Resolution:** set `GUARDRAILS_PACKS` per job (base: `core,ts`; each pack job: its own pack). See [One job per pack in CI](./packs.md#one-job-per-pack-in-ci).

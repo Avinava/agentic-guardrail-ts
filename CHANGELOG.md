@@ -29,6 +29,13 @@ A language-agnostic engine with opt-in packs. Nothing is on by default and exist
 - File names starting with `-` are passed as `./name`, so they cannot be read as options.
 - Expensive tools (pytest, MUnit, Apex org run, Flutter tests, `pio check`) use the new `ci` stage: they run once, only with `GUARDRAILS_CI=1`, and never on pre-push.
 
+- The ci stage is on for `GUARDRAILS_CI=1` or the standard `CI` variable (`GUARDRAILS_CI=0` forces it off). A local full check prints `deferred: ...` and `--strict-baseline` fails while ci tools are deferred.
+- Local `baseline --tighten` and `--reset` carry over stored metrics and finding keys of tools that did not run, and never report them stale.
+- `GUARDRAILS_PACKS` selects packs per CI job, so expensive tools run once in a job with their toolchain; the base and pack CI templates set it, and `scripts/packs-ci-test.mjs` checks no ci tool is selected twice.
+- Findings are scoped by the file recorded on the finding, not by parsing the key, so paths containing `|` work.
+- Scan tools pass directories through `h.safe` (`./-legacy`).
+- An invalid stored metric (`null`) fails the check; `--tighten` reports it and records the current reading explicitly.
+
 ### Changed
 - The TypeScript tools (Oxlint, dependency-cruiser, Knip, disable check) are declared as the `ts` pack and switch on with `.oxlintrc.json`, `.dependency-cruiser.*` and `knip.json`. A repo without Node (Python, Mule, Rust) no longer needs Oxlint installed.
 - `guardrails.mjs` works without a `package.json`.

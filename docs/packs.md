@@ -34,7 +34,7 @@ A tool declares:
 | `optIn` | The config files that switch the tool on. A string is a file that must exist. `{ file, has }` also needs the pattern in the file (for example `[tool.ruff]` in `pyproject.toml`). |
 | `exts` | Files the tool covers. The hooks use it to run only the tools whose files changed. |
 | `track` | File types to start tracking when the tool is on (cspell adds Markdown). |
-| `stages` | Where it runs. `edit`: the post-edit hook. `commit`: pre-commit, `check --files`, `check --changed` and the stop hook. `push`: the full check, which is pre-push (through `verify`) and CI. `ci`: a full check run with `GUARDRAILS_CI=1`, which only the CI step sets. Expensive tools (test suites, org runs, toolchain downloads) use `ci`, so they run once in CI and never on pre-push. |
+| `stages` | Where it runs. `edit`: the post-edit hook. `commit`: pre-commit, `check --files`, `check --changed` and the stop hook. `push`: the full check, which is pre-push (through `verify`) and CI. `ci`: a full check in CI, which is on when `GUARDRAILS_CI=1` or the standard `CI` variable is set (GitHub Actions and GitLab both set it); `GUARDRAILS_CI=0` forces it off. Expensive tools (test suites, org runs, toolchain downloads) use `ci`, so they never run on pre-push. A local full check prints `deferred: <tools> (set GUARDRAILS_CI=1 or run in CI)` and `check --strict-baseline` fails while any are deferred, so a CI that forgot the flag cannot print "clean". |
 | `whole` | Run on the whole project even in a scoped run; findings are then filtered to the files in scope. For tree-wide tools. |
 | `perFile` | One command per file. |
 | `ok` | Exit codes that mean the tool ran. Anything else is a tool failure and blocks, never a silent pass. Default `[0, 1]`. A tool whose JSON report is authoritative (Oxlint, dependency-cruiser, Knip) accepts every exit code, as v3 did, and fails only if the report does not parse. |
@@ -43,7 +43,11 @@ A tool declares:
 | `scan(ctx)` | Replaces `run` and `parse` for checks done in JS (naming, metadata, tools run in a loop). A finding may set `always: true` for "this whole tool failed" (a test run, a policy, an invalid file): it is never counted in the baseline, so `baseline` refuses to run while one exists and a later failure of the same kind still fails. |
 | `metric`, `measure(ctx)` | A number ratchet instead of findings. |
 
-A file name that starts with `-` (for example `--config=x.md`) is passed to tools as `./--config=x.md`, so no tool can read it as an option.
+A file name that starts with `-` (for example `--config=x.md`) is passed to tools as `./--config=x.md`, so no tool can read it as an option. Tools that run their own commands (`scan` tools) wrap paths with `h.safe`, which does the same for directories such as a Mule app named `-legacy`.
+
+### One job per pack in CI
+
+`GUARDRAILS_PACKS=core,ts` limits a run to those packs (default: all, as in v3). In a repo with several stacks each CI job sets it to the packs it has a toolchain for, so every expensive tool runs exactly once, in a job that has its toolchain and credentials. The base `verify` job in `templates/ci/ci.yml` owns `core,ts`; each `templates/packs/<pack>/ci.yml` job sets its own pack. A pack with no job of its own (shell, docker, sql) must be added to the `verify` job's list once that job installs its tools; a run prints `packs left to other jobs` so a pack nobody runs is visible. `scripts/packs-ci-test.mjs` checks that no ci-stage pack is selected by two jobs.
 
 Non-Node tools need nothing special: `run` returns `{ cmd: 'shellcheck', args: [...] }`. Python tools return `{ cmd: 'uv', args: ['run', 'ruff', ...] }`.
 
@@ -56,7 +60,9 @@ Some things are a ratio, not a count per file. Duplication, test coverage and Ap
 - `baseline --tighten` moves it the right way only, and records it the first time the tool is enabled (adding its config file is itself a reviewed change).
 - A reading must be a finite number. A missing or non-numeric one (a renamed report field) fails the run; it can never become `null` in the baseline.
 - A metric stored in the baseline that nothing measured this run (its tool config was removed, or it returned nothing) fails the check instead of being skipped, and `--tighten` carries it over unchanged. Only a human `baseline --reset` drops it. A metric whose tool is merely deferred to CI is left alone locally.
-- Metrics from `ci` tools (coverage floors) are measured only with `GUARDRAILS_CI=1`. Record them with `GUARDRAILS_CI=1 node scripts/guardrails.mjs baseline --tighten`.
+- Metrics from `ci` tools (coverage floors) are measured only in the ci stage. Record them with `GUARDRAILS_CI=1 node scripts/guardrails.mjs baseline --tighten`. A local `--tighten` or `--reset` carries over the stored numbers and the stored finding keys of tools that did not run, and never reports them stale.
+- A stored value that is not a finite number (a `null` left by an old bug) fails the check as invalid. `--tighten` prints that the stored value was invalid and records the current reading explicitly; review it.
+- To drop a metric whose tool no longer applies, run `GUARDRAILS_CI=1 node scripts/guardrails.mjs baseline --reset` (a local reset keeps metrics whose tool was merely deferred).
 
 Metrics run on full checks only, never in hooks, because they scan the whole project or run the test suite.
 
