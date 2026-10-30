@@ -14,6 +14,13 @@ What each tool does, where it is configured, and when it runs. Why these tools: 
 | gitleaks | | | staged | full history (CI) |
 | commitlint | | | message | PR range (CI) |
 | syncpack (monorepo) | | | | via `lint` script |
+| ast-grep (opt-in) | edited file | changed files | staged files | all |
+| ls-lint (opt-in) | edited file | changed files | staged files | all |
+| cspell (opt-in) | edited file | changed files | staged files | all |
+| jscpd (opt-in) | | | | full check only |
+| markdownlint-cli2, lychee (opt-in) | | changed docs | staged docs | all (lychee online in CI) |
+| ruff (Python pack) | edited file | changed files | staged files | all |
+| tach, deptry, vulture (Python pack) | | | | full check only |
 
 ## guardrails.mjs
 
@@ -25,10 +32,11 @@ baseline (--init | --tighten | --reset)
 verify
 format --files a.ts b.ts
 exec <bin> [args...]
+packs                          detected stacks and which tools are on
 hook (post-edit | stop)        reads the hook JSON on stdin
 ```
 
-- `check` collects findings from Oxlint, dependency-cruiser, Knip (full runs only) and the disable check. Each finding has a key `tool:rule|file`. It fails if any key's count is above the baseline.
+- `check` collects findings from every active tool of every [pack](./packs.md): Oxlint, dependency-cruiser, Knip (full runs only) and the disable check from the `ts` pack, plus any opt-in tool whose config file exists. Each finding has a key `tool:rule|file`. It fails if any key's count is above the baseline.
 - `--strict-baseline` also fails when the baseline is looser than the code (CI uses this). It needs a full check, so it refuses `--changed` and `--files`.
 - `verify` runs the `format:check`, `typecheck`, `lint` and `test:coverage` scripts in order, skipping any that are not defined.
 - `exec` runs a binary from `node_modules/.bin` (used for commitlint).
@@ -111,3 +119,7 @@ Config: `commitlint.config.mjs`, extending `@commitlint/config-conventional`.
 - `.codex/hooks.json`: the same hooks for Codex.
 
 See [Agent loop](./agent-loop.md).
+
+## Packs
+
+Everything above is the `ts` pack. Other stacks (Python, Mule, Salesforce, shell, Docker, SQL, GitHub Actions, Rust, Dart, C++) and the language-agnostic core tools (cspell, jscpd, ast-grep, ls-lint, markdownlint, lychee, editorconfig-checker) are packs: see [Packs](./packs.md) for the contract, the detect rules, what is default-on and what is opt-in.

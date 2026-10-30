@@ -58,6 +58,15 @@ Then ask "set up guardrails". Either way the agent audits the project, shows a g
 
 Full details: [Tool reference](docs/tool-reference.md).
 
+## Packs
+
+The engine is language-agnostic. Each stack is a pack of tools that switch on when their config file exists, so nothing below changes an existing install. See [Packs](docs/packs.md) for the contract, and `node scripts/guardrails.mjs packs` to see what a repo has.
+
+| Pack | Detect rule | Tools | Default |
+| --- | --- | --- | --- |
+| `ts` | `package.json`, `tsconfig*.json` | Oxlint, dependency-cruiser, Knip, Prettier, Vitest floors | on |
+| `core` | every repo | cspell, jscpd, ast-grep, ls-lint, markdownlint-cli2, lychee, editorconfig-checker, actionlint | opt-in |
+
 ## How the loop works
 
 ```mermaid

@@ -1,0 +1,8 @@
+# lychee.toml: link checker. Hooks run it with --offline (local links and anchors only).
+# CI runs it online (GUARDRAILS_ONLINE=1). Timeouts never fail the gate.
+include_fragments = "full"
+max_retries = 2
+timeout = 20
+accept = [200, 429]
+exclude_path = ["node_modules", "CHANGELOG.md"]
+exclude = ['^https?://localhost', '^https?://127\.0\.0\.1', '^https?://example\.']

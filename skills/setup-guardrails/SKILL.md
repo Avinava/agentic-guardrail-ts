@@ -299,16 +299,33 @@ These are the canonical files. They are rendered from the agentic-guardrail-ts r
 //   node scripts/guardrails.mjs verify
 //   node scripts/guardrails.mjs format --files a.ts b.ts
 //   node scripts/guardrails.mjs exec <bin> [args...]
+//   node scripts/guardrails.mjs packs                      detected stacks and enabled tools
 //   node scripts/guardrails.mjs hook (post-edit | stop)   reads hook JSON on stdin
+//
+// The engine is language-agnostic. Every tool comes from a pack declared in guardrails-packs.mjs
+// (see docs/packs.md for the contract). A tool is just an external command: the engine runs it,
+// checks the exit code, parses the output into findings and keys them `tool:rule|file`. A tool
+// switches on when its config file exists, so a pack you did not set up costs nothing.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
+import { PACKS } from './guardrails-packs.mjs';
 
 const ROOT = gitRoot() ?? process.cwd();
 const BASELINE = join(ROOT, 'guardrails.baseline.json');
 const LINT_EXT = /\.(?:[cm]?[jt]sx?)$/;
 const MAX_REASON = 6000;
+// Metric values are rounded to 2 decimals; this absorbs float noise when comparing.
+const EPSILON = 0.005;
 
 function gitRoot() {
   const r = spawnSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' });
@@ -324,6 +341,7 @@ function run(cmd, args, opts = {}) {
     maxBuffer: 256 * 1024 * 1024,
     ...opts,
   });
+  if (r.error?.code === 'ENOENT') throw new Error(`${cmd} is not installed or not on PATH.`);
   if (r.error) throw new Error(`${cmd}: ${r.error.message}`);
   return r;
 }
@@ -349,8 +367,10 @@ function packageManager() {
   return locks.find(([f]) => existsSync(join(ROOT, f)))?.[1] ?? 'npm';
 }
 
+// Repos without Node (Python, Mule, Rust, ...) have no package.json: that is fine.
 function pkg() {
-  return JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+  const file = join(ROOT, 'package.json');
+  return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
 }
 
 function sourceDirs() {
@@ -367,21 +387,75 @@ function rel(file) {
     .join('/');
 }
 
-function sourcePaths(files) {
-  return [...new Set(files.map(rel))].filter(
-    (f) => LINT_EXT.test(f) && !f.startsWith('..') && !f.includes('node_modules/'),
-  );
-}
-
-function lintable(files) {
-  return sourcePaths(files).filter((f) => existsSync(join(ROOT, f)));
-}
-
 // NUL-separated so paths git would quote (spaces, non-ASCII) come through verbatim.
 function gitFiles(args) {
   return run('git', [...args, '-z'])
     .stdout.split('\0')
     .filter(Boolean);
+}
+
+function finding(tool, rule, { file, line = 0, message }) {
+  return { key: `${tool}:${rule}|${file}`, tool, rule, file, line, message };
+}
+
+// A tool that crashed prints no JSON; fail loudly instead of reporting "clean".
+function toolJson(tool, r, text = r.stdout) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      `${tool} failed (exit ${r.status}):\n${(r.stderr || r.stdout).trim().slice(-2000)}`,
+    );
+  }
+}
+
+// ── Packs: which tools are on, and which files they cover ──
+
+function matchesOptIn(o) {
+  if (typeof o === 'string') return existsSync(join(ROOT, o));
+  const file = join(ROOT, o.file);
+  return existsSync(file) && o.has.test(readFileSync(file, 'utf8'));
+}
+
+let active = null;
+
+// A tool is on when any of its optIn entries matches: a config file that exists (a string), or
+// exists and matches a pattern ({ file, has }). optIn === null means always on (no pack uses it).
+function activeTools() {
+  active ??= PACKS.flatMap((p) => p.tools.map((t) => ({ ...t, pack: p.id }))).filter(
+    (t) => t.optIn === null || t.optIn.some(matchesOptIn),
+  );
+  return active;
+}
+
+// File types the gate tracks: JS/TS always, plus whatever the active tools declare.
+function trackedExt() {
+  const parts = [LINT_EXT, ...activeTools().flatMap((t) => [t.exts, t.track])].filter(Boolean);
+  return new RegExp(parts.map((r) => `(?:${r.source})`).join('|'));
+}
+
+function sourcePaths(files, ext = trackedExt()) {
+  return [...new Set(files.map(rel))].filter(
+    (f) => ext.test(f) && !f.startsWith('..') && !f.includes('node_modules/'),
+  );
+}
+
+// JS/TS files that exist (the Oxlint, dependency-cruiser and disable-check scope).
+function lintable(files) {
+  return sourcePaths(files, LINT_EXT).filter((f) => existsSync(join(ROOT, f)));
+}
+
+// Every tracked file that exists: the scope of a scoped run across all tools.
+function scopedFiles(files) {
+  return sourcePaths(files).filter((f) => existsSync(join(ROOT, f)));
+}
+
+// All tracked and untracked files a tool covers, for tools that take no project root.
+function projectFiles(ext = LINT_EXT) {
+  const untracked = gitFiles(['ls-files', '--others', '--exclude-standard']);
+  return sourcePaths([...gitFiles(['ls-files']), ...untracked], ext).filter((f) =>
+    existsSync(join(ROOT, f)),
+  );
 }
 
 // Changed source paths since HEAD, including deleted ones.
@@ -391,139 +465,155 @@ function changedPaths() {
 }
 
 function changedFiles() {
-  return lintable(changedPaths());
+  return scopedFiles(changedPaths());
 }
 
-// ── Collectors: each returns [{ key, tool, rule, file, line, message }] ──
+const HELPERS = {
+  ROOT,
+  active: (id) => activeTools().some((t) => t.id === id),
+  exists: (p) => existsSync(isAbsolute(p) ? p : join(ROOT, p)),
+  read: (p) => readFileSync(isAbsolute(p) ? p : join(ROOT, p), 'utf8'),
+  run,
+  bin,
+  needBin,
+  rel,
+  finding,
+  toolJson,
+  gitFiles,
+  sourceDirs,
+  projectFiles,
+  lintable,
+};
 
-function finding(tool, rule, { file, line = 0, message }) {
-  return { key: `${tool}:${rule}|${file}`, tool, rule, file, line, message };
-}
-
-// A tool that crashed prints no JSON; fail loudly instead of reporting "clean".
-function toolJson(tool, r) {
+// Runs one tool and returns its findings. `files` is null for a whole-project run.
+function runTool(tool, files) {
+  const dir = mkdtempSync(join(tmpdir(), 'guardrails-tool-'));
+  const ctx = {
+    files,
+    h: HELPERS,
+    online: process.env.GUARDRAILS_ONLINE === '1',
+    tmp: (name) => join(dir, name),
+  };
   try {
-    return JSON.parse(r.stdout);
-  } catch {
-    throw new Error(
-      `${tool} failed (exit ${r.status}):\n${(r.stderr || r.stdout).trim().slice(-2000)}`,
-    );
+    return toFindings(tool, runRaw(tool, files, ctx));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 
-function collectOxlint(files) {
-  if (files?.length === 0) return [];
-  const args = [
-    '--type-aware',
-    '--report-unused-disable-directives',
-    '-f',
-    'json',
-    ...(files ?? []),
-  ];
-  const r = run(needBin('oxlint'), args);
-  const out = toolJson('oxlint', r);
-  return out.diagnostics.map((d) =>
-    finding('oxlint', d.code ?? 'unused-disable-directive', {
-      file: rel(d.filename),
-      line: d.labels?.[0]?.span?.line,
-      message: d.message,
-    }),
+// Tools return plain { rule, file, line, message }; the engine adds the tool id and the key.
+function toFindings(tool, list) {
+  return list.map((f) =>
+    finding(tool.id, f.rule, { file: rel(f.file), line: f.line, message: f.message }),
   );
 }
 
-function collectDepcruise(files) {
-  const config = [
-    '.dependency-cruiser.mjs',
-    '.dependency-cruiser.cjs',
-    '.dependency-cruiser.js',
-  ].find((f) => existsSync(join(ROOT, f)));
-  const targets = files ?? sourceDirs();
-  if (!config || targets.length === 0) return [];
-  const r = run(needBin('depcruise'), [
-    ...targets,
-    '-c',
-    config,
-    '-T',
-    'json',
-    '--no-ignore-known',
-  ]);
-  const out = toolJson('depcruise', r);
-  return out.summary.violations.map((v) =>
-    finding('depcruise', v.rule.name, {
-      file: rel(v.from),
-      message: v.to === v.from ? v.rule.name : `imports ${v.to}`,
-    }),
-  );
-}
-
-function collectKnip() {
-  if (!bin('knip')) return [];
-  const r = run(needBin('knip'), ['--reporter', 'json', '--no-progress']);
-  const out = toolJson('knip', r);
-  const found = [];
-  for (const issue of out.issues) {
-    for (const [type, items] of Object.entries(issue)) {
-      if (!Array.isArray(items)) continue;
-      for (const item of items) {
-        found.push(
-          finding('knip', type, {
-            file: rel(issue.file),
-            line: item.line,
-            message: item.name ?? type,
-          }),
-        );
-      }
+function runRaw(tool, files, ctx) {
+  if (tool.scan) return tool.scan(ctx);
+  // perFile tools take one file per command (docker compose config, for example).
+  const each = (files ?? projectFiles(tool.exts)).map((f) => ({ ...ctx, files: [f] }));
+  const jobs = tool.perFile ? each : [ctx];
+  return jobs.flatMap((job) => {
+    const spec = tool.run(job);
+    if (!spec) return [];
+    const r = run(spec.cmd, spec.args, spec.opts);
+    const failed = (why) => {
+      const text = (r.stderr || r.stdout).trim().slice(-2000);
+      throw new Error(`${tool.id} ${why} (exit ${r.status}):\n${text}`);
+    };
+    if (!(tool.ok ?? [0, 1]).includes(r.status)) failed('failed');
+    const out = tool.parse({ stdout: r.stdout, stderr: r.stderr, status: r.status }, job);
+    // A failing exit with nothing parsed means the output format changed. Never read that as clean.
+    if (r.status !== 0 && out.length === 0 && !(tool.quiet ?? []).includes(r.status)) {
+      failed('failed with output it could not read');
     }
-  }
-  return found;
+    return out;
+  });
 }
 
-const DISABLE = /\/[/*]\s*(?:eslint|oxlint)-disable(?:-next-line|-line)?\b([^\n]*)/g;
-
-function projectFiles() {
-  const untracked = gitFiles(['ls-files', '--others', '--exclude-standard']);
-  return lintable([...gitFiles(['ls-files']), ...untracked]);
-}
-
-function collectDisables(files) {
+// stage: 'edit' (post-edit hook), 'commit' (pre-commit, --files, --changed, stop hook). A full
+// run (files === null) is the 'push' stage: pre-push and CI.
+function collect(files, stage = 'commit') {
+  const all = files ? scopedFiles(files) : null;
   const found = [];
-  for (const file of files ?? projectFiles()) {
-    const lines = readFileSync(join(ROOT, file), 'utf8').split('\n');
-    lines.forEach((text, i) => {
-      for (const m of text.matchAll(DISABLE)) {
-        const [rules, reason] = m[1].replace(/\*\/.*$/, '').split(/\s(?:--|—)\s/);
-        if (rules?.trim() && reason?.trim()) continue;
-        const message = 'name the rule and add "-- <reason>"';
-        found.push(
-          finding('guardrails', 'disable-needs-rule-and-reason', { file, line: i + 1, message }),
-        );
-      }
-    });
+  for (const tool of activeTools()) {
+    if (tool.metric || !tool.stages.includes(all ? stage : 'push')) continue;
+    const own = all ? all.filter((f) => !tool.exts || tool.exts.test(f)) : null;
+    // A whole-project tool still skips a scoped run that touches none of its file types.
+    if (own && own.length === 0 && (tool.exts || !tool.whole)) continue;
+    found.push(...runTool(tool, tool.whole ? null : own));
   }
   return found;
 }
 
-function collect(files) {
-  const scoped = files ? lintable(files) : null;
-  return [
-    ...collectOxlint(scoped),
-    ...collectDepcruise(scoped),
-    ...(scoped ? [] : collectKnip()),
-    ...collectDisables(scoped),
-  ];
+// ── Metrics: ratchets on a number, not on per-file counts (docs/packs.md#metric-ratchets) ──
+
+function measureMetrics() {
+  return activeTools()
+    .filter((t) => t.metric && t.stages.includes('push'))
+    .map((t) => {
+      const dir = mkdtempSync(join(tmpdir(), 'guardrails-metric-'));
+      const ctx = { files: null, h: HELPERS, online: false, tmp: (name) => join(dir, name) };
+      try {
+        // A measure returns null when it does not apply here (a Dart package that is not Flutter).
+        const result = t.measure(ctx);
+        if (!result) return null;
+        const { value, detail = [] } = result;
+        return { ...t.metric, value: Math.round(value * 100) / 100, detail };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    })
+    .filter(Boolean);
+}
+
+// Returns the problems to print. `recorded` is null when the metric was never baselined; only
+// `baseline --tighten`, --init or --reset records it.
+function compareMetric(m, recorded, strict) {
+  if (recorded === null) {
+    return strict
+      ? [`${m.name} is not recorded. Run: node scripts/guardrails.mjs baseline --tighten`]
+      : [];
+  }
+  const worse =
+    m.direction === 'down' ? m.value > recorded + EPSILON : m.value < recorded - EPSILON;
+  const better =
+    m.direction === 'down' ? m.value < recorded - EPSILON : m.value > recorded + EPSILON;
+  const detail = m.detail.length > 0 ? `\n  ${m.detail.join('\n  ')}` : '';
+  if (worse) {
+    const word = m.direction === 'down' ? 'above' : 'below';
+    return [
+      `${m.name} ${m.value}${m.unit} is ${word} the baseline ${recorded}${m.unit}. ${m.advice}${detail}\n${NEXT}`,
+    ];
+  }
+  if (strict && better) {
+    return [
+      `${m.name} improved to ${m.value}${m.unit} (baseline ${recorded}${m.unit}). Run: node scripts/guardrails.mjs baseline --tighten`,
+    ];
+  }
+  return [];
 }
 
 // ── Ratchet ──
 
-function readBaseline() {
-  if (!existsSync(BASELINE)) return {};
-  return JSON.parse(readFileSync(BASELINE, 'utf8')).counts ?? {};
+function readBaselineFile() {
+  return existsSync(BASELINE) ? JSON.parse(readFileSync(BASELINE, 'utf8')) : {};
 }
 
-function writeBaseline(counts) {
+function readBaseline() {
+  return readBaselineFile().counts ?? {};
+}
+
+function readMetrics() {
+  return readBaselineFile().metrics ?? {};
+}
+
+function writeBaseline(counts, metrics = {}) {
   const entries = Object.entries(counts).filter(([, n]) => n > 0);
   const sorted = Object.fromEntries(entries.toSorted(([a], [b]) => a.localeCompare(b)));
-  writeFileSync(BASELINE, `${JSON.stringify({ version: 1, counts: sorted }, null, 2)}\n`);
+  const body = { version: 1, counts: sorted };
+  if (Object.keys(metrics).length > 0) body.metrics = metrics;
+  writeFileSync(BASELINE, `${JSON.stringify(body, null, 2)}\n`);
   return Object.keys(sorted).length;
 }
 
@@ -568,8 +658,9 @@ function check(argv) {
     : argv.includes('--files')
       ? argv.slice(argv.indexOf('--files') + 1)
       : null;
-  const scope = files ? new Set(lintable(files)) : null;
-  if (scope && argv.includes('--strict-baseline')) {
+  const scope = files ? new Set(scopedFiles(files)) : null;
+  const strict = argv.includes('--strict-baseline');
+  if (scope && strict) {
     console.error('guardrails: --strict-baseline needs a full check (no --changed or --files)');
     return 1;
   }
@@ -579,16 +670,46 @@ function check(argv) {
     console.error(report(fresh, baseline));
     return 1;
   }
+  // Metrics (duplication, coverage floors) run on full checks only: pre-push and CI.
+  const recorded = readMetrics();
+  const problems = scope
+    ? []
+    : measureMetrics().flatMap((m) => compareMetric(m, recorded[m.name] ?? null, strict));
+  if (problems.length > 0) {
+    console.error(`guardrails: ${problems.join('\n')}`);
+    return 1;
+  }
   console.log(`guardrails: clean${scope ? ` (${scope.size} file(s))` : ''}`);
   if (stale.length > 0) {
     const msg = `guardrails: ${stale.length} baseline entr(ies) improved. Run: node scripts/guardrails.mjs baseline --tighten`;
-    if (argv.includes('--strict-baseline')) {
+    if (strict) {
       console.error(msg);
       return 1;
     }
     console.log(msg);
   }
   return 0;
+}
+
+// Metrics only move the right way. Returns the values to record, or null when one regressed. A
+// first recording is allowed: enabling a tool is itself a reviewed config change.
+function tightenMetrics() {
+  const old = readMetrics();
+  const next = {};
+  for (const m of measureMetrics()) {
+    const was = old[m.name] ?? null;
+    const regressed =
+      was !== null && (m.direction === 'down' ? m.value > was + EPSILON : m.value < was - EPSILON);
+    if (regressed) {
+      console.error(
+        `guardrails: cannot tighten, ${m.name} went from ${was}${m.unit} to ${m.value}${m.unit}.`,
+      );
+      return null;
+    }
+    const pick = m.direction === 'down' ? Math.min : Math.max;
+    next[m.name] = was === null ? m.value : pick(was, m.value);
+  }
+  return next;
 }
 
 function baselineCmd(argv) {
@@ -602,7 +723,9 @@ function baselineCmd(argv) {
       );
       return 1;
     }
-    console.log(`guardrails: baseline tightened (${writeBaseline(counts)} keys)`);
+    const metrics = tightenMetrics();
+    if (metrics === null) return 1;
+    console.log(`guardrails: baseline tightened (${writeBaseline(counts, metrics)} keys)`);
     return ratchetCoverage();
   }
   if (argv.includes('--init') && existsSync(BASELINE)) {
@@ -613,7 +736,28 @@ function baselineCmd(argv) {
     console.error('guardrails: pass --init, --tighten or --reset');
     return 1;
   }
-  console.log(`guardrails: baseline written (${writeBaseline(counts)} keys)`);
+  const metrics = Object.fromEntries(measureMetrics().map((m) => [m.name, m.value]));
+  console.log(`guardrails: baseline written (${writeBaseline(counts, metrics)} keys)`);
+  return 0;
+}
+
+// Prints the stacks found from manifests (a monorepo can have several) and each pack's tools.
+function packs() {
+  const files = projectFiles(/.*/);
+  const on = new Set(activeTools().map((t) => `${t.pack}/${t.id}`));
+  for (const p of PACKS) {
+    const hits = files.filter((f) => p.detect.some((re) => re.test(f)));
+    const state =
+      p.detect.length === 0
+        ? 'always'
+        : hits.length > 0
+          ? `detected (${hits.length})`
+          : 'not found';
+    console.log(`${p.id}: ${state}`);
+    for (const t of p.tools) {
+      console.log(`  ${on.has(`${p.id}/${t.id}`) ? 'on ' : 'off'} ${t.id}`);
+    }
+  }
   return 0;
 }
 
@@ -675,14 +819,14 @@ function editedFiles(input) {
   const patch = typeof ti.command === 'string' ? ti.command : (ti.input ?? '');
   for (const m of String(patch).matchAll(/^\*\*\* (?:Add|Update) File: (.+)$/gm))
     files.push(m[1].trim());
-  return lintable(files);
+  return scopedFiles(files);
 }
 
+// Only tools that declare the 'edit' stage run here: the fast ones.
 function postEdit(input) {
   const files = editedFiles(input);
   if (files.length === 0) return 0;
-  const findings = [...collectOxlint(files), ...collectDisables(files)];
-  const { fresh } = compare(findings, readBaseline(), new Set(files));
+  const { fresh } = compare(collect(files, 'edit'), readBaseline(), new Set(files));
   if (fresh.length === 0) return 0;
   console.error(report(fresh, readBaseline()));
   return 2;
@@ -703,9 +847,10 @@ function stop(input) {
   if (tc.status !== 0) problems.push(`typecheck failed:\n${(tc.stdout + tc.stderr).trim()}`);
   const { fresh } = compare(collect(files), readBaseline(), new Set(files));
   if (fresh.length > 0) problems.push(report(fresh, readBaseline()));
-  const vitest = files.length > 0 ? bin('vitest') : null;
+  const code = lintable(files);
+  const vitest = code.length > 0 ? bin('vitest') : null;
   if (vitest) {
-    const t = run(vitest, ['related', '--run', '--passWithNoTests', ...files]);
+    const t = run(vitest, ['related', '--run', '--passWithNoTests', ...code]);
     if (t.status !== 0)
       problems.push(`tests failed:\n${(t.stdout + t.stderr).trim().slice(-3000)}`);
   }
@@ -732,7 +877,7 @@ function hook([kind]) {
   }
 }
 
-const COMMANDS = { check, baseline: baselineCmd, verify, format: formatFiles, exec, hook };
+const COMMANDS = { check, baseline: baselineCmd, verify, format: formatFiles, exec, packs, hook };
 const [command, ...argv] = process.argv.slice(2);
 try {
   const fn = COMMANDS[command];
@@ -746,6 +891,381 @@ try {
   console.error(`guardrails: ${error.message}`);
   process.exitCode = 1;
 }
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/shared/scripts/guardrails-packs.mjs -->
+```js
+// guardrails-packs.mjs: the pack registry. Generated by agentic-guardrail-ts.
+// The engine (guardrails.mjs) is language-agnostic; everything stack-specific is declared here.
+// See docs/packs.md for the contract. Adding a stack means adding a pack object below.
+//
+// A pack:    { id, detect: [RegExp on repo paths], tools: [tool] }
+// A tool:
+//   id        finding prefix; keys are `id:rule|file`
+//   optIn     [config file | { file, has: RegExp }]: the tool is on when any of them matches
+//   exts      files the tool covers (RegExp), so the hooks can scope it; omit for all tracked files
+//   track     extra file types to start tracking when the tool is on (does not filter)
+//   stages    where it runs: 'edit' (post-edit hook), 'commit' (pre-commit, --files, --changed and
+//             the stop hook), 'push' (full check: pre-push and CI)
+//   whole     true: always runs on the whole project; findings are then filtered to the scope
+//   perFile   true: one command per file
+//   ok        exit codes that mean "ran" (default [0, 1]); anything else is a tool failure
+//   run(ctx)  returns { cmd, args } (null skips); ctx = { files, online, tmp(name), h }
+//   parse(out, ctx)  out = { stdout, stderr, status }; returns [{ rule, file, line, message }]
+//   scan(ctx) replaces run+parse for checks done in JS
+//   metric + measure(ctx)  a number ratchet instead of findings: { name, direction, unit, advice }
+
+const TS_EXT = /\.[cm]?[jt]sx?$/;
+const MD_EXT = /\.mdx?$/;
+
+// ── Parsing helpers ──
+
+const tail = (s) => s.trim().slice(-2000);
+
+// Colour codes some tools print even when piped.
+const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
+
+// One finding per output line that matches `re`; `make(match)` returns { rule, file, line, message }.
+const lines =
+  (re, make, from = 'stdout') =>
+  (out) =>
+    out[from].split('\n').flatMap((l) => {
+      const m = re.exec(l.replaceAll(ANSI, ''));
+      return m ? [make(m)] : [];
+    });
+
+const json = (tool, text) => {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`${tool} printed no JSON:\n${tail(text)}`);
+  }
+};
+
+// Files for a command, or the whole-project fallback when the run is not scoped.
+const targets = (ctx, fallback) => ctx.files ?? fallback;
+
+// ── ts: the TypeScript stack. Each tool is on when its config file exists, which every v3 install has ──
+
+// Every list-valued field of a Knip issue is a finding: unused files, exports, dependencies.
+const knipItems = (issue) =>
+  Object.entries(issue)
+    .filter(([, items]) => Array.isArray(items))
+    .flatMap(([type, items]) =>
+      items.map((item) => ({
+        rule: type,
+        file: issue.file,
+        line: item.line,
+        message: item.name ?? type,
+      })),
+    );
+
+const ts = {
+  id: 'ts',
+  detect: [/(^|\/)package\.json$/, /(^|\/)tsconfig[^/]*\.json$/],
+  tools: [
+    {
+      id: 'oxlint',
+      optIn: ['.oxlintrc.json'],
+      exts: TS_EXT,
+      stages: ['edit', 'commit', 'push'],
+      run: ({ files, h }) =>
+        files?.length === 0
+          ? null
+          : {
+              cmd: h.needBin('oxlint'),
+              args: [
+                '--type-aware',
+                '--report-unused-disable-directives',
+                '-f',
+                'json',
+                ...(files ?? []),
+              ],
+            },
+      parse: (out) =>
+        json('oxlint', out.stdout).diagnostics.map((d) => ({
+          rule: d.code ?? 'unused-disable-directive',
+          file: d.filename,
+          line: d.labels?.[0]?.span?.line,
+          message: d.message,
+        })),
+    },
+    {
+      id: 'depcruise',
+      optIn: ['.dependency-cruiser.mjs', '.dependency-cruiser.cjs', '.dependency-cruiser.js'],
+      exts: TS_EXT,
+      stages: ['commit', 'push'],
+      run: ({ files, h }) => {
+        const config = [
+          '.dependency-cruiser.mjs',
+          '.dependency-cruiser.cjs',
+          '.dependency-cruiser.js',
+        ].find((f) => h.exists(f));
+        const dirs = files ?? h.sourceDirs();
+        if (!config || dirs.length === 0) return null;
+        return {
+          cmd: h.needBin('depcruise'),
+          args: [...dirs, '-c', config, '-T', 'json', '--no-ignore-known'],
+        };
+      },
+      parse: (out) =>
+        json('depcruise', out.stdout).summary.violations.map((v) => ({
+          rule: v.rule.name,
+          file: v.from,
+          message: v.to === v.from ? v.rule.name : `imports ${v.to}`,
+        })),
+    },
+    {
+      // Needs the whole graph, so full checks only.
+      id: 'knip',
+      optIn: ['knip.json'],
+      stages: ['push'],
+      whole: true,
+      run: ({ h }) =>
+        h.bin('knip')
+          ? { cmd: h.bin('knip'), args: ['--reporter', 'json', '--no-progress'] }
+          : null,
+      parse: (out) => json('knip', out.stdout).issues.flatMap(knipItems),
+    },
+    {
+      // Every disable comment needs a rule and a reason.
+      id: 'guardrails',
+      optIn: ['.oxlintrc.json'],
+      exts: TS_EXT,
+      stages: ['edit', 'commit', 'push'],
+      scan: ({ files, h }) => {
+        const pattern = /\/[/*]\s*(?:eslint|oxlint)-disable(?:-next-line|-line)?\b([^\n]*)/g;
+        const found = [];
+        for (const file of files ?? h.projectFiles()) {
+          h.read(file)
+            .split('\n')
+            .forEach((text, i) => {
+              for (const m of text.matchAll(pattern)) {
+                const [rules, reason] = m[1].replace(/\*\/.*$/, '').split(/\s(?:--|—)\s/);
+                if (rules?.trim() && reason?.trim()) continue;
+                found.push({
+                  rule: 'disable-needs-rule-and-reason',
+                  file,
+                  line: i + 1,
+                  message: 'name the rule and add "-- <reason>"',
+                });
+              }
+            });
+        }
+        return found;
+      },
+    },
+  ],
+};
+
+// ── core: every repo ──
+
+// ls-lint reports { path: { ".ext": ["rule" | "exists:0 (found N)"] } }.
+const lsLintEntry = (file, ext, text) => {
+  const rule = text.replace(/ \(found \d+\)$/, '');
+  const times = Number(/\(found (\d+)\)$/.exec(text)?.[1] ?? 1);
+  const entry = {
+    rule: `${ext.replace(/^\./, '')}-${rule}`,
+    file,
+    message: `${ext} name breaks ${rule}`,
+  };
+  return Array.from({ length: times }, () => entry);
+};
+
+const lsLintFindings = ([file, byExt]) =>
+  Object.entries(byExt).flatMap(([ext, texts]) =>
+    texts.flatMap((text) => lsLintEntry(file, ext, text)),
+  );
+
+const core = {
+  id: 'core',
+  detect: [],
+  tools: [
+    {
+      // Custom structural rules (vocabulary literals, banned identifiers). `sg` is a deprecated alias.
+      id: 'ast-grep',
+      optIn: ['sgconfig.yml'],
+      exts: /\.(?:[cm]?[jt]sx?|py|rs|java|go|kt|swift|c|cc|cpp|h|hpp|cs|rb|php|dart)$/,
+      stages: ['edit', 'commit', 'push'],
+      run: ({ files, h }) => ({
+        cmd: h.bin('ast-grep') ?? h.needBin('sg'),
+        args: ['scan', '--json=stream', ...(files ?? [])],
+      }),
+      parse: (out) =>
+        out.stdout
+          .split('\n')
+          .filter((l) => l.startsWith('{'))
+          .map((l) => {
+            const d = json('ast-grep', l);
+            return {
+              rule: d.ruleId,
+              file: d.file,
+              line: d.range.start.line + 1,
+              message: d.message,
+            };
+          }),
+    },
+    {
+      // Folder and extension naming. Tree rules, so it always runs whole. A banned extension
+      // (`exists:0`) is reported on its directory with a count ("found 2"); it is expanded to one
+      // finding per file so the key stays stable while the count moves.
+      id: 'ls-lint',
+      optIn: ['.ls-lint.yml'],
+      stages: ['edit', 'commit', 'push'],
+      whole: true,
+      run: ({ h }) => ({ cmd: h.needBin('ls-lint'), args: ['-error-output-format', 'json'] }),
+      parse: (out) =>
+        out.status === 0 ? [] : Object.entries(json('ls-lint', out.stderr)).flatMap(lsLintFindings),
+    },
+    {
+      // Spelling and banned synonyms (`flagWords`), in code and docs.
+      id: 'cspell',
+      optIn: ['cspell.json', '.cspell.json'],
+      track: MD_EXT,
+      stages: ['edit', 'commit', 'push'],
+      run: ({ files, h }) => ({
+        cmd: h.needBin('cspell'),
+        args: [
+          'lint',
+          '--no-progress',
+          '--no-summary',
+          '--no-color',
+          '--gitignore',
+          '--no-must-find-files',
+          ...(files ?? ['**']),
+        ],
+      }),
+      parse: lines(
+        /^(.+?):(\d+):\d+ - (Forbidden|Unknown) word \(([^)]+)\)/,
+        ([, file, row, kind, word]) => ({
+          rule: `${kind.toLowerCase()}-word`,
+          file,
+          line: +row,
+          message: `${kind.toLowerCase()} word "${word}"`,
+        }),
+      ),
+    },
+    {
+      id: 'markdownlint',
+      optIn: ['.markdownlint-cli2.jsonc', '.markdownlint-cli2.yaml'],
+      exts: MD_EXT,
+      stages: ['commit', 'push'],
+      run: ({ files, h }) => {
+        const docs = targets({ files }, h.projectFiles(MD_EXT));
+        return docs.length === 0
+          ? null
+          : { cmd: h.needBin('markdownlint-cli2'), args: ['--no-globs', ...docs] };
+      },
+      parse: lines(
+        /^(.+?):(\d+)(?::\d+)? (?:error|warning) (MD\d+)\/\S+ (.*)$/,
+        ([, file, row, rule, message]) => ({ rule, file, line: +row, message }),
+        'stderr',
+      ),
+      // markdownlint exits 1 on findings and 2 on a crash; a crash prints no findings.
+      ok: [0, 1],
+    },
+    {
+      // Offline in hooks (local links and anchors). GUARDRAILS_ONLINE=1 (CI) checks URLs too.
+      // Timeouts are not findings: a slow host must not fail the gate.
+      id: 'lychee',
+      optIn: ['lychee.toml', '.lychee.toml'],
+      exts: MD_EXT,
+      stages: ['commit', 'push'],
+      ok: [0, 1, 2],
+      quiet: [2],
+      run: ({ files, online, h }) => {
+        const docs = targets({ files }, h.projectFiles(MD_EXT));
+        if (docs.length === 0) return null;
+        const config = h.exists('lychee.toml') ? 'lychee.toml' : '.lychee.toml';
+        const mode = online ? [] : ['--offline'];
+        return {
+          cmd: 'lychee',
+          args: ['--config', config, '--no-progress', '--format', 'json', ...mode, ...docs],
+        };
+      },
+      parse: (out, { h }) =>
+        Object.entries(json('lychee', out.stdout).error_map ?? {}).flatMap(([file, errors]) =>
+          errors.map((e) => ({
+            rule: 'broken-link',
+            file,
+            line: e.span?.line,
+            message: `${e.url.replace(`file://${h.ROOT}/`, '')}: ${e.status?.text ?? 'unreachable'}`,
+          })),
+        ),
+    },
+    {
+      // Duplication is a relation between files, so it ratchets as one percentage that may only
+      // go down. Full checks only.
+      id: 'jscpd',
+      optIn: ['.jscpd.json'],
+      stages: ['push'],
+      metric: {
+        name: 'duplication',
+        direction: 'down',
+        unit: '%',
+        advice: 'Remove the new copies.',
+      },
+      measure: ({ tmp, h }) => {
+        const r = h.run(h.needBin('jscpd'), [
+          '--reporters',
+          'json',
+          '--output',
+          tmp(''),
+          '--silent',
+        ]);
+        if (!h.exists(tmp('jscpd-report.json'))) {
+          throw new Error(`jscpd failed (exit ${r.status}):\n${tail(r.stderr || r.stdout)}`);
+        }
+        const report = json('jscpd', h.read(tmp('jscpd-report.json')));
+        const detail = (report.duplicates ?? [])
+          .toSorted((a, b) => b.lines - a.lines)
+          .slice(0, 5)
+          .map(
+            (c) =>
+              `${c.firstFile.name}:${c.firstFile.start} = ${c.secondFile.name}:${c.secondFile.start} (${c.lines} lines)`,
+          );
+        return { value: report.statistics.total.percentage, detail };
+      },
+    },
+    {
+      // File-level hygiene from .editorconfig (final newline, indent style, trailing space).
+      id: 'editorconfig-checker',
+      optIn: ['.ecrc'],
+      stages: ['commit', 'push'],
+      run: ({ files, h }) => ({
+        cmd: h.needBin('editorconfig-checker'),
+        args: ['-format', 'gcc', '-no-color', ...(files ?? [])],
+      }),
+      parse: lines(/^(.+?):(\d+):\d+: error: (.*)$/, ([, file, row, message]) => ({
+        rule: message.replace(/\d+/g, 'N').replaceAll(/\W+/g, '-').replace(/-$/, ''),
+        file,
+        line: +row,
+        message,
+      })),
+    },
+    {
+      // Lints .github/workflows. Needs the actionlint binary on PATH.
+      id: 'actionlint',
+      optIn: ['.github/actionlint.yaml', '.github/actionlint.yml'],
+      exts: /^\.github\/workflows\/.*\.ya?ml$/,
+      stages: ['commit', 'push'],
+      run: ({ files }) => ({
+        cmd: 'actionlint',
+        args: ['-format', '{{json .}}', ...(files ?? [])],
+      }),
+      parse: (out) =>
+        json('actionlint', out.stdout || '[]').map((e) => ({
+          rule: e.kind ?? e.Kind,
+          file: e.filepath ?? e.Filepath,
+          line: e.line ?? e.Line,
+          message: e.message ?? e.Message,
+        })),
+    },
+  ],
+};
+
+export const PACKS = [core, ts];
 ```
 <!-- /tmpl -->
 

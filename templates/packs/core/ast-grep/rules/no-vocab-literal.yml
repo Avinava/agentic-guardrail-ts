@@ -1,0 +1,17 @@
+# Bans a raw string equal to a member of the vocab module, outside that module.
+# The setup skill fills the alternation from the values in the project's vocab module
+# (an `as const` object or an enum). Keep it in sync: a new vocab value means a new entry here.
+id: no-vocab-literal
+language: TypeScript
+severity: error
+message: Use the vocab member (for example Status.Active), not the raw string. New values go in the vocab module.
+rule:
+  kind: string
+  regex: "^['\"](active|closed|pending)['\"]$"
+  not:
+    inside:
+      kind: import_statement
+ignores:
+  - "**/vocab/**"
+  - "**/*.test.ts"
+  - "**/*.test.tsx"

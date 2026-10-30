@@ -1,0 +1,24 @@
+# .ls-lint.yml: folder and extension naming.
+# Split with Oxlint: unicorn/filename-case owns the casing of JS and TS file names, so no rule
+# here sets a case for .ts, .tsx, .js or .mjs. ls-lint owns folders, banned extensions, and the
+# non-code files Oxlint never sees.
+ls:
+  packages/*/src:
+    .dir: kebab-case | regex:\[[a-z0-9-]+\]
+    .spec.ts: exists:0
+    .spec.tsx: exists:0
+    .jsx: exists:0
+  apps/*/src:
+    .dir: kebab-case | regex:\[[a-z0-9-]+\]
+    .spec.ts: exists:0
+    .spec.tsx: exists:0
+    .jsx: exists:0
+  docs:
+    .dir: kebab-case
+    .md: kebab-case | regex:[A-Z]+
+ignore:
+  - .git
+  - node_modules
+  - dist
+  - coverage
+  - .turbo

@@ -1,0 +1,12 @@
+# Example banned identifiers: vague names that hide intent. Replace the list with the
+# project's own banned synonyms (cspell flagWords covers the same words in comments and docs).
+id: no-banned-identifier
+language: TypeScript
+severity: error
+message: Name it for what it holds. This identifier is too vague.
+rule:
+  any:
+    - kind: identifier
+    - kind: property_identifier
+    - kind: type_identifier
+  regex: "^(data|info|stuff|thing|tmp|helper|manager)$"

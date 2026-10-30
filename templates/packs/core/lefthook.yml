@@ -1,0 +1,7 @@
+# lefthook additions for the opt-in docs tools. Merge into lefthook.yml under pre-commit.jobs.
+# The format job in the base file already runs Prettier on staged Markdown.
+pre-commit:
+  jobs:
+    - name: docs
+      glob: '*.{md,mdx}'
+      run: node scripts/guardrails.mjs check --files {staged_files}

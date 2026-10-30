@@ -34,6 +34,8 @@ jobs:
           done
       - name: Scripts parse
         run: for f in scripts/*.mjs templates/shared/scripts/*.mjs; do node --check "$f" || exit 1; done
+      - name: Opt-in tool wiring (fake tool output, no network)
+        run: node --test scripts/packs-*-test.mjs
 
   fixtures:
     runs-on: ubuntu-latest

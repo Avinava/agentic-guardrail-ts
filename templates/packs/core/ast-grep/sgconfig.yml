@@ -1,0 +1,4 @@
+# sgconfig.yml: ast-grep project config. Custom structural rules only; Oxlint owns everything
+# it already has a rule for (see docs/known-conflicts.md).
+ruleDirs:
+  - rules

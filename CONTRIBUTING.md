@@ -14,8 +14,11 @@ templates/               the single source for every config the skills install
   monorepo/              workspaces (turbo, syncpack, tier rules)
   agent/                 AGENTS.md, CLAUDE.md, Claude Code and Codex hooks
   ci/                    GitHub Actions workflow
+  extras/                opt-in tools (ast-grep, ls-lint, cspell, jscpd, markdownlint, lychee)
+  python/                opt-in Python pack (ruff, tach, deptry, vulture via uv)
 test/fixtures/           small projects the templates are applied to
 scripts/fixture-test.mjs end-to-end test of the templates against the fixtures
+scripts/packs-*-test.mjs   unit tests per pack, against fake tool output (harness: pack-harness.mjs)
 scripts/render.mjs       copies templates into the skills that embed them
 scripts/docs-check.mjs   stale path check for docs and skills
 docs/                    user docs; docs/decisions/ holds design decisions
@@ -39,6 +42,7 @@ docs/                    user docs; docs/decisions/ holds design decisions
 node scripts/fixture-test.mjs                  # all fixtures
 node scripts/fixture-test.mjs single-npm --keep  # one fixture, keep the temp dir
 node scripts/render.mjs --check                # skills match templates
+node --test scripts/packs-*-test.mjs            # opt-in tool wiring, no installs
 node scripts/docs-check.mjs                    # no stale paths in docs
 claude plugin validate .                       # plugin and marketplace manifests
 ```

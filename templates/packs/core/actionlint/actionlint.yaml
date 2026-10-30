@@ -1,0 +1,5 @@
+# .github/actionlint.yaml: actionlint config. Its presence turns the check on (install the file
+# at .github/actionlint.yaml). actionlint is a Go binary on PATH (brew install actionlint).
+# Declare custom runner labels here so they are not reported as unknown.
+self-hosted-runner:
+  labels: []

@@ -11,7 +11,7 @@ the full guidelines.
   are generated: never edit them by hand, run `node scripts/render.mjs`.
 - `test/fixtures/`: target projects (single npm, pnpm monorepo, yarn 1 retrofit) that the
   templates are applied to and tested against.
-- `scripts/`: `render.mjs`, `fixture-test.mjs`, `docs-check.mjs`.
+- `scripts/`: `render.mjs`, `fixture-test.mjs`, `pack-harness.mjs`, `packs-*-test.mjs`, `docs-check.mjs`.
 - `docs/decisions/`: why the stack is what it is. Update or add a decision when you change a tool.
 
 ## Rules
@@ -31,6 +31,7 @@ the full guidelines.
 ```bash
 node scripts/render.mjs --check
 node scripts/docs-check.mjs
+node --test scripts/packs-*-test.mjs      # opt-in tools against fake output; no installs
 node scripts/fixture-test.mjs            # installs real packages; takes a few minutes
 claude plugin validate .
 ```

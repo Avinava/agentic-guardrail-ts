@@ -1,0 +1,14 @@
+# Additions to the `verify` job in .github/workflows/ci.yml for the opt-in docs tools.
+# Hooks check local links offline. Setting GUARDRAILS_ONLINE makes CI check URLs too.
+# Duplication (jscpd) needs nothing here: `guardrails.mjs check` runs it on every full check.
+#
+# 1. Add to the job:
+#      env:
+#        GUARDRAILS_ONLINE: '1'
+#        LYCHEE_VERSION: 0.24.2
+#
+# 2. Add this step before "Verify":
+      - name: Install lychee
+        run: |
+          curl -sSfL "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/lychee-x86_64-unknown-linux-gnu.tar.gz" \
+            | sudo tar -xz --strip-components=1 -C /usr/local/bin lychee-x86_64-unknown-linux-gnu/lychee

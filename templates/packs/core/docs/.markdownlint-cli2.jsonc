@@ -1,0 +1,13 @@
+{
+  // Prettier owns formatting, so every markdownlint rule that overlaps it or fights it is off.
+  "config": {
+    "default": true,
+    "MD013": false, // line length: Prettier does not wrap prose
+    "MD033": false, // inline HTML: badges, <details> and logos are allowed
+    "MD041": false, // first line heading: front matter and badges come first
+    "MD055": false, // table pipe style: Prettier formats tables
+    "MD060": false // table column style: Prettier aligns columns
+  },
+  "gitignore": true,
+  "ignores": ["node_modules", "CHANGELOG.md"]
+}

@@ -1,0 +1,3 @@
+{
+  "Exclude": ["\\.lock$", "package-lock\\.json$", "pnpm-lock\\.yaml$", "guardrails\\.baseline\\.json$"]
+}

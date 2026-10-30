@@ -38,6 +38,7 @@
     "render": "node scripts/render.mjs",
     "render:check": "node scripts/render.mjs --check",
     "docs:check": "node scripts/docs-check.mjs",
-    "test:fixtures": "node scripts/fixture-test.mjs"
+    "test:fixtures": "node scripts/fixture-test.mjs",
+    "test:packs": "node --test scripts/packs-*-test.mjs"
   }
 }

@@ -1,0 +1,10 @@
+{
+  "devDependencies": {
+    "@ast-grep/cli": "^0.51.0",
+    "@ls-lint/ls-lint": "^2.3.2",
+    "cspell": "^10.4.0",
+    "editorconfig-checker": "^6.2.0",
+    "jscpd": "^5.4.2",
+    "markdownlint-cli2": "^0.24.0"
+  }
+}
