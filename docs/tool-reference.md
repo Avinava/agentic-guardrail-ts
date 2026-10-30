@@ -33,7 +33,6 @@ verify
 format --files a.ts b.ts
 exec <bin> [args...]
 packs                          detected stacks and which tools are on
-ci-jobs                        advisory: which CI job appears to own each pack's ci-stage tools
 hook (post-edit | stop)        reads the hook JSON on stdin
 ```
 

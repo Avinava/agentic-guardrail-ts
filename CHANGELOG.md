@@ -32,12 +32,27 @@ A language-agnostic engine with opt-in packs. Nothing is on by default and exist
 - The ci stage is on for `GUARDRAILS_CI=1` or the standard `CI` variable (`GUARDRAILS_CI=0` forces it off). A local full check prints `deferred: ...` and `--strict-baseline` fails while ci tools are deferred.
 - Local `baseline --tighten` and `--reset` carry over stored metrics and finding keys of tools that did not run, and never report them stale.
 - `GUARDRAILS_PACKS` limits a job to packs and `GUARDRAILS_CI_PACKS` limits only the expensive ci-stage tools (both validated; a ci pack outside the selection warns). The base job runs every enabled pack's cheap checks as in v3 (`GUARDRAILS_CI_PACKS: none`) and needs their toolchains; each pack job owns its expensive tools. `verify` (pre-push) always forces `GUARDRAILS_CI=0`.
-- The gate never reads CI files. `guardrails.mjs ci-jobs` is an advisory (best-effort GitHub Actions and GitLab read, always exit 0) for the doctor skill and setup; the generated-workflow test and the always-printed `deferred: ...` line are the protection against a pack nobody runs.
+- The gate never reads CI files and the engine has no CI parser. A pack nobody runs is guarded by the generated-workflow ownership test and by the lines `check` prints when a ci-stage tool does not run (`deferred: ...`, `ci-stage tools left to other jobs: ...`).
 - Fix commands for ci-stage keys and metrics print `GUARDRAILS_CI=1 GUARDRAILS_PACKS=<pack> ...`; a local tighten that could not touch them prints `baseline unchanged`.
 - An empty `GUARDRAILS_PACKS` is an error, and under `--strict-baseline` so is a selected pack with no configured tool.
 - Findings are scoped by the file recorded on the finding, not by parsing the key, so paths containing `|` work.
 - Scan tools pass directories through `h.safe` (`./-legacy`).
 - An invalid stored metric (`null`) fails the check; `--tighten` reports it and records the current reading explicitly.
+
+### Fixed (fail closed, second review)
+- A Knip config with no Knip binary is a failure with an install hint (no config and no binary is still skipped, as in v3).
+- Coverage and duplication parsers no longer read a zero denominator as perfect: an empty, truncated or all-zero Flutter lcov report, a pytest-cov run with no statements, a jscpd scan of no files and an Apex run with no tests all fail. The Flutter report must be written by the run itself (the old one is deleted first).
+- clippy: a compile error (a rustc E-code, or an error with no code) is an always-finding: never baselined, always failing.
+- `ci-stage tools left to other jobs: ...` is printed whenever the ci stage is on but `GUARDRAILS_CI_PACKS` leaves a tool out; the base CI template no longer promises missing-job enforcement.
+- CI templates: the Salesforce CLI and Code Analyzer plugin are pinned; gitleaks and lychee downloads are verified against a sha256; the Salesforce job is skipped for fork pull requests (no secrets there) instead of failing.
+- `apex-coverage` is documented as org health and deployed-code coverage, not proof about this checkout.
+- Nested Python projects are documented as unsupported (one project at the repo root).
+- The first `check` after an upgrade names the pack tools newly switched on by existing config files; the upgrade table is in docs/packs.md.
+- markdownlint template is an allowlist of structural rules (headings, lists, code fences, links, table column count) instead of all rules with exceptions.
+- Dart, C++/PlatformIO and SQL are marked experimental (no real-tool run).
+
+### Removed
+- `guardrails.mjs ci-jobs` and its heuristic CI-file parser.
 
 ### Changed
 - The TypeScript tools (Oxlint, dependency-cruiser, Knip, disable check) are declared as the `ts` pack and switch on with `.oxlintrc.json`, `.dependency-cruiser.*` and `knip.json`. A repo without Node (Python, Mule, Rust) no longer needs Oxlint installed.

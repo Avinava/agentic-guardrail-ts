@@ -269,10 +269,9 @@ on when its config file exists, so enabling a pack is writing its files. For eac
 3. Install any tool that is not an npm package (the Pack table says which).
 4. If the pack has ci-stage tools (python, mule, salesforce, dart, cpp), always add the pack's CI
    job from its `ci.yml`: it sets `GUARDRAILS_PACKS` to the pack so those tools run once, in a job
-   with the pack's toolchain. The base `verify` job keeps `GUARDRAILS_CI_PACKS: none`. Then run
-   `node scripts/guardrails.mjs ci-jobs`; it is an advisory (best effort, GitHub Actions and GitLab
-   only, always exit 0): read its warnings, nothing gates on it. The base `verify` job also runs
-   this pack's cheap checks, so copy the pack job's install steps into it.
+   with the pack's toolchain. The base `verify` job keeps `GUARDRAILS_CI_PACKS: none` and also
+   runs this pack's cheap checks, so copy the pack job's install steps into it. Nothing enforces that
+   the job exists: `check` only prints `deferred:` when the ci stage does not run.
    Run `node scripts/guardrails.mjs packs` and confirm the pack's tools show as `on`.
 5. Run `node scripts/guardrails.mjs check`. On a retrofit, record the debt with
    `baseline --init` (or `baseline --tighten` if a baseline already exists; it records new
@@ -292,14 +291,16 @@ on when its config file exists, so enabling a pack is writing its files. For eac
 | salesforce | `code-analyzer.yml`, `.prettierrc`, `guardrails/apex-coverage.json` | Use `sf`, never `sfdx`. Confirm the target org with the user before writing `apex-coverage.json`; never production. | `sf` + `sf plugins install code-analyzer`; npm `prettier-plugin-apex`; Java |
 | shell | `.shellcheckrc` | Set `shell=` to the dialect used. | `shellcheck`, `shfmt` |
 | docker | `.hadolint.yaml` | Set trusted registries. | `hadolint`; `docker` |
-| sql | `.sqlfluff` | Set the dialect (and templater for dbt). | `sqlfluff` |
+| sql (experimental) | `.sqlfluff` | Fake-output tests only. Offer only if the user asks. Set the dialect (and templater for dbt). | `sqlfluff` |
 | rust | `rustfmt.toml`, `clippy.toml`, `deny.toml` | Run `cargo deny init` for the full deny policy. Add the machete metadata table if wanted. | `cargo-deny`, `cargo-machete` |
-| dart | `analysis_options.yaml` | Use the project's lint package. | Dart or Flutter SDK |
-| cpp | `.clang-format`, `check_tool` in `platformio.ini` | Match the existing style. `pio check` downloads toolchains. | `clang-format`; PlatformIO |
+| dart (experimental) | `analysis_options.yaml` | Fake-output tests only. Offer only if the user asks. Use the project's lint package. | Dart or Flutter SDK |
+| cpp (experimental) | `.clang-format`, `check_tool` in `platformio.ini` | Fake-output tests only. Offer only if the user asks. Match the existing style. `pio check` downloads toolchains. | `clang-format`; PlatformIO |
 
-A monorepo with several stacks gets several packs; write each pack's files at the right folder
-only where the tool accepts a path (mule-lint and the Python tools find their projects by
-manifest; the others read config from the repo root).
+A monorepo with several stacks gets several packs. mule-lint finds each Mule application by its
+`mule-artifact.json`; every other tool reads its config from the repo root, and the Python tools
+support one project at the repo root only (no nested `pyproject.toml`). Experimental packs
+(sql, dart, cpp) are not offered unless the user asks. After an upgrade, the first `check` names
+the pack tools that existing config files switched on; show them to the user.
 
 ## Phase 4: Verify and report
 
@@ -365,7 +366,6 @@ import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -581,6 +581,7 @@ const HELPERS = {
   ROOT,
   active: (id) => activeTools().some((t) => t.id === id),
   exists: (p) => existsSync(isAbsolute(p) ? p : join(ROOT, p)),
+  remove: (p) => rmSync(isAbsolute(p) ? p : join(ROOT, p), { force: true }),
   read: (p) => readFileSync(isAbsolute(p) ? p : join(ROOT, p), 'utf8'),
   run,
   settle,
@@ -790,11 +791,20 @@ function readMetrics() {
   return readBaselineFile().metrics ?? {};
 }
 
+// Tools from packs other than ts. v3 had none of these, so any that are on after an upgrade are new.
+const packToolIds = () =>
+  activeTools()
+    .filter((t) => t.pack !== 'ts')
+    .map((t) => t.id);
+
 function writeBaseline(counts, metrics = {}) {
   const entries = Object.entries(counts).filter(([, n]) => n > 0);
   const sorted = Object.fromEntries(entries.toSorted(([a], [b]) => a.localeCompare(b)));
   const body = { version: 1, counts: sorted };
   if (Object.keys(metrics).length > 0) body.metrics = metrics;
+  // Remember which pack tools were on, so a later run can say which ones are new.
+  const tools = [...new Set([...(readBaselineFile().tools ?? []), ...packToolIds()])].toSorted();
+  if (tools.length > 0) body.tools = tools;
   writeFileSync(BASELINE, `${JSON.stringify(body, null, 2)}\n`);
   return Object.keys(sorted).length;
 }
@@ -838,139 +848,6 @@ function report(fresh, baseline) {
   return `guardrails: ${fresh.length} new finding(s) above the baseline (${known} known)\n${format(fresh)}\n${NEXT}`;
 }
 
-// ── Advisory: which CI job appears to run which pack ──
-
-// A best-effort read of GitHub Actions and GitLab files only. NOTHING in the gate depends on it:
-// `check` and `check --strict-baseline` never fail because of a workflow file. It exists for the
-// doctor skill and for setup, to warn about a pack whose expensive tools no job appears to run.
-const GITLAB_RESERVED = new Set(['stages', 'variables', 'default', 'include', 'workflow', 'cache']);
-const OTHER_CI = [
-  'azure-pipelines.yml',
-  'bitbucket-pipelines.yml',
-  '.circleci/config.yml',
-  'Jenkinsfile',
-  '.travis.yml',
-];
-
-const withoutComments = (text) =>
-  text
-    .split('\n')
-    .filter((l) => !/^\s*#/.test(l))
-    .join('\n');
-
-// NAME: value (an env block) or NAME=value (inline in a script line).
-function envValue(text, name) {
-  const body = withoutComments(text);
-  const block = new RegExp(`^\\s*${name}:\\s*['"]?([\\w,-]*)['"]?\\s*$`, 'm').exec(body);
-  const inline = new RegExp(`\\b${name}=['"]?([\\w,-]+)`).exec(body);
-  return (block ?? inline)?.[1];
-}
-
-function splitJobs(file, text) {
-  const github = file.startsWith('.github/');
-  const jobs = [];
-  const top = [];
-  let cur = null;
-  let inJobs = !github;
-  for (const line of text.split('\n')) {
-    if (github && /^jobs:\s*$/.test(line)) inJobs = true;
-    else if (github && /^[\w-]+:/.test(line)) inJobs = false;
-    const name = github ? /^ {2}([\w.-]+):\s*$/.exec(line)?.[1] : /^([\w.-]+):\s*$/.exec(line)?.[1];
-    const isJob =
-      name && inJobs && (github || !(name.startsWith('.') || GITLAB_RESERVED.has(name)));
-    if (isJob) {
-      cur = { name, lines: [] };
-      jobs.push(cur);
-    } else if (cur && inJobs && (/^\s/.test(line) || line === '')) {
-      cur.lines.push(line);
-    } else {
-      if (!/^\s/.test(line)) cur = null;
-      top.push(line);
-    }
-  }
-  return {
-    top: top.join('\n'),
-    jobs: jobs.map((j) => ({ name: j.name, text: j.lines.join('\n') })),
-  };
-}
-
-const packList = (v) =>
-  new Set(
-    v
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
-
-// Jobs that appear to run `guardrails.mjs check` (not only `verify`, which turns the ci stage off),
-// with the packs they run and the packs whose ci-stage tools they appear to own.
-function ciJobs() {
-  const dir = join(ROOT, '.github', 'workflows');
-  const files = existsSync(dir)
-    ? readdirSync(dir)
-        .filter((f) => /\.ya?ml$/.test(f))
-        .map((f) => `.github/workflows/${f}`)
-    : [];
-  if (existsSync(join(ROOT, '.gitlab-ci.yml'))) files.push('.gitlab-ci.yml');
-  const all = new Set(PACKS.map((p) => p.id));
-  const jobs = files.flatMap((file) => {
-    const { top, jobs: found } = splitJobs(file, readFileSync(join(ROOT, file), 'utf8'));
-    return found
-      .filter((j) => /guardrails\.mjs\s+check/.test(withoutComments(j.text)))
-      .map((j) => {
-        const get = (name) => envValue(j.text, name) ?? envValue(top, name);
-        const packsValue = get('GUARDRAILS_PACKS');
-        const ciValue = get('GUARDRAILS_CI_PACKS');
-        const runs = packsValue ? packList(packsValue) : all;
-        let ci = runs;
-        if (ciValue) ci = ciValue === 'none' || ciValue === '-' ? new Set() : packList(ciValue);
-        return { file, name: j.name, runs, ci };
-      });
-  });
-  return { jobs, unreadable: OTHER_CI.filter((f) => existsSync(join(ROOT, f))) };
-}
-
-// Advisory only: always exits 0.
-function ciJobsCmd() {
-  const { jobs, unreadable } = ciJobs();
-  console.log(
-    'guardrails: CI ownership is a best-effort read of GitHub Actions and GitLab files only. Nothing in the gate depends on it.',
-  );
-  for (const f of unreadable) console.log(`guardrails: could not read this CI system: ${f}`);
-  for (const j of jobs) {
-    const ci = [...j.ci].join(',') || 'no pack';
-    console.log(
-      `${j.file} ${j.name}: appears to run ${[...j.runs].join(',')}; ci-stage tools of ${ci}`,
-    );
-  }
-  const owned = [
-    ...new Set(
-      configuredTools()
-        .filter(needsCi)
-        .map((t) => t.pack),
-    ),
-  ];
-  for (const pack of owned) {
-    const tools = configuredTools()
-      .filter((t) => t.pack === pack && needsCi(t))
-      .map((t) => t.id)
-      .join(', ');
-    const owners = jobs.filter((j) => j.ci.has(pack)).map((j) => `${j.name} (${j.file})`);
-    const head = `warning: pack ${pack} has ci-stage tools (${tools})`;
-    if (owners.length === 0) {
-      const where = unreadable.length > 0 && jobs.length === 0 ? ' in the files it could read' : '';
-      console.log(
-        `${head} and no job${where} appears to select it. Add the pack's CI job (setup-guardrails, Wave 8).`,
-      );
-    } else if (owners.length > 1) {
-      console.log(
-        `${head} and ${owners.length} jobs appear to select it: ${owners.join(', ')}. They would run twice.`,
-      );
-    }
-  }
-  return 0;
-}
-
 // ── Commands ──
 
 function check(argv) {
@@ -990,6 +867,17 @@ function check(argv) {
   if (fresh.length > 0) {
     console.error(report(fresh, baseline));
     return 1;
+  }
+  // After an upgrade, existing configs (ruff, .editorconfig-style files) can switch on pack tools.
+  // Name the new ones once per run until a baseline command acknowledges them.
+  if (!scope && existsSync(BASELINE)) {
+    const seen = new Set(readBaselineFile().tools ?? []);
+    const added = packToolIds().filter((id) => !seen.has(id));
+    if (added.length > 0) {
+      console.log(
+        `guardrails: tools newly active since the baseline was written: ${added.join(', ')}. Run baseline --tighten to acknowledge them.`,
+      );
+    }
   }
   // Metrics (duplication, coverage floors) run on full checks only: pre-push and CI.
   const recorded = readMetrics();
@@ -1033,6 +921,14 @@ function check(argv) {
         `guardrails: warning: GUARDRAILS_CI_PACKS names ${dropped.join(', ')} but GUARDRAILS_PACKS excludes it, so its ci-stage tools will not run in this job`,
       );
     }
+  }
+  // Never silent about ci-stage tools that are left out because another job owns their pack.
+  const left = scope ? [] : activeTools().filter((t) => needsCi(t) && ciOn() && !dueFull(t));
+  if (left.length > 0) {
+    const ids = left.map((t) => t.id).join(', ');
+    console.log(
+      `guardrails: ci-stage tools left to other jobs: ${ids} (GUARDRAILS_CI_PACKS=${process.env.GUARDRAILS_CI_PACKS})`,
+    );
   }
   // Never silent about ci-stage tools that did not run: say so, and under --strict-baseline fail.
   const deferred = scope ? [] : deferredCiIds();
@@ -1311,7 +1207,6 @@ const COMMANDS = {
   format: formatFiles,
   exec,
   packs,
-  'ci-jobs': ciJobsCmd,
   hook,
 };
 const [command, ...argv] = process.argv.slice(2);
@@ -1409,7 +1304,7 @@ const OXLINT_ON = [
   'oxlint.config.ts',
   { file: 'package.json', has: /"oxlint"\s*:/ },
 ];
-const KNIP_ON = [
+const KNIP_CONFIGS = [
   'knip.json',
   'knip.jsonc',
   '.knip.json',
@@ -1417,8 +1312,8 @@ const KNIP_ON = [
   'knip.ts',
   'knip.js',
   'knip.config.ts',
-  { file: 'package.json', has: /"knip"\s*:/ },
 ];
+const KNIP_ON = [...KNIP_CONFIGS, { file: 'package.json', has: /"knip"\s*:/ }];
 
 const ts = {
   id: 'ts',
@@ -1485,10 +1380,18 @@ const ts = {
       ok: ANY_EXIT,
       stages: ['push'],
       whole: true,
-      run: ({ h }) =>
-        h.bin('knip')
-          ? { cmd: h.bin('knip'), args: ['--reporter', 'json', '--no-progress'] }
-          : null,
+      // v3 skipped Knip when its binary was absent. Keep that only when nothing configures it: a
+      // Knip config file that exists with no binary installed is a broken install, never a pass.
+      run: ({ h }) => {
+        if (h.bin('knip'))
+          return { cmd: h.bin('knip'), args: ['--reporter', 'json', '--no-progress'] };
+        const config = KNIP_CONFIGS.find((f) => h.exists(f));
+        if (config)
+          throw new Error(
+            `knip is configured (${config}) but not installed. Install devDependencies first.`,
+          );
+        return null;
+      },
       parse: (out) => json('knip', out.stdout).issues.flatMap(knipItems),
     },
     {
@@ -1700,6 +1603,10 @@ const core = {
             (c) =>
               `${c.firstFile.name}:${c.firstFile.start} = ${c.secondFile.name}:${c.secondFile.start} (${c.lines} lines)`,
           );
+        // 0% duplication from a scan of nothing (a wrong path) must not read as perfect.
+        if (!(report.statistics?.total?.sources > 0)) {
+          throw new Error('jscpd scanned no files; check "path" and "format" in .jscpd.json');
+        }
         return { value: report.statistics.total.percentage, detail };
       },
     },
@@ -1898,7 +1805,12 @@ const python = {
         if (r.status !== 0 || !h.exists(tmp('cov.json'))) {
           throw new Error(`pytest failed (exit ${r.status}):\n${tail(r.stdout || r.stderr)}`);
         }
-        return { value: json('pytest-cov', h.read(tmp('cov.json'))).totals.percent_covered };
+        const totals = json('pytest-cov', h.read(tmp('cov.json'))).totals;
+        // coverage.py reports 100% for a run that measured no statements; that is not coverage.
+        if (!(totals?.num_statements > 0)) {
+          throw new Error('pytest-cov measured no statements; check [tool.coverage.run] source');
+        }
+        return { value: totals.percent_covered };
       },
     },
   ],
@@ -2177,6 +2089,10 @@ const salesforce = {
           );
         if (summary.outcome !== 'Passed')
           throw new Error(`Apex tests ${summary.outcome}: ${summary.failing} failing`);
+        // An org with no tests run has no coverage to report; do not read that as a number.
+        if (!(Number(summary.testsRan) > 0)) {
+          throw new Error('sf apex run test ran no tests; there is no coverage to record');
+        }
         return { value: Number.parseFloat(summary.orgWideCoverage) };
       },
     },
@@ -2350,21 +2266,26 @@ const rust = {
         args: ['clippy', '--all-targets', '--message-format', 'json', '--', '-D', 'warnings'],
       }),
       // --all-targets compiles a file once per target, so the same lint can print twice.
+      // A compile error (rustc E-codes, or an error with no code) means the build is broken, not
+      // that there is lint debt: it is an always-finding, never baselined, and always fails.
       parse: (out) => {
         const seen = new Map();
         for (const l of out.stdout.split('\n')) {
           if (!l.startsWith('{')) continue;
           const d = json('clippy', l);
           const m = d.message;
-          const span = m?.spans?.find((s) => s.is_primary);
-          if (d.reason !== 'compiler-message' || !m.code || !span) continue;
+          if (d.reason !== 'compiler-message' || !m) continue;
+          const span = m.spans?.find((s) => s.is_primary);
+          const compileError = m.level === 'error' && (!m.code || /^E\d{4}$/.test(m.code.code));
+          if (!compileError && (!m.code || !span)) continue;
           const found = {
-            rule: m.code.code,
-            file: span.file_name,
-            line: span.line_start,
+            rule: compileError ? (m.code?.code ?? 'compile-error') : m.code.code,
+            file: span?.file_name ?? 'Cargo.toml',
+            line: span?.line_start,
             message: m.message,
+            always: compileError,
           };
-          seen.set(`${found.rule}|${found.file}|${found.line}`, found);
+          seen.set(`${found.rule}|${found.file}|${found.line}|${found.message}`, found);
         }
         return [...seen.values()];
       },
@@ -2487,17 +2408,25 @@ const dart = {
       },
       measure: ({ h }) => {
         if (!isFlutter(h)) return null;
+        // Remove any old report first, so the one read below was written by this run.
+        h.remove('coverage/lcov.info');
         const r = h.run('flutter', ['test', '--coverage']);
         if (r.status !== 0)
           throw new Error(`flutter test failed (exit ${r.status}):\n${tail(r.stdout || r.stderr)}`);
+        const lcov = h.exists('coverage/lcov.info') ? h.read('coverage/lcov.info') : '';
         const sum = (tag) =>
-          h
-            .read('coverage/lcov.info')
+          lcov
             .split('\n')
             .filter((l) => l.startsWith(`${tag}:`))
             .reduce((n, l) => n + Number(l.slice(tag.length + 1)), 0);
         const found = sum('LF');
-        return { value: found === 0 ? 100 : (sum('LH') / found) * 100 };
+        // An empty, truncated or all-zero report is not 100% coverage.
+        if (!lcov.includes('end_of_record') || !(found > 0)) {
+          throw new Error(
+            'flutter test wrote no usable coverage/lcov.info (empty, truncated or no lines)',
+          );
+        }
+        return { value: (sum('LH') / found) * 100 };
       },
     },
   ],
@@ -3299,12 +3228,15 @@ ruleDirs:
 #      env:
 #        GUARDRAILS_ONLINE: '1'
 #        LYCHEE_VERSION: 0.24.2
+#        # sha256 of lychee-x86_64-unknown-linux-gnu.tar.gz, from the release's .sha256 file.
+#        LYCHEE_SHA256: 1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a
 #
 # 2. Add this step before "Verify":
       - name: Install lychee
         run: |
-          curl -sSfL "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/lychee-x86_64-unknown-linux-gnu.tar.gz" \
-            | sudo tar -xz --strip-components=1 -C /usr/local/bin lychee-x86_64-unknown-linux-gnu/lychee
+          curl -sSfL -o lychee.tar.gz "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/lychee-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${LYCHEE_SHA256}  lychee.tar.gz" | sha256sum --check --strict
+          sudo tar -xz --strip-components=1 -C /usr/local/bin -f lychee.tar.gz lychee-x86_64-unknown-linux-gnu/lychee
 ```
 <!-- /tmpl -->
 
@@ -3345,14 +3277,33 @@ oxlint
 <!-- tmpl:templates/packs/core/docs/.markdownlint-cli2.jsonc -->
 ```jsonc
 {
-  // Prettier owns formatting, so every markdownlint rule that overlaps it or fights it is off.
+  // An allowlist of structural rules only: headings, lists, code fences and links. Prettier owns
+  // formatting (line length, spacing, table style, emphasis, list markers), so none of those rules
+  // are on. Adding a rule here is a decision; do not switch "default" back on.
   "config": {
-    "default": true,
-    "MD013": false, // line length: Prettier does not wrap prose
-    "MD033": false, // inline HTML: badges, <details> and logos are allowed
-    "MD041": false, // first line heading: front matter and badges come first
-    "MD055": false, // table pipe style: Prettier formats tables
-    "MD060": false // table column style: Prettier aligns columns
+    "default": false,
+    // headings
+    "MD001": true, // heading levels increment by one
+    "MD003": { "style": "atx" },
+    "MD018": true, // space after # on atx headings
+    "MD022": true, // blank lines around headings
+    "MD024": { "siblings_only": true }, // no duplicate sibling headings
+    "MD025": true, // one top-level heading
+    // lists
+    "MD032": true, // blank lines around lists
+    // code fences
+    "MD031": true, // blank lines around fences
+    "MD040": true, // fences name a language
+    // links
+    "MD011": true, // reversed link syntax
+    "MD039": true, // no spaces inside link text
+    "MD042": true, // no empty links
+    "MD045": true, // images have alt text
+    "MD051": true, // link fragments point at a heading
+    "MD052": true, // reference links are defined
+    "MD053": true, // reference definitions are used
+    // tables
+    "MD056": true // table column count
   },
   "gitignore": true,
   "ignores": ["node_modules", "CHANGELOG.md"]
@@ -3762,11 +3713,24 @@ pre-commit:
 <!-- tmpl:templates/packs/salesforce/ci.yml -->
 ```yaml
 # Job to add to .github/workflows/ci.yml for the Salesforce pack. Uses `sf`, never `sfdx`.
-# The Apex coverage floor needs an authenticated org: set SF_TARGET_ORG_AUTH_URL as a secret
+# The apex-coverage tool needs an authenticated org: set SF_TARGET_ORG_AUTH_URL as a secret
 # (an SFDX auth URL for a scratch org or sandbox), and never point it at production.
+#
+# apex-coverage runs the tests of the org's DEPLOYED code, not this checkout. Read it as "org
+# health and deployed-code coverage", not as proof that this revision is correct. To test this
+# revision, deploy it to a scratch org first (sf project deploy start) and point targetOrg at it.
+#
+# Fork pull requests do not receive secrets, so the job is skipped for them (it must not fail or
+# run unauthenticated). If you require this check in branch protection, remember that a skipped
+# job counts as passed: do not rely on it to gate fork PRs.
   salesforce:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # Pinned: bump deliberately, with the changelog of each in hand.
+      SF_CLI_VERSION: 2.152.14
+      SF_CODE_ANALYZER_VERSION: 5.14.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -3777,8 +3741,8 @@ pre-commit:
           distribution: temurin
           java-version: '17'
       - run: npm ci
-      - run: npm install --global @salesforce/cli
-      - run: sf plugins install code-analyzer
+      - run: npm install --global "@salesforce/cli@${SF_CLI_VERSION}"
+      - run: sf plugins install "code-analyzer@${SF_CODE_ANALYZER_VERSION}"
       - name: Authenticate the test org
         run: |
           echo "${SF_TARGET_ORG_AUTH_URL}" > "${RUNNER_TEMP}/org.url"
@@ -4159,10 +4123,11 @@ jobs:
     timeout-minutes: 15
     env:
       # This job runs every enabled pack's cheap checks (as in v3), so install the tools of every pack
-      # you enabled (shellcheck, uv, cargo, ...); each pack's ci.yml job has the install steps. The expensive ci-stage tools (test suites, org
-      # runs) are not run here: each pack's own job (templates/packs/*/ci.yml) runs them once, with
-      # its toolchain. `guardrails.mjs check --strict-baseline` fails if an enabled pack with such
-      # tools has no job. Remove this line only if this single job runs everything.
+      # you enabled (shellcheck, uv, cargo, ...); each pack's ci.yml job has the install steps. The
+      # expensive ci-stage tools (test suites, org runs) are not run here: each pack's own job
+      # (templates/packs/*/ci.yml) runs them once, with its toolchain. Nothing enforces that a pack
+      # has such a job; the gate prints `deferred:` or `ci-stage tools left to other jobs` when they
+      # do not run here. Remove this line only if this single job runs everything.
       GUARDRAILS_CI_PACKS: none
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -4197,14 +4162,18 @@ jobs:
     timeout-minutes: 5
     env:
       GITLEAKS_VERSION: 8.30.1
+      # sha256 of gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz, from the release's checksums file.
+      # Update both together.
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Install gitleaks
         run: |
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin gitleaks
+          curl -sSfL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum --check --strict
+          sudo tar -xz -C /usr/local/bin -f gitleaks.tar.gz gitleaks
       - name: Scan history
         run: gitleaks git --redact --no-banner --log-opts="--all"
 ```

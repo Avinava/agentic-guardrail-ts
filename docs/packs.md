@@ -15,12 +15,32 @@ Everything beyond the original TypeScript stack is **opt-in**. A tool switches o
 | `salesforce` | `sfdx-project.json`, `*.cls`, `*.trigger` | Code Analyzer (PMD, ESLint, retire-js), prettier-apex, metadata checks, Apex coverage floor | opt-in |
 | `shell` | `*.sh`, `*.bash` | shellcheck, shfmt | opt-in |
 | `docker` | `Dockerfile*`, `*compose*.yml` | hadolint, `docker compose config` | opt-in |
-| `sql` | `*.sql` | sqlfluff | opt-in |
+| `sql` | `*.sql` | sqlfluff | opt-in, **experimental** |
 | `rust` | `Cargo.toml` | cargo fmt, clippy, cargo-deny, cargo-machete | opt-in |
-| `dart` | `pubspec.yaml`, `*.dart` | dart format, dart or flutter analyze, Flutter coverage floor | opt-in |
-| `cpp` | `platformio.ini`, `.clang-format`, `*.cpp` | clang-format, pio check | opt-in |
+| `dart` | `pubspec.yaml`, `*.dart` | dart format, dart or flutter analyze, Flutter coverage floor | opt-in, **experimental** |
+| `cpp` | `platformio.ini`, `.clang-format`, `*.cpp` | clang-format, pio check | opt-in, **experimental** |
+
+**Experimental** means no tool of the pack has been run against its real binary: only fake-output unit tests cover it (see [Verified against real tools](#verified-against-real-tools)). The setup skill does not offer experimental packs unless the user asks for them, and they may change without a major version.
 
 More packs are added below as they ship.
+
+## Upgrading from 3.0.0
+
+Nothing new runs by default, but some tools are switched on by a config file you may already have. After upgrading, these switch on **if the file exists**:
+
+| Tool | Switched on by an existing |
+| --- | --- |
+| ruff, ruff-format | `[tool.ruff]` in `pyproject.toml`, or `ruff.toml` |
+| pyright | `[tool.pyright]` in `pyproject.toml`, or `pyrightconfig.json` |
+| deptry, vulture, pytest-cov | `[tool.deptry]`, `[tool.vulture]`, `[tool.coverage*]` in `pyproject.toml` |
+| dart-format, dart-analyze, flutter-coverage | `analysis_options.yaml` (every Dart or Flutter project has one) |
+| clang-format | `.clang-format` |
+| prettier-apex | a `.prettierrc` or `.prettierrc.json` that lists `prettier-plugin-apex` |
+| markdownlint, lychee, cspell, ls-lint, ast-grep, jscpd | their own config files (`.markdownlint-cli2.jsonc`, `lychee.toml`, `cspell.json`, `.ls-lint.yml`, `sgconfig.yml`, `.jscpd.json`) |
+| hadolint and compose-config, shellcheck and shfmt, sqlfluff | `.hadolint.yaml`, `.shellcheckrc`, `.sqlfluff` |
+| cargo-fmt, clippy, cargo-deny | `rustfmt.toml`, `clippy.toml`, `deny.toml` |
+
+The first full `check` after the upgrade prints one line naming every pack tool that is newly active since the baseline was written (`tools newly active since the baseline was written: ...`), and repeats it until a baseline command (`baseline --tighten`) acknowledges them. Findings from a newly active tool fail the gate like any new finding, so run `baseline --tighten` or `--reset` after reviewing them, or remove the config file.
 
 ## The pack contract
 
@@ -58,7 +78,9 @@ So every expensive tool runs once, in a job that has its toolchain and credentia
 
 1. Setup always generates the pack job for each detected pack that has ci-stage tools. `scripts/packs-ci-test.mjs` checks that in the generated workflow of a five-stack repo every such pack is owned by exactly one job and never by the base job.
 2. Whenever ci-stage tools are deferred, `check` prints `deferred: <tools> (set GUARDRAILS_CI=1 to run them, with GUARDRAILS_PACKS=<pack> to limit the run; CI runs them)`, and `--strict-baseline` fails while any are deferred, so a CI step that never turns the stage on cannot print "clean".
-3. `node scripts/guardrails.mjs ci-jobs` is an **advisory** for the doctor skill and setup. It is a best-effort read of GitHub Actions and GitLab files only (it says `could not read this CI system` for Azure, Bitbucket, CircleCI, Jenkins and the rest), it counts only jobs that run `guardrails.mjs check`, and it always exits 0. It warns when a pack with ci-stage tools appears to have no job, or two. It cannot see `if: false`, `workflow_dispatch`-only triggers, matrices, reusable workflows or GitLab `extends`; treat its output as a prompt to look, not a verdict.
+3. The doctor skill reads the workflow files by hand when asked. The engine does not: the gate has no CI-file parser, because a heuristic one gave false passes and failures across CI systems.
+
+When the ci stage is on but `GUARDRAILS_CI_PACKS` leaves a pack out, `check` prints `ci-stage tools left to other jobs: <tools> (GUARDRAILS_CI_PACKS=...)`, so a tool that did not run is never silent.
 
 Pre-push never runs the ci stage: `verify` forces `GUARDRAILS_CI=0`, so a `CI` variable exported on a developer machine or in an agent sandbox cannot start a test suite or an org run. CI runs the ci-stage tools in the strict step only, once. Two checks do apply under `--strict-baseline` and have nothing to do with CI files: a selected pack with no configured tool fails (its config was removed), and a pack a job does not run is named in the output (`packs not run here`).
 
@@ -123,7 +145,7 @@ The original stack, described in the [Tool reference](./tool-reference.md): Oxli
 
 ## python
 
-Templates: `templates/packs/python/`. Needs `uv`; every tool runs as `uv run <tool>` from the dev dependency group, with `UV_LOCKED=1` in CI. Separate from the TypeScript stack and sharing only the engine and the baseline: a Python part inside a TypeScript repo works, and so does a repo with no `package.json`.
+Templates: `templates/packs/python/`. Needs `uv`; every tool runs as `uv run <tool>` from the dev dependency group, with `UV_LOCKED=1` in CI. Separate from the TypeScript stack and sharing only the engine and the baseline: a Python part inside a TypeScript repo works, and so does a repo with no `package.json`. **One Python project per repo, at the repo root:** the switches read the root `pyproject.toml` and `uv run` runs from the git root. Nested Python projects (a `pyproject.toml` in a subfolder) are not supported; a repo with several would need one guardrails setup per project.
 
 | Tool | Config (switch) | Findings | Stages |
 | --- | --- | --- | --- |
@@ -173,7 +195,7 @@ Templates: `templates/packs/salesforce/`. For Salesforce DX projects (`sfdx-proj
 
 **sf-metadata** checks that every class and trigger has its `-meta.xml` and that no `apiVersion` is older than `sourceApiVersion` in `sfdx-project.json`.
 
-**apex-coverage** runs `sf apex run test --test-level RunLocalTests --code-coverage --json` against the org named in `guardrails/apex-coverage.json`, fails if any test fails, and ratchets the org-wide coverage upward. It needs an authenticated scratch org or sandbox. Never point it at production; the setup skill confirms the org before writing the file.
+**apex-coverage** is an "org health and deployed-code coverage" check, not proof that this revision is correct: CI authenticates to the org and runs the tests of the code deployed *there*, not of this checkout. To test a revision, deploy it to a scratch org first (`sf project deploy start`) and point `targetOrg` at that org. It runs `sf apex run test --test-level RunLocalTests --code-coverage --json` against the org named in `guardrails/apex-coverage.json`, fails if any test fails, and ratchets the org-wide coverage upward. It needs an authenticated scratch org or sandbox. Never point it at production; the setup skill confirms the org before writing the file.
 
 ## shell
 
@@ -197,7 +219,7 @@ Templates: `templates/packs/docker/`. Both tools switch on with `.hadolint.yaml`
 
 hadolint runs as `hadolint --format json` on `Dockerfile*` and `*.Dockerfile`. compose-config runs `docker compose -f <file> config --quiet` once per compose file, which validates the schema and variable interpolation and needs no running daemon. Install hadolint with `brew install hadolint` or a release binary; `docker` is already on CI runners.
 
-## sql
+## sql (experimental)
 
 Templates: `templates/packs/sql/`. Switched on by `.sqlfluff`, which also sets the dialect.
 
@@ -220,7 +242,7 @@ Templates: `templates/packs/rust/`. Each tool has its own switch file.
 
 cargo fmt runs `cargo fmt --check`. clippy runs `cargo clippy --all-targets --message-format json -- -D warnings`, so every warning is an error, keyed by lint name. A clippy run that cannot compile fails the gate instead of passing. cargo-deny runs `cargo deny check` and reports one finding for the whole policy, with the tool's output attached. cargo-machete lists unused dependencies.
 
-## dart
+## dart (experimental)
 
 Templates: `templates/packs/dart/`. Switched on by `analysis_options.yaml`.
 
@@ -232,7 +254,7 @@ Templates: `templates/packs/dart/`. Switched on by `analysis_options.yaml`.
 
 dart-format runs `dart format --output=none --set-exit-if-changed`. dart-analyze runs `dart analyze --format=machine` in a plain Dart package and `flutter analyze --no-pub` when `pubspec.yaml` declares `sdk: flutter`. flutter-coverage runs `flutter test --coverage`, reads `coverage/lcov.info` and ratchets the line coverage upward; it does nothing in a non-Flutter package.
 
-## cpp
+## cpp (experimental)
 
 Templates: `templates/packs/cpp/`, for C and C++ including PlatformIO firmware.
 
@@ -263,5 +285,5 @@ Each tool was run through `guardrails.mjs` with the shipped template config wher
 | sqlfluff | not run (not installed; fake output of `--format json`) |
 | `cargo fmt --check`, `cargo clippy` (1.93) | run for real |
 | cargo-deny (needs the advisory database), cargo-machete (not installed) | not run (fake output) |
-| dart format, dart analyze, flutter analyze, flutter test --coverage | not run (the SDK shim is not configured here; fake output) |
+| dart format, dart analyze, flutter analyze, flutter test --coverage | not run (the SDK shim is not configured here; fake output): **experimental** |
 | clang-format, `pio check` | not run (clang-format not installed; `pio check` needs a toolchain download; fake output) |

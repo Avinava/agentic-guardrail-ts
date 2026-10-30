@@ -15,7 +15,7 @@ The v3 engine was written for TypeScript: `guardrails.mjs` called Oxlint, depend
 5. A tool that exits non-zero with nothing it can parse is a failure, never a pass. A changed output format therefore breaks loudly instead of turning the gate green (this caught ruff 0.16 changing `ruff format --check` output).
 
 6. Expensive (`ci`-stage) tools run once, in the job that owns their pack: `GUARDRAILS_PACKS` limits a job to packs and `GUARDRAILS_CI_PACKS` limits only the expensive tools. The base job keeps every pack's cheap checks, as in v3.
-7. The gate never reads CI files. Reading workflow YAML heuristically gave false passes and false failures across CI systems, so `ci-jobs` is an advisory (GitHub Actions and GitLab only, always exit 0). A pack nobody runs is guarded by generating its job in setup, by the always-printed `deferred: ...` line, and by the doctor advisory.
+7. The gate never reads CI files, and the engine has no CI parser at all. A heuristic reader of workflow YAML gave false passes and false failures across CI systems, so it was removed. A pack nobody runs is guarded by generating its job in setup (with a test that each ci-stage pack is owned by exactly one job in the generated workflow), and by the lines `check` prints whenever a ci-stage tool does not run (`deferred: ...`, `ci-stage tools left to other jobs: ...`).
 
 ## Consequences
 

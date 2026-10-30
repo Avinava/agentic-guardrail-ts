@@ -388,12 +388,4 @@ Tool interactions that surprise people, and what to do about them.
 
 **Why:** every job that runs `check` runs every configured pack unless told otherwise.
 
-**Resolution:** set `GUARDRAILS_CI_PACKS: none` on the base job and `GUARDRAILS_PACKS: <pack>` on each pack job. The base job then needs the toolchains of every enabled pack. See [CI jobs](./packs.md#ci-jobs-cheap-checks-everywhere-expensive-checks-once).
-
-## "warning: pack X has ci-stage tools and no job appears to select it"
-
-**Symptom:** `node scripts/guardrails.mjs ci-jobs` (or the doctor skill) warns about a pack.
-
-**Why:** the pack has expensive tools and no job in the GitHub Actions or GitLab files it could read appears to select it (`GUARDRAILS_PACKS` or `GUARDRAILS_CI_PACKS`), or two do. The read is best effort and advisory: it exits 0 and nothing in the gate depends on it. It cannot read other CI systems, `if: false`, matrices, reusable workflows or `extends`.
-
-**Resolution:** look. If the pack's job is missing, add it from `templates/packs/<pack>/ci.yml`. If two jobs run it, limit all but one with `GUARDRAILS_CI_PACKS`. The always-printed `deferred: ...` line is the gate's own protection.
+**Resolution:** set `GUARDRAILS_CI_PACKS: none` on the base job and `GUARDRAILS_PACKS: <pack>` on each pack job. The base job then needs the toolchains of every enabled pack. See [CI jobs](./packs.md#ci-jobs-cheap-checks-everywhere-expensive-checks-once). Nothing checks that a pack job exists; `check` prints `deferred:` or `ci-stage tools left to other jobs` when their tools do not run.

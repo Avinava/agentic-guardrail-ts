@@ -52,11 +52,10 @@ you to apply the suggested wave.
 - **Packs.** Run `node scripts/guardrails.mjs packs`. Report stacks that are detected but have no
   tool on (for example `mule: detected` with every tool `off`) as an offer, not a defect: packs
   are opt-in. Report a tool that is `on` but whose binary is missing.
-- **CI ownership (advisory).** Run `node scripts/guardrails.mjs ci-jobs`. It is a best-effort read of
-  GitHub Actions and GitLab files only, always exits 0, and says when it could not read the CI
-  system. Report its warnings (a pack with ci-stage tools and no job that appears to select it, or
-  two) as questions to check, not as defects. Offer to add the pack's job; do not edit the
-  workflow silently.
+- **CI jobs.** There is no tool for this; read the workflow files. Every enabled pack with ci-stage
+  tools (python coverage, MUnit, Apex coverage, Flutter coverage, `pio check`) needs one job that
+  runs it (`GUARDRAILS_PACKS=<pack>`), and the base job should set `GUARDRAILS_CI_PACKS: none`.
+  Offer to add the pack's job; do not edit the workflow silently.
 - **Other configs** may be tailored on purpose. Report only what is missing:
   - `.oxlintrc.json` without `typescript/no-floating-promises` or `unicorn/no-abusive-eslint-disable`
   - `lefthook.yml` without the `guardrails`, `secrets` or `commitlint` jobs
