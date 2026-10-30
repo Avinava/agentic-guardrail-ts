@@ -121,7 +121,7 @@ describe('a metric whose tool stopped applying', () => {
     put('pubspec.yaml', 'name: app\ndependencies:\n  flutter:\n    sdk: flutter\n');
     fake('flutter-test', {
       stdout: 'ok',
-      files: { 'coverage/lcov.info': 'LF:10\nLH:9\nend_of_record\n' },
+      files: { 'coverage/lcov.info': 'SF:lib/main.dart\nLF:10\nLH:9\nend_of_record\n' },
     });
     fake('flutter-analyze', { stdout: 'No issues found!\n' });
     fake('dart-format', { stdout: '' });
@@ -381,6 +381,20 @@ describe('ci-stage tools left to other jobs are named', () => {
       r.out,
       /ci-stage tools left to other jobs: pytest-cov \(GUARDRAILS_CI_PACKS=none\)/,
     );
+  });
+});
+
+describe('a tighten that only records the tools list says so', () => {
+  it('does not claim nothing changed', () => {
+    put('platformio.ini', '[env:uno]\ncheck_tool = cppcheck\n');
+    fake('pio', { stdout: '[]' });
+    ci(['baseline', '--init']);
+    put('pyproject.toml', '[tool.ruff]\nline-length = 100\n');
+    fake('ruff', { stdout: '[]' });
+    fake('ruff-format', { stdout: '' });
+    const r = g(['baseline', '--tighten']);
+    assert.match(r.out, /only the active-tools list was recorded/);
+    assert.doesNotMatch(r.out, /baseline unchanged/);
   });
 });
 

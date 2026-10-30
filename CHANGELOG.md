@@ -40,16 +40,18 @@ A language-agnostic engine with opt-in packs. Nothing is on by default and exist
 - An invalid stored metric (`null`) fails the check; `--tighten` reports it and records the current reading explicitly.
 
 ### Fixed (fail closed, second review)
-- A Knip config with no Knip binary is a failure with an install hint (no config and no binary is still skipped, as in v3).
-- Coverage and duplication parsers no longer read a zero denominator as perfect: an empty, truncated or all-zero Flutter lcov report, a pytest-cov run with no statements, a jscpd scan of no files and an Apex run with no tests all fail. The Flutter report must be written by the run itself (the old one is deleted first).
+- Knip with any switch on (a config file, `knip.config.js/.mjs/.ts`, or a `knip` entry in `package.json`) and no binary is a failure with an install hint. With no switch it is not active at all, as in v3.
+- Coverage and duplication parsers no longer read a zero denominator as perfect: a Flutter lcov report that is empty, cut off (no closing `end_of_record`, or unequal `SF:` and `end_of_record` counts) or all-zero, a pytest-cov run with no statements, a jscpd scan of no files and an Apex run with no tests all fail. The Flutter report must be written by the run itself (the old one is deleted first).
 - clippy: a compile error (a rustc E-code, or an error with no code) is an always-finding: never baselined, always failing.
 - `ci-stage tools left to other jobs: ...` is printed whenever the ci stage is on but `GUARDRAILS_CI_PACKS` leaves a tool out; the base CI template no longer promises missing-job enforcement.
 - CI templates: the Salesforce CLI and Code Analyzer plugin are pinned; gitleaks and lychee downloads are verified against a sha256; the Salesforce job is skipped for fork pull requests (no secrets there) instead of failing.
 - `apex-coverage` is documented as org health and deployed-code coverage, not proof about this checkout.
 - Nested Python projects are documented as unsupported (one project at the repo root).
-- The first `check` after an upgrade names the pack tools newly switched on by existing config files; the upgrade table is in docs/packs.md.
+- Every full `check` after an upgrade names the pack tools newly switched on by existing config files, until a baseline command acknowledges them; the upgrade table is in docs/packs.md.
 - markdownlint template is an allowlist of structural rules (headings, lists, code fences, links, table column count) instead of all rules with exceptions.
 - Dart, C++/PlatformIO and SQL are marked experimental (no real-tool run).
+
+- clippy: rustc's closing summaries (`aborting due to …`, `could not compile …`) are never findings, and a code-less error needs a primary span to count as a compile error, so a lint under `-D warnings` can still be baselined.
 
 ### Removed
 - `guardrails.mjs ci-jobs` and its heuristic CI-file parser.

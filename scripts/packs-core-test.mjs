@@ -518,9 +518,20 @@ describe('a configured tool whose binary is missing fails, never skips', () => {
     assert.equal(r.status, 1);
     assert.match(
       r.out,
-      /knip is configured \(knip\.json\) but not installed\. Install devDependencies first/,
+      /knip is not installed\. Install devDependencies first/,
     );
   });
+
+  for (const [file, text] of [
+    ['knip.config.mjs', 'export default {};'],
+    ['package.json', '{"name":"x","knip":{"entry":["src/index.ts"]}}'],
+  ]) {
+    it(`Knip switched on by ${file} and no binary fails`, () => {
+      put(file, text);
+      rmSync(join(state.dir, 'node_modules/.bin/knip'));
+      assert.match(g(['check']).out, /knip is not installed/);
+    });
+  }
 
   it('keeps v3 behaviour: no Knip config and no binary is skipped', () => {
     rmSync(join(state.dir, 'node_modules/.bin/knip'));

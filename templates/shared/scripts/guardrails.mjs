@@ -651,16 +651,24 @@ function tightenMetrics() {
 
 // Writes the baseline and says what happened. If nothing changed because the ci-stage tools did not
 // run, say that and name the command that does record them, instead of claiming a tighten.
+const snapshot = () => JSON.stringify([readBaseline(), readMetrics()]);
+const toolsOf = () => JSON.stringify(readBaselineFile().tools ?? []);
+
 function record(counts, metrics, word, verb) {
   const existed = existsSync(BASELINE);
-  const before = JSON.stringify([readBaseline(), readMetrics()]);
+  const before = snapshot();
+  const toolsBefore = toolsOf();
   const keys = writeBaseline(counts, metrics);
   const skipped = notDue().filter(needsCi);
-  if (existed && skipped.length > 0 && before === JSON.stringify([readBaseline(), readMetrics()])) {
+  if (existed && skipped.length > 0 && before === snapshot()) {
     const cmds = [...new Set(skipped.map((t) => fixCmd(verb, t)))];
-    console.log(
-      `guardrails: baseline unchanged: ${skipped.map((t) => t.id).join(', ')} did not run here. Run: ${cmds.join(' and ')}`,
-    );
+    const ids = skipped.map((t) => t.id).join(', ');
+    // The active-tools list may still have been recorded; say so rather than claim nothing changed.
+    const head =
+      toolsBefore === toolsOf()
+        ? 'baseline unchanged'
+        : 'baseline: only the active-tools list was recorded (no counts or metrics changed)';
+    console.log(`guardrails: ${head}: ${ids} did not run here. Run: ${cmds.join(' and ')}`);
     return;
   }
   console.log(`guardrails: baseline ${word} (${keys} keys)`);
