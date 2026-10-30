@@ -203,3 +203,41 @@ Tool interactions that surprise people, and what to do about them.
 **Why:** they are language-specific, not overlapping. dependency-cruiser and Knip check the TypeScript graph and `package.json`. tach and deptry check the Python import graph and `pyproject.toml`.
 
 **Resolution:** none. Keep each tool's config in its own language's files.
+
+## mule-lint config discovery
+
+**Symptom:** edits to `.mulelintrc.json` have no effect when you run `mule-lint` by hand, or the profile looks wrong.
+
+**Why:** mule-lint does not search for its config. The engine always passes `--config .mulelintrc.json`; a bare `mule-lint .` ignores the file.
+
+**Resolution:** run the same command the engine does, or `node scripts/guardrails.mjs check`.
+
+## mule-lint naming rule and ls-lint
+
+**Symptom:** flow names or file names are policed twice, or one tool accepts what the other rejects.
+
+**Resolution:** the split is fixed. mule-lint (`MULE-002`) owns flow and sub-flow names inside the XML. ls-lint owns file and folder names (`src/main/mule/*.xml` in kebab-case). Change flow suffixes in `.mulelintrc.json`, not in ls-lint.
+
+## mule-secrets and gitleaks
+
+**Symptom:** a secret is flagged by both, or gitleaks passes a value mule-secrets rejects.
+
+**Why:** gitleaks matches known credential formats in the diff. mule-secrets rejects any plain value under a secret-looking key in properties files, whatever its format.
+
+**Resolution:** none. Use `${placeholder}` or an encrypted `![...]` value, which satisfies both.
+
+## MUnit coverage floor lives in the pom
+
+**Symptom:** `baseline --tighten` does not raise the MUnit coverage floor.
+
+**Why:** the floor is `requiredApplicationCoverage` in `pom.xml`, enforced by Maven, not a baseline metric.
+
+**Resolution:** raise it in the pom in a reviewed commit when coverage improves. Agents must not lower it (the base deny rules cover `pom.xml` only if you add it to them).
+
+## mule-secrets and mule-lint CFG-003
+
+**Symptom:** a plain `db.password` in a properties file is reported twice, once as `mule-secrets:plain-secret` and once as `mule-lint:CFG-003`.
+
+**Why:** mule-lint also flags plaintext secrets in config files. mule-secrets additionally covers YAML and any secret-looking key whatever its format, and it runs in the edit hook.
+
+**Resolution:** fix the value once (placeholder or `![...]`); both findings go away. If the double count bothers you, set `CFG-003` to `"enabled": false` in `.mulelintrc.json` with a comment in the PR.

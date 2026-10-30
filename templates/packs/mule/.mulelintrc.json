@@ -1,0 +1,11 @@
+{
+  "extends": "mule-lint:recommended",
+  "rules": {
+    "MULE-002": {
+      "enabled": true,
+      "options": { "flowSuffix": "-flow", "subflowSuffix": "-subflow" }
+    }
+  },
+  "exclude": ["**/*.munit.xml"],
+  "failOnWarning": false
+}

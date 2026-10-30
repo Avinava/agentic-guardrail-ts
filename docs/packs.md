@@ -11,6 +11,7 @@ Everything beyond the original TypeScript stack is **opt-in**. A tool switches o
 | `core` | every repo | cspell, jscpd, ast-grep, ls-lint, markdownlint-cli2, lychee, editorconfig-checker, actionlint (gitleaks, lefthook, commitlint are installed by the base setup) | opt-in per tool |
 | `ts` | `package.json`, `tsconfig*.json` | Oxlint, dependency-cruiser, Knip, disable check, Prettier, Vitest floors | on in every v3 install (switched on by `.oxlintrc.json`, `.dependency-cruiser.mjs`, `knip.json`) |
 | `python` | `pyproject.toml`, `uv.lock` | ruff (lint, format), pyright, tach, deptry, vulture, pytest coverage floor | opt-in |
+| `mule` | `mule-artifact.json`, `src/main/mule/*.xml` | mule-lint, Mule XML format check, properties secrets, MUnit through Maven | opt-in |
 
 More packs are added below as they ship.
 
@@ -106,6 +107,25 @@ Templates: `templates/packs/python/`. Needs `uv`; every tool runs as `uv run <to
 
 pyright is the type checker; mypy is not wired. tach (module boundaries) is the Python counterpart of dependency-cruiser, deptry of Knip's dependency checks, vulture of dead-code detection. Whole-project tools run on full checks because a file-scoped run misses usages elsewhere. The coverage floor needs `pytest-cov` in the dev group.
 
+## mule
+
+Templates: `templates/packs/mule/`. For MuleSoft applications (a `mule-artifact.json`, `pom.xml`, Mule XML, DataWeave, MUnit). A monorepo with several applications is scanned application by application.
+
+| Tool | Config (switch) | Findings | Stages |
+| --- | --- | --- | --- |
+| mule-lint | `.mulelintrc.json` | `mule-lint:<rule-id>\|file` | edit, commit, push |
+| mule-format | `.mulelintrc.json` | `mule-format:format\|file` | commit, push |
+| mule-secrets | `.mulelintrc.json` | `mule-secrets:plain-secret\|file` | edit, commit, push |
+| munit | `munit-maven-plugin` in `pom.xml` | `munit:tests-or-coverage-failed\|pom.xml` | push |
+
+**mule-lint** is [`@sfdxy/mule-lint`](https://github.com/Avinava/mule-lint), run as `mule-lint <app> --config .mulelintrc.json --format json`. The profile and per-rule options live in the config (`extends: mule-lint:recommended`; mule-lint does not find the file on its own, so the engine always passes `--config`). Errors and warnings are findings; info findings are advisory and are not counted. Flow and sub-flow naming is rule `MULE-002`, so there is no separate naming check; file names are covered by the ls-lint template in this folder.
+
+**mule-format** runs `mule-lint format --check <app>` (Prettier with Anypoint Studio defaults) on Mule XML. There is no maintained command-line formatter for DataWeave (`.dwl`) files, so those are not format-checked; the mule-lint DW rules check their content.
+
+**mule-secrets** reads `*.properties` and `*.yaml` under `src/main/resources` and `src/test/resources`. A key that looks like a secret (`password`, `secret`, `token`, `api key`, `private key`, `credential`) must hold a `${placeholder}` or an encrypted `![...]` Secure Properties value. gitleaks still scans the diff for real credentials; this check is for the plain values it cannot recognise.
+
+**munit** runs `mvn test` for each `pom.xml` that configures `munit-maven-plugin`, on full checks only. The coverage floor is `requiredApplicationCoverage` in the pom (see `pom-munit-snippet.xml`), so a coverage miss fails `mvn test`. That number is not part of the baseline; raise it in the pom by hand when coverage improves.
+
 ## Verified against real tools
 
 Each tool was run through `guardrails.mjs` with the shipped template config where it was installed. Everything else is covered only by the fake-output unit tests in `scripts/packs-*-test.mjs`, which use output copied from real runs where we had it, and from the tool's documentation otherwise.
@@ -115,3 +135,5 @@ Each tool was run through `guardrails.mjs` with the shipped template config wher
 | ast-grep 0.51.0, ls-lint 2.3.2, cspell 10.4.0, jscpd 5.4.2, markdownlint-cli2 0.24.0, lychee 0.24.2, editorconfig-checker 6.2.0 | run for real |
 | actionlint | not run against the real tool (not installed); fake output from the documented JSON template |
 | ruff 0.16.9, pyright 1.1.414, tach 0.35.3, deptry 0.25.1, vulture 2.16, pytest-cov through uv 0.12.21 | run for real (ruff format output changed in 0.16, which the parser handles) |
+| mule-lint 2.3.0 (lint and `format --check`), the properties secret check | run for real |
+| Maven and MUnit | not run (fake `mvn` only); the coverage floor is enforced by Maven |

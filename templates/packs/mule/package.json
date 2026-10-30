@@ -1,0 +1,5 @@
+{
+  "devDependencies": {
+    "@sfdxy/mule-lint": "^2.3.0"
+  }
+}

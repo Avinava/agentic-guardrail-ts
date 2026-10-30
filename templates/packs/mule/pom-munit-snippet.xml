@@ -1,0 +1,26 @@
+<!-- Add to the <build><plugins> of pom.xml. The floor is requiredApplicationCoverage. -->
+<plugin>
+  <groupId>com.mulesoft.munit.tools</groupId>
+  <artifactId>munit-maven-plugin</artifactId>
+  <version>${munit.version}</version>
+  <executions>
+    <execution>
+      <id>test</id>
+      <phase>test</phase>
+      <goals>
+        <goal>test</goal>
+        <goal>coverage-report</goal>
+      </goals>
+    </execution>
+  </executions>
+  <configuration>
+    <coverage>
+      <runCoverage>true</runCoverage>
+      <failBuild>true</failBuild>
+      <requiredApplicationCoverage>80</requiredApplicationCoverage>
+      <formats>
+        <format>console</format>
+      </formats>
+    </coverage>
+  </configuration>
+</plugin>

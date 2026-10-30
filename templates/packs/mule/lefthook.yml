@@ -1,0 +1,8 @@
+# lefthook additions for the Mule pack. Merge under pre-commit.jobs in lefthook.yml.
+# mule-lint and the properties secret check run on staged files. The MUnit suite runs on
+# pre-push (through `verify`) and in CI, because it needs Maven and the full project.
+pre-commit:
+  jobs:
+    - name: mule
+      glob: '*.{xml,dwl,properties,yaml,yml}'
+      run: node scripts/guardrails.mjs check --files {staged_files}

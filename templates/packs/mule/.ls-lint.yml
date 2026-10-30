@@ -1,0 +1,16 @@
+# .ls-lint.yml for a Mule application: config and DataWeave file names.
+# Flow and sub-flow names are checked by mule-lint (MULE-002), not here.
+ls:
+  src/main/mule:
+    .xml: kebab-case
+    .dir: kebab-case
+  src/main/resources:
+    .dwl: kebab-case
+    .properties: kebab-case
+    .dir: kebab-case
+  src/test/munit:
+    .xml: kebab-case
+ignore:
+  - .git
+  - target
+  - node_modules

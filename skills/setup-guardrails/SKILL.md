@@ -1418,7 +1418,134 @@ const python = {
   ],
 };
 
-export const PACKS = [core, ts, python];
+// ── mule: MuleSoft applications (Maven, Mule XML, DataWeave, MUnit) ──
+
+const MULE_FILES =
+  /(^|\/)src\/(?:main|test)\/(?:mule|munit|resources)\/.*\.(?:xml|dwl|raml|ya?ml|properties)$/;
+const MULE_PROJECT = /(^|\/)mule-artifact\.json$/;
+const MULE_CONFIG = '.mulelintrc.json';
+const join2 = (dir, file) => (dir === '.' ? file : `${dir}/${file}`);
+const dirOf = (file) => file.split('/').slice(0, -1).join('/') || '.';
+
+// Mule applications in the repo: the directories that hold a mule-artifact.json.
+const muleProjects = (h) => h.projectFiles(MULE_PROJECT).map(dirOf);
+
+const mule = {
+  id: 'mule',
+  detect: [MULE_PROJECT, /(^|\/)src\/main\/mule\/.+\.xml$/],
+  tools: [
+    {
+      // mule-lint (@sfdxy/mule-lint), config in .mulelintrc.json (profile via `extends`).
+      // Info findings are advisory and are not counted.
+      id: 'mule-lint',
+      optIn: [MULE_CONFIG],
+      exts: MULE_FILES,
+      stages: ['edit', 'commit', 'push'],
+      whole: true,
+      scan: ({ h }) =>
+        muleProjects(h).flatMap((dir) => {
+          const r = h.run(h.needBin('mule-lint'), [
+            dir,
+            '--config',
+            MULE_CONFIG,
+            '--format',
+            'json',
+          ]);
+          if (r.status !== 0 && r.status !== 1) {
+            throw new Error(`mule-lint failed (exit ${r.status}):\n${tail(r.stderr || r.stdout)}`);
+          }
+          return json('mule-lint', r.stdout)
+            .filter((d) => d.severity === 'error' || d.severity === 'warning')
+            .map((d) => ({
+              rule: d.ruleId,
+              file: d.filePath ?? join2(dir, d.relativePath),
+              line: d.line,
+              message: d.message,
+            }));
+        }),
+    },
+    {
+      // Mule XML formatting. There is no maintained CLI formatter for DataWeave (.dwl) files, so
+      // those are not format-checked; mule-lint's DW rules cover their content.
+      id: 'mule-format',
+      optIn: [MULE_CONFIG],
+      exts: MULE_FILES,
+      stages: ['commit', 'push'],
+      whole: true,
+      scan: ({ h }) =>
+        muleProjects(h).flatMap((dir) => {
+          const r = h.run(h.needBin('mule-lint'), ['format', '--check', dir]);
+          if (r.status !== 0 && r.status !== 1) {
+            throw new Error(
+              `mule-lint format failed (exit ${r.status}):\n${tail(r.stderr || r.stdout)}`,
+            );
+          }
+          return lines(/^\s*✗ (.+?) \(needs formatting\)/, ([, file]) => ({
+            rule: 'format',
+            file: join2(dir, file),
+            message: 'run mule-lint format',
+          }))(r);
+        }),
+    },
+    {
+      // Plain-text secrets in properties and YAML. Values must be a ${placeholder} or an
+      // encrypted ![...] Secure Properties value.
+      id: 'mule-secrets',
+      optIn: [MULE_CONFIG],
+      exts: /(^|\/)src\/(?:main|test)\/resources\/.*\.(?:properties|ya?ml)$/,
+      stages: ['edit', 'commit', 'push'],
+      scan: ({ files, h }) => {
+        const key = /(?:pass(?:word|wd)?|secret|token|api[-_.]?key|private[-_.]?key|credential)/i;
+        const found = [];
+        const all =
+          files ?? h.projectFiles(/(^|\/)src\/(?:main|test)\/resources\/.*\.(?:properties|ya?ml)$/);
+        for (const file of all) {
+          h.read(file)
+            .split('\n')
+            .forEach((text, i) => {
+              const m = /^\s*([\w.-]+)\s*[=:]\s*(.+?)\s*$/.exec(text);
+              if (!m || !key.test(m[1])) return;
+              const value = m[2].replace(/^["']|["']$/g, '');
+              if (value === '' || value.startsWith('${') || value.startsWith('![')) return;
+              found.push({
+                rule: 'plain-secret',
+                file,
+                line: i + 1,
+                message: `"${m[1]}" holds a plain value; use \${placeholder} or an encrypted ![...] value`,
+              });
+            });
+        }
+        return found;
+      },
+    },
+    {
+      // MUnit through Maven. The coverage floor is requiredApplicationCoverage in pom.xml, so a
+      // coverage miss fails `mvn test`. Only poms that configure the MUnit plugin run.
+      id: 'munit',
+      optIn: [{ file: 'pom.xml', has: /munit-maven-plugin/ }],
+      stages: ['push'],
+      whole: true,
+      scan: ({ h }) =>
+        h
+          .projectFiles(/(^|\/)pom\.xml$/)
+          .filter((pom) => /munit-maven-plugin/.test(h.read(pom)))
+          .flatMap((pom) => {
+            const r = h.run('mvn', ['-B', '-ntp', '-q', '-f', pom, 'test']);
+            return r.status === 0
+              ? []
+              : [
+                  {
+                    rule: 'tests-or-coverage-failed',
+                    file: pom,
+                    message: tail(r.stdout || r.stderr),
+                  },
+                ];
+          }),
+    },
+  ],
+};
+
+export const PACKS = [core, ts, python, mule];
 ```
 <!-- /tmpl -->
 
