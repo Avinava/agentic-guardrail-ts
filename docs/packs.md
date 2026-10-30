@@ -10,6 +10,7 @@ Everything beyond the original TypeScript stack is **opt-in**. A tool switches o
 | --- | --- | --- | --- |
 | `core` | every repo | cspell, jscpd, ast-grep, ls-lint, markdownlint-cli2, lychee, editorconfig-checker, actionlint (gitleaks, lefthook, commitlint are installed by the base setup) | opt-in per tool |
 | `ts` | `package.json`, `tsconfig*.json` | Oxlint, dependency-cruiser, Knip, disable check, Prettier, Vitest floors | on in every v3 install (switched on by `.oxlintrc.json`, `.dependency-cruiser.mjs`, `knip.json`) |
+| `python` | `pyproject.toml`, `uv.lock` | ruff (lint, format), pyright, tach, deptry, vulture, pytest coverage floor | opt-in |
 
 More packs are added below as they ship.
 
@@ -89,6 +90,22 @@ Language-agnostic tools. Templates: `templates/packs/core/`. Each switches on wi
 
 The original stack, described in the [Tool reference](./tool-reference.md): Oxlint, dependency-cruiser, Knip, the disable check, Prettier, Vitest coverage floors. These tools are declared in the same registry and switch on with the config files every v3 install already has (`.oxlintrc.json`, `.dependency-cruiser.mjs`, `knip.json`), so they run exactly as before, and a repo without those files (a Mule or Python repo) does not need Oxlint installed. Prettier and Vitest run through the `format:check` and `test:coverage` package scripts that `verify` calls, not through the finding engine.
 
+## python
+
+Templates: `templates/packs/python/`. Needs `uv`; every tool runs as `uv run <tool>` from the dev dependency group, with `UV_LOCKED=1` in CI. Separate from the TypeScript stack and sharing only the engine and the baseline: a Python part inside a TypeScript repo works, and so does a repo with no `package.json`.
+
+| Tool | Config (switch) | Findings | Stages |
+| --- | --- | --- | --- |
+| ruff (lint) | `[tool.ruff]` in `pyproject.toml`, or `ruff.toml` | `ruff:<code>\|file` | edit, commit, push |
+| ruff (format) | same | `ruff-format:format\|file` | commit, push |
+| pyright | `[tool.pyright]` or `pyrightconfig.json` | `pyright:<rule>\|file` | commit, push (whole project) |
+| tach | `tach.toml` | `tach:UndeclaredDependency\|file` | push |
+| deptry | `[tool.deptry]` | `deptry:DEP001\|file` | push |
+| vulture | `[tool.vulture]` | `vulture:unused-function\|file` | push |
+| pytest coverage | `[tool.coverage.*]` | metric `python-coverage` (up) | push |
+
+pyright is the type checker; mypy is not wired. tach (module boundaries) is the Python counterpart of dependency-cruiser, deptry of Knip's dependency checks, vulture of dead-code detection. Whole-project tools run on full checks because a file-scoped run misses usages elsewhere. The coverage floor needs `pytest-cov` in the dev group.
+
 ## Verified against real tools
 
 Each tool was run through `guardrails.mjs` with the shipped template config where it was installed. Everything else is covered only by the fake-output unit tests in `scripts/packs-*-test.mjs`, which use output copied from real runs where we had it, and from the tool's documentation otherwise.
@@ -97,3 +114,4 @@ Each tool was run through `guardrails.mjs` with the shipped template config wher
 | --- | --- |
 | ast-grep 0.51.0, ls-lint 2.3.2, cspell 10.4.0, jscpd 5.4.2, markdownlint-cli2 0.24.0, lychee 0.24.2, editorconfig-checker 6.2.0 | run for real |
 | actionlint | not run against the real tool (not installed); fake output from the documented JSON template |
+| ruff 0.16.9, pyright 1.1.414, tach 0.35.3, deptry 0.25.1, vulture 2.16, pytest-cov through uv 0.12.21 | run for real (ruff format output changed in 0.16, which the parser handles) |

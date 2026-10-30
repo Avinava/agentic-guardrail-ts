@@ -367,4 +367,157 @@ const core = {
   ],
 };
 
-export const PACKS = [core, ts];
+// ── python: every tool runs through `uv run` ──
+
+const PY_EXT = /\.py$/;
+const uvRun = (...args) => ({ cmd: 'uv', args: ['run', ...args] });
+const inPyproject = (section) => ({
+  file: 'pyproject.toml',
+  has: new RegExp(`^\\[tool\\.${section}`, 'm'),
+});
+
+const python = {
+  id: 'python',
+  detect: [/(^|\/)pyproject\.toml$/, /(^|\/)uv\.lock$/],
+  tools: [
+    {
+      id: 'ruff',
+      optIn: [inPyproject('ruff'), 'ruff.toml', '.ruff.toml'],
+      exts: PY_EXT,
+      stages: ['edit', 'commit', 'push'],
+      run: ({ files }) =>
+        uvRun('ruff', 'check', '--output-format', 'json', '--no-cache', ...(files ?? ['.'])),
+      parse: (out) =>
+        json('ruff', out.stdout).map((d) => ({
+          rule: d.code ?? 'syntax-error',
+          file: d.filename,
+          line: d.location?.row,
+          message: d.message,
+        })),
+    },
+    {
+      id: 'ruff-format',
+      optIn: [inPyproject('ruff'), 'ruff.toml', '.ruff.toml'],
+      exts: PY_EXT,
+      stages: ['commit', 'push'],
+      run: ({ files }) => uvRun('ruff', 'format', '--check', '--no-cache', ...(files ?? ['.'])),
+      // ruff 0.16 prints `unformatted: File would be reformatted` then ` --> path:line:col`;
+      // older versions print `Would reformat: path`.
+      parse: lines(/^(?:Would reformat: (.+)|\s+--> (.+?):\d+:\d+)$/, (m) => ({
+        rule: 'format',
+        file: m[1] ?? m[2],
+        message: 'run ruff format',
+      })),
+    },
+    {
+      // Whole project: a type error in one file can come from a change in another.
+      id: 'pyright',
+      optIn: [inPyproject('pyright'), 'pyrightconfig.json'],
+      exts: PY_EXT,
+      stages: ['commit', 'push'],
+      whole: true,
+      run: () => uvRun('pyright', '--outputjson'),
+      parse: (out) =>
+        (json('pyright', out.stdout).generalDiagnostics ?? [])
+          .filter((d) => d.severity === 'error' || d.severity === 'warning')
+          .map((d) => ({
+            rule: d.rule ?? 'pyright',
+            file: d.file,
+            line: (d.range?.start?.line ?? 0) + 1,
+            message: d.message,
+          })),
+    },
+    {
+      id: 'tach',
+      optIn: ['tach.toml'],
+      exts: PY_EXT,
+      stages: ['push'],
+      whole: true,
+      run: () => uvRun('tach', 'check', '--output', 'json'),
+      parse: (out) =>
+        json('tach', out.stdout).map((d) => {
+          const { file_path: file, line_number: line, details } = d.Located ?? d;
+          const rule = Object.keys(details?.Code ?? {})[0] ?? 'configuration';
+          const { usage_module: from, definition_module: to } = details?.Code?.[rule] ?? {};
+          return {
+            rule,
+            file: file ?? 'tach.toml',
+            line,
+            message: from && to ? `${from} may not depend on ${to}` : rule,
+          };
+        }),
+    },
+    {
+      id: 'deptry',
+      optIn: [inPyproject('deptry')],
+      exts: PY_EXT,
+      stages: ['push'],
+      whole: true,
+      run: ({ tmp, h }) =>
+        uvRun(
+          'deptry',
+          h.exists('src') ? 'src' : '.',
+          '--no-ansi',
+          '--json-output',
+          tmp('deptry.json'),
+        ),
+      parse: (out, { tmp, h }) => {
+        if (!h.exists(tmp('deptry.json')))
+          throw new Error(`deptry failed (exit ${out.status}):\n${tail(out.stderr)}`);
+        return json('deptry', h.read(tmp('deptry.json'))).map((d) => ({
+          rule: d.error.code,
+          file: d.location.file,
+          line: d.location.line ?? 0,
+          message: d.error.message,
+        }));
+      },
+    },
+    {
+      id: 'vulture',
+      optIn: [inPyproject('vulture')],
+      exts: PY_EXT,
+      stages: ['push'],
+      whole: true,
+      ok: [0, 3],
+      run: () => uvRun('vulture'),
+      parse: (out, { h }) =>
+        lines(/^(.+?):(\d+): (.+?) \(\d+% confidence\)/, ([, file, row, text]) => ({
+          rule: text
+            .replace(/'[^']*'/g, '')
+            .trim()
+            .replaceAll(/\W+/g, '-'),
+          file,
+          line: +row,
+          message: text,
+        }))(out)
+          // ruff F401 owns unused imports, so vulture does not report them a second time.
+          .filter((f) => !(f.rule === 'unused-import' && h.active('ruff'))),
+    },
+    {
+      // Test coverage may only go up. Needs pytest-cov in the dev group.
+      id: 'pytest-cov',
+      optIn: [inPyproject('coverage')],
+      stages: ['push'],
+      metric: {
+        name: 'python-coverage',
+        direction: 'up',
+        unit: '%',
+        advice: 'Add tests for the new code.',
+      },
+      measure: ({ tmp, h }) => {
+        const r = h.run('uv', [
+          'run',
+          'pytest',
+          '--cov',
+          `--cov-report=json:${tmp('cov.json')}`,
+          '-q',
+        ]);
+        if (!h.exists(tmp('cov.json')))
+          throw new Error(`pytest failed (exit ${r.status}):\n${tail(r.stdout || r.stderr)}`);
+        return { value: json('pytest-cov', h.read(tmp('cov.json'))).totals.percent_covered };
+      },
+    },
+  ],
+};
+
+export const PACKS = [core, ts, python];

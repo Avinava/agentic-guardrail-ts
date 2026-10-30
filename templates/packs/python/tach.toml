@@ -1,0 +1,13 @@
+# tach.toml: module boundaries, the Python counterpart of dependency-cruiser layers.
+# A module may import only the modules listed in its depends_on. Lowest layer first.
+# `exact = true` also fails when a declared dependency is unused.
+source_roots = ["src"]
+exact = true
+
+[[modules]]
+path = "acme.core"
+depends_on = []
+
+[[modules]]
+path = "acme.api"
+depends_on = ["acme.core"]

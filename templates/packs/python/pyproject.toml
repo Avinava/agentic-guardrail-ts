@@ -1,0 +1,58 @@
+# pyproject.toml additions for the Python pack. Merge these tables into the project's own
+# pyproject.toml; keep the project's [project] table as it is. Replace `acme` with the package.
+# Every tool runs through `uv run`, so they live in the dev dependency group. Each [tool.*] table
+# below is also the switch that turns its tool on.
+
+[dependency-groups]
+dev = [
+  "ruff>=0.16",
+  "pyright>=1.1",
+  "tach>=0.35",
+  "deptry>=0.25",
+  "vulture>=2.16",
+  "pytest>=8",
+  "pytest-cov>=5",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src"]
+
+[tool.ruff.lint]
+# E/F pyflakes and pycodestyle, I imports, B bugbear, UP pyupgrade, S security, C90 complexity,
+# SIM simplify, ANN type annotations.
+select = ["E", "F", "I", "B", "UP", "S", "C90", "SIM", "ANN"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "ANN"] # assert and untyped fixtures are fine in tests
+
+[tool.pyright]
+include = ["src"]
+typeCheckingMode = "standard"
+pythonVersion = "3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+# Switches on the coverage floor (metric python-coverage, up only).
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.deptry]
+known_first_party = ["acme"]
+
+[tool.deptry.per_rule_ignores]
+# DEP002 = "declared but unused" for tools used by binary only, for example:
+# DEP002 = ["uvicorn"]
+
+[tool.vulture]
+paths = ["src"]
+min_confidence = 60
+exclude = ["tests/"]
+ignore_decorators = ["@app.get", "@app.post", "@pytest.fixture"]

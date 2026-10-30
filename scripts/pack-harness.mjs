@@ -53,7 +53,7 @@ const PATH_BINS = [
 ];
 
 // A fake binary. Which canned spec answers a call:
-//   uv run <tool> ...  -> <tool>.json
+//   uv run <tool> <sub> ...  -> <tool>-<sub>.json when it exists, else <tool>.json
 //   <name> <sub> ...   -> <name>-<sub>.json when it exists, else <name>.json
 // A spec is { stdout, stderr, status, writes: [{ flag, join?, content }] }; `writes` creates the
 // files the real tool would write to a flag's value. Every call is logged to <name>.args.
@@ -65,7 +65,7 @@ const dir = process.env.FAKE_DIR;
 fs.appendFileSync(path.join(dir, name + '.args'), JSON.stringify(argv) + '\\n');
 const spec = (key) => path.join(dir, key + '.json');
 let file = spec(name);
-if (name === 'uv') file = spec(argv[1]);
+if (name === 'uv') file = fs.existsSync(spec(argv[1] + '-' + argv[2])) ? spec(argv[1] + '-' + argv[2]) : spec(argv[1]);
 else if (fs.existsSync(spec(name + '-' + argv[0]))) file = spec(name + '-' + argv[0]);
 const canned = JSON.parse(fs.readFileSync(file, 'utf8'));
 for (const w of canned.writes ?? []) {
@@ -164,6 +164,7 @@ export function baselineFile() {
 
 // Inits a baseline and returns the recorded counts.
 export function recordedCounts() {
-  g(['baseline', '--init']);
+  const r = g(['baseline', '--init']);
+  if (r.status !== 0) throw new Error(`baseline --init failed:\n${r.out}`);
   return baselineFile().counts;
 }

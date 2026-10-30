@@ -1,0 +1,8 @@
+# lefthook additions for the Python pack. Merge under pre-commit.jobs in lefthook.yml.
+# ruff runs on staged Python files. tach, deptry and vulture are whole-project checks, so they
+# run on pre-push (through `verify`) and in CI, never per file.
+pre-commit:
+  jobs:
+    - name: python
+      glob: '*.py'
+      run: node scripts/guardrails.mjs check --files {staged_files}

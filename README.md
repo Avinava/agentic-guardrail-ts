@@ -66,6 +66,7 @@ The engine is language-agnostic. Each stack is a pack of tools that switch on wh
 | --- | --- | --- | --- |
 | `ts` | `package.json`, `tsconfig*.json` | Oxlint, dependency-cruiser, Knip, Prettier, Vitest floors | on |
 | `core` | every repo | cspell, jscpd, ast-grep, ls-lint, markdownlint-cli2, lychee, editorconfig-checker, actionlint | opt-in |
+| `python` | `pyproject.toml`, `uv.lock` | ruff (lint, format), pyright, tach, deptry, vulture, pytest coverage floor | opt-in |
 
 ## How the loop works
 

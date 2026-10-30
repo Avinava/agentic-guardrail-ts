@@ -190,3 +190,16 @@ Tool interactions that surprise people, and what to do about them.
 **Why:** actionlint runs shellcheck on `run:` steps when shellcheck is on PATH. The shell pack's shellcheck only checks `.sh` files, not workflow YAML, so they do not overlap on files.
 
 **Resolution:** none. To silence a `run:` finding, use `# shellcheck disable=SCxxxx` inside the step, with a reason.
+## ruff, vulture and unused imports
+
+**Symptom:** the same unused import is reported by ruff (`F401`) and vulture.
+
+**Resolution:** `guardrails.mjs` drops vulture's `unused import` findings whenever ruff is configured, so ruff owns them. vulture keeps functions, classes and attributes.
+
+## tach and dependency-cruiser, deptry and Knip
+
+**Symptom:** two boundary or dependency tools in one repo.
+
+**Why:** they are language-specific, not overlapping. dependency-cruiser and Knip check the TypeScript graph and `package.json`. tach and deptry check the Python import graph and `pyproject.toml`.
+
+**Resolution:** none. Keep each tool's config in its own language's files.
