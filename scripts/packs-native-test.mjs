@@ -108,8 +108,7 @@ describe('dart pack', () => {
   it('parses dart analyze machine output in a plain Dart package', () => {
     put('pubspec.yaml', 'name: app\n');
     fake('dart-analyze', {
-      stdout:
-        `ERROR|COMPILE_TIME_ERROR|UNDEFINED_METHOD|${state.dir}/lib/main.dart|3|5|4|Undefined method\n`,
+      stdout: `ERROR|COMPILE_TIME_ERROR|UNDEFINED_METHOD|${state.dir}/lib/main.dart|3|5|4|Undefined method\n`,
       status: 3,
     });
     const counts = recordedCounts();

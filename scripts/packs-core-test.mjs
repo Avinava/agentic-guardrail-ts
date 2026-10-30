@@ -316,3 +316,21 @@ describe('actionlint', () => {
     assert.deepEqual(calls('actionlint').at(-1).slice(-1), ['.github/workflows/ci.yml']);
   });
 });
+
+describe('verify without package scripts', () => {
+  it('runs the check itself in a repo that has no lint script', () => {
+    put('sgconfig.yml', 'ruleDirs: []\n');
+    fake('ast-grep', {
+      stdout: JSON.stringify({
+        ruleId: 'r',
+        file: 'src/a.ts',
+        message: 'm',
+        range: { start: { line: 0 } },
+      }),
+      status: 1,
+    });
+    const r = g(['verify']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /ast-grep r/);
+  });
+});

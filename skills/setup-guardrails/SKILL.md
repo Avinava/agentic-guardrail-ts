@@ -826,7 +826,8 @@ function ratchetCoverage() {
 
 function verify() {
   for (const step of ['format:check', 'typecheck', 'lint', 'test:coverage']) {
-    const r = runScript(step);
+    // Repos without Node scripts (Mule, Python, Rust) have no `lint` script: run the check itself.
+    const r = step === 'lint' && !pkg().scripts?.lint ? { status: check([]) } : runScript(step);
     if (r.status !== 0) {
       console.error(`guardrails: verify failed at "${step}"`);
       return r.status ?? 1;
