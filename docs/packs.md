@@ -34,7 +34,7 @@ A tool declares:
 | `optIn` | The config files that switch the tool on. A string is a file that must exist. `{ file, has }` also needs the pattern in the file (for example `[tool.ruff]` in `pyproject.toml`). |
 | `exts` | Files the tool covers. The hooks use it to run only the tools whose files changed. |
 | `track` | File types to start tracking when the tool is on (cspell adds Markdown). |
-| `stages` | Where it runs. `edit`: the post-edit hook. `commit`: pre-commit, `check --files`, `check --changed` and the stop hook. `push`: the full check, which is pre-push (through `verify`) and CI. `ci`: a full check in CI, which is on when `GUARDRAILS_CI=1` or the standard `CI` variable is set (GitHub Actions and GitLab both set it); `GUARDRAILS_CI=0` forces it off. Expensive tools (test suites, org runs, toolchain downloads) use `ci`, so they never run on pre-push. A local full check prints `deferred: <tools> (set GUARDRAILS_CI=1 or run in CI)` and `check --strict-baseline` fails while any are deferred, so a CI that forgot the flag cannot print "clean". |
+| `stages` | Where it runs. `edit`: the post-edit hook. `commit`: pre-commit, `check --files`, `check --changed` and the stop hook. `push`: the full check, which is pre-push (through `verify`) and CI. `ci`: a full check in CI, which is on when `GUARDRAILS_CI=1` or the standard `CI` variable is set (GitHub Actions and GitLab both set it); `GUARDRAILS_CI=0` forces it off. Expensive tools (test suites, org runs, toolchain downloads) use `ci`, so they never run on pre-push. A local full check prints `deferred: <tools> (set GUARDRAILS_CI=1 or run in CI)` and `check --strict-baseline` fails while any are deferred, so a CI that forgot the flag cannot print "clean". Recording their numbers needs the same stage: the printed fix is `GUARDRAILS_CI=1 GUARDRAILS_PACKS=<pack> node scripts/guardrails.mjs baseline --tighten`. |
 | `whole` | Run on the whole project even in a scoped run; findings are then filtered to the files in scope. For tree-wide tools. |
 | `perFile` | One command per file. |
 | `ok` | Exit codes that mean the tool ran. Anything else is a tool failure and blocks, never a silent pass. Default `[0, 1]`. A tool whose JSON report is authoritative (Oxlint, dependency-cruiser, Knip) accepts every exit code, as v3 did, and fails only if the report does not parse. |
@@ -45,11 +45,18 @@ A tool declares:
 
 A file name that starts with `-` (for example `--config=x.md`) is passed to tools as `./--config=x.md`, so no tool can read it as an option. Tools that run their own commands (`scan` tools) wrap paths with `h.safe`, which does the same for directories such as a Mule app named `-legacy`.
 
-### One job per pack in CI
+### CI jobs: cheap checks everywhere, expensive checks once
 
-`GUARDRAILS_PACKS=core,ts` limits a run to those packs (default: all, as in v3). In a repo with several stacks each CI job sets it to the packs it has a toolchain for, so every expensive tool runs exactly once, in a job that has its toolchain and credentials. The base `verify` job in `templates/ci/ci.yml` owns `core,ts`; each `templates/packs/<pack>/ci.yml` job sets its own pack. A pack with no job of its own (shell, docker, sql) must be added to the `verify` job's list once that job installs its tools; a run prints `packs left to other jobs` so a pack nobody runs is visible. `scripts/packs-ci-test.mjs` checks that no ci-stage pack is selected by two jobs.
+The default is v3 behaviour: with no environment variables a job runs every enabled pack. Two variables shape a multi-stack pipeline:
 
-Non-Node tools need nothing special: `run` returns `{ cmd: 'shellcheck', args: [...] }`. Python tools return `{ cmd: 'uv', args: ['run', 'ruff', ...] }`.
+- `GUARDRAILS_PACKS=python` limits a job to those packs. A pack's own job (`templates/packs/<pack>/ci.yml`) sets it to its pack, so it needs only that pack's toolchain.
+- `GUARDRAILS_CI_PACKS=none` (or a list) limits only the **ci-stage** tools. The base `verify` job in `templates/ci/ci.yml` sets `none`: it keeps running every enabled pack's cheap checks (ruff, shellcheck, clippy, compose config, ...) exactly as in v3, and leaves the expensive ones (test suites, org runs, toolchain downloads) to the pack job.
+
+So every expensive tool runs once, in a job that has its toolchain and credentials, and no enabled pack's cheap checks are dropped. The base job must install the tools of every enabled pack (shellcheck, uv, cargo, ...); a missing tool fails loudly.
+
+`check --strict-baseline` verifies the wiring from the workflow files (`.github/workflows/*.yml`, `.gitlab-ci.yml`): every configured pack that has ci-stage tools must be selected by exactly one job. It fails naming the pack when no job selects it, when no CI file runs guardrails at all, or when two jobs would run the same tools. `node scripts/guardrails.mjs ci-jobs` prints the same check and each job's selection (the doctor skill runs it). A pack job also prints which job runs the packs it left out, or fails under strict when none does. A selection that matches nothing is an error: an empty `GUARDRAILS_PACKS` fails, and under strict so does a selected pack with no configured tool.
+
+Pre-push never runs the ci stage: `verify` forces `GUARDRAILS_CI=0`, so a `CI` variable exported on a developer machine or in an agent sandbox cannot start a test suite or an org run. CI runs the ci-stage tools in the strict step only, once. Setup always adds the pack job for each detected pack that has ci-stage tools. `scripts/packs-ci-test.mjs` checks the generated workflow for a five-stack repo.
 
 ### Metric ratchets
 

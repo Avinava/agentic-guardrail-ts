@@ -31,7 +31,9 @@ A language-agnostic engine with opt-in packs. Nothing is on by default and exist
 
 - The ci stage is on for `GUARDRAILS_CI=1` or the standard `CI` variable (`GUARDRAILS_CI=0` forces it off). A local full check prints `deferred: ...` and `--strict-baseline` fails while ci tools are deferred.
 - Local `baseline --tighten` and `--reset` carry over stored metrics and finding keys of tools that did not run, and never report them stale.
-- `GUARDRAILS_PACKS` selects packs per CI job, so expensive tools run once in a job with their toolchain; the base and pack CI templates set it, and `scripts/packs-ci-test.mjs` checks no ci tool is selected twice.
+- `GUARDRAILS_PACKS` limits a job to packs and `GUARDRAILS_CI_PACKS` limits only the expensive ci-stage tools. The base job runs every enabled pack's cheap checks as in v3 (`GUARDRAILS_CI_PACKS: none`); each pack job owns its expensive tools. `check --strict-baseline` and the new `guardrails.mjs ci-jobs` fail when a pack with ci-stage tools is selected by no CI job or by two. `verify` (pre-push) always forces `GUARDRAILS_CI=0`.
+- Fix commands for ci-stage keys and metrics print `GUARDRAILS_CI=1 GUARDRAILS_PACKS=<pack> ...`; a local tighten that could not touch them prints `baseline unchanged`.
+- An empty `GUARDRAILS_PACKS` is an error, and under strict so is a selected pack with no configured tool.
 - Findings are scoped by the file recorded on the finding, not by parsing the key, so paths containing `|` work.
 - Scan tools pass directories through `h.safe` (`./-legacy`).
 - An invalid stored metric (`null`) fails the check; `--tighten` reports it and records the current reading explicitly.

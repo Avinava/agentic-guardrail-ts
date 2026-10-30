@@ -356,7 +356,7 @@ Tool interactions that surprise people, and what to do about them.
 
 **Why:** test suites, org runs and toolchain downloads (`pytest-cov`, `munit`, `apex-coverage`, `flutter-coverage`, `pio-check`) run only in the ci stage: `GUARDRAILS_CI=1`, or the `CI` variable that GitHub Actions and GitLab set (`GUARDRAILS_CI=0` forces it off). A local pre-push does not run them and prints `deferred: ...`; `--strict-baseline` fails while any are deferred. Their stored numbers and finding keys are left alone locally.
 
-**Resolution:** record them once with `GUARDRAILS_CI=1 node scripts/guardrails.mjs baseline --tighten`. `baseline --reset` keeps CI-only metrics that it did not measure.
+**Resolution:** record them with the command the message prints, `GUARDRAILS_CI=1 GUARDRAILS_PACKS=<pack> node scripts/guardrails.mjs baseline --tighten`. A plain local `baseline --tighten` cannot touch them and says `baseline unchanged: <tools> did not run here`. `baseline --reset` keeps CI-only metrics that it did not measure.
 
 ## "cannot baseline while a tool is failing as a whole"
 
@@ -388,4 +388,12 @@ Tool interactions that surprise people, and what to do about them.
 
 **Why:** every job that runs `check` runs every configured pack unless told otherwise.
 
-**Resolution:** set `GUARDRAILS_PACKS` per job (base: `core,ts`; each pack job: its own pack). See [One job per pack in CI](./packs.md#one-job-per-pack-in-ci).
+**Resolution:** set `GUARDRAILS_CI_PACKS: none` on the base job and `GUARDRAILS_PACKS: <pack>` on each pack job. See [CI jobs](./packs.md#ci-jobs-cheap-checks-everywhere-expensive-checks-once).
+
+## "pack X has ci-stage tools but no CI job selects it"
+
+**Symptom:** `check --strict-baseline` fails naming a pack (python, mule, salesforce, dart, cpp).
+
+**Why:** a pack with expensive tools is enabled but no job in `.github/workflows` or `.gitlab-ci.yml` selects it (`GUARDRAILS_PACKS` or `GUARDRAILS_CI_PACKS`), so its tests or org run would never execute in CI.
+
+**Resolution:** add the pack's job from `templates/packs/<pack>/ci.yml`. If two jobs select it, limit all but one with `GUARDRAILS_CI_PACKS`. `node scripts/guardrails.mjs ci-jobs` shows the selections.
