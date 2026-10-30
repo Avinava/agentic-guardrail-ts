@@ -14,6 +14,9 @@ The v3 engine was written for TypeScript: `guardrails.mjs` called Oxlint, depend
 4. Numbers that are a ratio, not a per-file count (duplication, coverage), are *metrics* stored under `metrics` in the same baseline file, and they only move the right way.
 5. A tool that exits non-zero with nothing it can parse is a failure, never a pass. A changed output format therefore breaks loudly instead of turning the gate green (this caught ruff 0.16 changing `ruff format --check` output).
 
+6. Expensive (`ci`-stage) tools run once, in the job that owns their pack: `GUARDRAILS_PACKS` limits a job to packs and `GUARDRAILS_CI_PACKS` limits only the expensive tools. The base job keeps every pack's cheap checks, as in v3.
+7. The gate never reads CI files. Reading workflow YAML heuristically gave false passes and false failures across CI systems, so `ci-jobs` is an advisory (GitHub Actions and GitLab only, always exit 0). A pack nobody runs is guarded by generating its job in setup, by the always-printed `deferred: ...` line, and by the doctor advisory.
+
 ## Consequences
 
 - Adding a stack is a pack object, a template folder, a docs section and a test with fake tool output.

@@ -388,12 +388,12 @@ Tool interactions that surprise people, and what to do about them.
 
 **Why:** every job that runs `check` runs every configured pack unless told otherwise.
 
-**Resolution:** set `GUARDRAILS_CI_PACKS: none` on the base job and `GUARDRAILS_PACKS: <pack>` on each pack job. See [CI jobs](./packs.md#ci-jobs-cheap-checks-everywhere-expensive-checks-once).
+**Resolution:** set `GUARDRAILS_CI_PACKS: none` on the base job and `GUARDRAILS_PACKS: <pack>` on each pack job. The base job then needs the toolchains of every enabled pack. See [CI jobs](./packs.md#ci-jobs-cheap-checks-everywhere-expensive-checks-once).
 
-## "pack X has ci-stage tools but no CI job selects it"
+## "warning: pack X has ci-stage tools and no job appears to select it"
 
-**Symptom:** `check --strict-baseline` fails naming a pack (python, mule, salesforce, dart, cpp).
+**Symptom:** `node scripts/guardrails.mjs ci-jobs` (or the doctor skill) warns about a pack.
 
-**Why:** a pack with expensive tools is enabled but no job in `.github/workflows` or `.gitlab-ci.yml` selects it (`GUARDRAILS_PACKS` or `GUARDRAILS_CI_PACKS`), so its tests or org run would never execute in CI.
+**Why:** the pack has expensive tools and no job in the GitHub Actions or GitLab files it could read appears to select it (`GUARDRAILS_PACKS` or `GUARDRAILS_CI_PACKS`), or two do. The read is best effort and advisory: it exits 0 and nothing in the gate depends on it. It cannot read other CI systems, `if: false`, matrices, reusable workflows or `extends`.
 
-**Resolution:** add the pack's job from `templates/packs/<pack>/ci.yml`. If two jobs select it, limit all but one with `GUARDRAILS_CI_PACKS`. `node scripts/guardrails.mjs ci-jobs` shows the selections.
+**Resolution:** look. If the pack's job is missing, add it from `templates/packs/<pack>/ci.yml`. If two jobs run it, limit all but one with `GUARDRAILS_CI_PACKS`. The always-printed `deferred: ...` line is the gate's own protection.
