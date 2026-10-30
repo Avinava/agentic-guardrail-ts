@@ -170,7 +170,7 @@ Tool interactions that surprise people, and what to do about them.
 
 ## Knip and the extras' binaries
 
-**Symptom:** Knip reports `@ast-grep/cli`, `@ls-lint/ls-lint`, `cspell`, `jscpd` or `markdownlint-cli2` as unused.
+**Symptom:** Knip reports `@ast-grep/cli`, `@ls-lint/ls-lint`, `cspell`, `jscpd`, `markdownlint-cli2`, `editorconfig-checker`, `@sfdxy/mule-lint` or `prettier-plugin-apex` as unused.
 
 **Resolution:** they run by binary, not import. Add them to `ignoreDependencies` in `knip.json`, like `oxlint`.
 

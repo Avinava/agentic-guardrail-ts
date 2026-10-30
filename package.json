@@ -1,6 +1,6 @@
 {
   "name": "agentic-guardrail-ts",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "type": "module",
   "description": "Tool-enforced guardrails for coding agents in TypeScript projects: agent skills and a Claude Code plugin that install Oxlint, TypeScript 7, dependency-cruiser, Knip, Vitest coverage floors, lefthook, a ratchet baseline and agent hooks.",
   "keywords": [
@@ -18,7 +18,12 @@
     "codex",
     "agent-skills",
     "pre-commit",
-    "static-analysis"
+    "static-analysis",
+    "mulesoft",
+    "salesforce",
+    "python",
+    "rust",
+    "flutter"
   ],
   "license": "MIT",
   "author": "Avinava Maiti",

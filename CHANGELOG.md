@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.1.0] - 2026-10-30
+
+A language-agnostic engine with opt-in packs. Nothing is on by default and existing installs behave as before. See [docs/packs.md](docs/packs.md) and [decision 0002](docs/decisions/0002-packs.md).
+
+### Added
+- Pack contract: `scripts/guardrails-packs.mjs` declares every tool (switch file, covered files, stage, command, parser). The engine in `scripts/guardrails.mjs` runs any external command, so non-Node tools need no engine changes.
+- Metric ratchets in `guardrails.baseline.json` (`metrics`), for numbers that may only move one way: duplication (down), coverage floors (up).
+- `guardrails.mjs packs`: detected stacks and which tools are on.
+- Core pack: ast-grep, ls-lint, cspell with `flagWords`, jscpd, markdownlint-cli2, lychee, editorconfig-checker, actionlint.
+- Packs: python (ruff, pyright, tach, deptry, vulture, pytest coverage floor, via uv), mule (mule-lint, Mule XML format check, properties secrets, MUnit through Maven), salesforce (Code Analyzer, prettier-apex, metadata checks, Apex coverage floor, via sf), shell, docker, sql, rust, dart and flutter, cpp and PlatformIO.
+- `setup-guardrails` detects stacks from manifests and offers packs in Wave 8; `guardrails-doctor` reports pack drift.
+- `scripts/pack-harness.mjs` and `scripts/packs-*-test.mjs`: unit tests per pack against fake tool output (no installs, no network). Run in CI.
+
+### Changed
+- The TypeScript tools (Oxlint, dependency-cruiser, Knip, disable check) are declared as the `ts` pack and switch on with `.oxlintrc.json`, `.dependency-cruiser.*` and `knip.json`. A repo without Node (Python, Mule, Rust) no longer needs Oxlint installed.
+- `guardrails.mjs` works without a `package.json`.
+- A tool that exits non-zero with output the engine cannot parse now fails the gate instead of reporting clean.
+
 ## [3.0.0] - 2026-10-28
 
 A redesign. TypeScript 7 has no API and ESLint 9 is end of life, so the engine changed. See [docs/migrating-from-v2.md](docs/migrating-from-v2.md) and [decision 0001](docs/decisions/0001-engine.md).

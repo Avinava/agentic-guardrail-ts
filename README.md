@@ -12,7 +12,7 @@
   <strong>Tool-enforced guardrails for AI coding agents in TypeScript projects.</strong>
 </p>
 
-Agent skills that set up a lint, architecture, dead-code, test and secret gate in your TypeScript project, then wire that gate into the agent's own edit loop, your git hooks and CI.
+Agent skills that set up a lint, architecture, dead-code, test and secret gate in your TypeScript project, then wire that gate into the agent's own edit loop, your git hooks and CI. The same gate extends, opt-in, to Python, Mule, Salesforce, shell, Docker, SQL, Rust, Dart and C++ (see [Packs](#packs)).
 
 ## Why
 

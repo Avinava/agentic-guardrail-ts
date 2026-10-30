@@ -56,6 +56,10 @@ git commit -m "chore: adopt guardrails"
 
 The commit itself goes through the new hooks. That is the first real test.
 
+## Other stacks
+
+The gate is not TypeScript-only. Python, Mule, Salesforce, shell, Docker, SQL, Rust, Dart and C++ are opt-in [packs](./packs.md), and cspell, jscpd, ast-grep, ls-lint, markdownlint, lychee, editorconfig-checker and actionlint are opt-in core tools. Ask the agent to enable the ones you want; `node scripts/guardrails.mjs packs` shows what a repo has and what is on.
+
 ## Daily commands
 
 | Command | What it does |
@@ -64,6 +68,7 @@ The commit itself goes through the new hooks. That is the first real test.
 | `node scripts/guardrails.mjs check --changed` | The same, limited to files changed since `HEAD` |
 | `node scripts/guardrails.mjs verify` | The pre-push gate: format check, typecheck, lint, tests with coverage. CI adds a baseline-tightness check and secret scans |
 | `node scripts/guardrails.mjs baseline --tighten` | Lock in fixed findings and raise coverage floors |
+| `node scripts/guardrails.mjs packs` | Which stacks the repo has and which tools are on |
 
 Package scripts wrap these: `lint`, `lint:tighten`, `verify`, `typecheck`, `test:coverage`.
 

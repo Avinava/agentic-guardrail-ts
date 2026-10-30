@@ -16,7 +16,8 @@ This repo enforces its rules with tools, not reminders. Every gate runs through 
 - `node scripts/guardrails.mjs check`: lint, architecture, dead code and disable checks, compared to the baseline
 - `node scripts/guardrails.mjs check --changed`: the same for files you changed (Knip runs on full checks only)
 - `node scripts/guardrails.mjs verify`: the push gate (CI also checks the baseline is tight and scans for secrets)
-- `node scripts/guardrails.mjs baseline --tighten`: lock in improvements after you fix existing findings
+- `node scripts/guardrails.mjs baseline --tighten`: lock in improvements after you fix existing findings. It also moves ratcheted numbers (duplication, coverage) the right way only
+- `node scripts/guardrails.mjs packs`: which stacks this repo has and which tools are on
 
 ### Rules for agents
 

@@ -5,8 +5,10 @@ description: >
   Oxlint (type-aware), TypeScript 7 typecheck, dependency-cruiser architecture rules,
   Knip dead code, Vitest coverage floors, lefthook git hooks, gitleaks, commitlint, CI,
   and agent hooks that lint every edit. Existing debt is recorded in a ratchet baseline
-  so only new problems block. Use for "set up guardrails", "add linting/hooks for agents",
-  "harden this repo for AI coding", or upgrading a v2 guardrail setup.
+  so only new problems block. Opt-in packs extend the same gate to other stacks (Python, Mule,
+  Salesforce, shell, Docker, SQL, Rust, Dart, C++) and to docs, spelling, naming and duplication.
+  Use for "set up guardrails", "add linting/hooks for agents", "harden this repo for AI coding",
+  "add guardrails for Mule/Salesforce/Python", or upgrading a v2 guardrail setup.
 ---
 
 # Setup guardrails
@@ -29,6 +31,7 @@ skill's repo. Every config below is a template: fit it to the target, then write
 | Commit messages | commitlint | commit-msg, CI |
 | Dependency versions (monorepo) | syncpack | pre-push, CI |
 | Task orchestration (monorepo) | turbo | typecheck, build |
+| Opt-in packs: other stacks and cross-cutting checks | see Wave 8 and `docs/packs.md` | per tool: edit, commit, push |
 | Agent instructions and hooks | AGENTS.md, Claude Code and Codex hooks | every agent session |
 
 Everything runs through one generated script, `scripts/guardrails.mjs`. It works the same under
@@ -93,7 +96,15 @@ Read; don't change anything yet. Record each answer for the gap report.
      `ui/`.
    - Whether code uses `enum`, `namespace` or parameter properties. `erasableSyntaxOnly` rejects
      them, so leave the flag out if they are present.
-6. **Mode.**
+6. **Stacks and packs.** The engine is language-agnostic; each stack is a pack (`docs/packs.md`).
+   Look for manifests anywhere in the tree (a monorepo can match several): `pyproject.toml` or
+   `uv.lock` (python), `mule-artifact.json` or `src/main/mule/*.xml` (mule), `sfdx-project.json`
+   (salesforce), `*.sh` (shell), `Dockerfile*` or `*compose*.yml` (docker), `*.sql` (sql),
+   `Cargo.toml` (rust), `pubspec.yaml` (dart), `platformio.ini` or `.clang-format` (cpp),
+   `.github/workflows/` (actionlint). After Wave 1 installs the script, run `packs` on it
+   (`node scripts/guardrails.mjs packs`) to print the same detection and which tools are on. Packs beyond `ts` are opt-in: list the
+   detected ones in the gap report and enable only the ones the user picks.
+7. **Mode.**
    - It's **greenfield** if there is little or no code, or a quick look finds nothing a strict setup
      would flag.
    - Otherwise it's **retrofit**: don't try to make an existing codebase clean in one go. The
@@ -116,6 +127,7 @@ FILES  create: <list>   merge: <list>   unchanged: <list>
 DEPS   add: <list>   remove (only with your OK): <list>
 ARCHITECTURE  <proposed layers or tiers, lowest first>
 RULE CHOICES  filename case: <case>; max-params: 4 | off (DI); plugins: <list>
+PACKS         detected: <list>   propose: <list or "none">   (opt-in; Wave 8)
 AGENT FILES   AGENTS.md (create | append managed block), CLAUDE.md, .claude/settings.json, .codex/hooks.json
 
 Reply YES to apply, or name items to change or skip.
@@ -246,6 +258,42 @@ files instead of overwriting them:
 
 Follow the `guardrails-loop` skill, Part A. It writes `AGENTS.md`, `CLAUDE.md`,
 `.claude/settings.json` and `.codex/hooks.json`, and verifies the hooks.
+
+### Wave 8: Opt-in packs (only the ones the user chose)
+
+Nothing here is in the default install, and nothing changes an existing setup: a tool switches
+on when its config file exists, so enabling a pack is writing its files. For each chosen pack:
+
+1. Write the pack's templates (see Templates, Opt-in packs), fitted to the target.
+2. Merge the pack's `package.json` devDependencies, `lefthook.yml` job and `ci.yml` job.
+3. Install any tool that is not an npm package (the Pack table says which).
+4. Run `node scripts/guardrails.mjs packs` and confirm the pack's tools show as `on`.
+5. Run `node scripts/guardrails.mjs check`. On a retrofit, record the debt with
+   `baseline --init` (or `baseline --tighten` if a baseline already exists; it records new
+   metrics the first time and refuses to loosen anything), then show the per-rule totals.
+6. Add the npm tools to Knip `ignoreDependencies` (they run by binary).
+
+| Pack | Switch files | Fit to the target | Install |
+| --- | --- | --- | --- |
+| core: ast-grep | `sgconfig.yml`, `rules/` | Fill the `no-vocab-literal` regex from the values of the project's vocab module (an `as const` object or enum) and the banned-identifier list from its banned synonyms. Skip if there is no vocab module. | npm `@ast-grep/cli` |
+| core: ls-lint | `.ls-lint.yml` (single or monorepo) | Match the real source folders. Set no case for `.ts`, `.tsx`, `.js`, `.mjs`: Oxlint owns those. | npm `@ls-lint/ls-lint` |
+| core: cspell | `cspell.json`, `.cspell/` | Seed the dictionary from the first run, reviewing words. Put banned synonyms in `flagWords`. | npm `cspell` |
+| core: jscpd | `.jscpd.json` (single or monorepo) | Point `path` at real source folders. Full checks only. | npm `jscpd` |
+| core: docs | `.markdownlint-cli2.jsonc`, `lychee.toml` | Keep the Prettier-overlap rules off. Add the CI additions. | npm `markdownlint-cli2`; `lychee` binary |
+| core: hygiene | `.ecrc`, `.github/actionlint.yaml` | Install `actionlint.yaml` at `.github/actionlint.yaml`. | npm `editorconfig-checker`; `actionlint` binary |
+| python | `[tool.*]` tables in `pyproject.toml`, `tach.toml` | Set the package name and the tach modules from the real import graph. A TypeScript repo with a Python part works; `uv` required. | `uv`; tools in the dev group |
+| mule | `.mulelintrc.json`, `.ls-lint.yml` | Add the MUnit plugin snippet to `pom.xml` if missing. Check the profile with the owner. | npm `@sfdxy/mule-lint`; Maven |
+| salesforce | `code-analyzer.yml`, `.prettierrc`, `guardrails/apex-coverage.json` | Use `sf`, never `sfdx`. Confirm the target org with the user before writing `apex-coverage.json`; never production. | `sf` + `sf plugins install code-analyzer`; npm `prettier-plugin-apex`; Java |
+| shell | `.shellcheckrc` | Set `shell=` to the dialect used. | `shellcheck`, `shfmt` |
+| docker | `.hadolint.yaml` | Set trusted registries. | `hadolint`; `docker` |
+| sql | `.sqlfluff` | Set the dialect (and templater for dbt). | `sqlfluff` |
+| rust | `rustfmt.toml`, `clippy.toml`, `deny.toml` | Run `cargo deny init` for the full deny policy. Add the machete metadata table if wanted. | `cargo-deny`, `cargo-machete` |
+| dart | `analysis_options.yaml` | Use the project's lint package. | Dart or Flutter SDK |
+| cpp | `.clang-format`, `check_tool` in `platformio.ini` | Match the existing style. `pio check` downloads toolchains. | `clang-format`; PlatformIO |
+
+A monorepo with several stacks gets several packs; write each pack's files at the right folder
+only where the tool accepts a path (mule-lint and the Python tools find their projects by
+manifest; the others read config from the repo root).
 
 ## Phase 4: Verify and report
 
@@ -2717,6 +2765,878 @@ export default defineConfig({
     },
   },
 });
+```
+<!-- /tmpl -->
+
+### Opt-in packs
+
+Only written for the packs the user chose in Wave 8. Each file name below is the install path unless the surrounding text says otherwise; files in single and monorepo variants are labelled. `lefthook.yml` and `ci.yml` in a pack folder are fragments to merge into the project's own `lefthook.yml` and workflow. The `package.json` files list devDependencies to merge. Details: `docs/packs.md`.
+
+#### Core (any repo)
+
+<!-- tmpl:templates/packs/core/actionlint/actionlint.yaml -->
+```yaml
+# .github/actionlint.yaml: actionlint config. Its presence turns the check on (install the file
+# at .github/actionlint.yaml). actionlint is a Go binary on PATH (brew install actionlint).
+# Declare custom runner labels here so they are not reported as unknown.
+self-hosted-runner:
+  labels: []
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/core/ast-grep/rules/no-banned-identifier.yml -->
+```yaml
+# Example banned identifiers: vague names that hide intent. Replace the list with the
+# project's own banned synonyms (cspell flagWords covers the same words in comments and docs).
+id: no-banned-identifier
+language: TypeScript
+severity: error
+message: Name it for what it holds. This identifier is too vague.
+rule:
+  any:
+    - kind: identifier
+    - kind: property_identifier
+    - kind: type_identifier
+  regex: "^(data|info|stuff|thing|tmp|helper|manager)$"
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/core/ast-grep/rules/no-vocab-literal.yml -->
+```yaml
+# Bans a raw string equal to a member of the vocab module, outside that module.
+# The setup skill fills the alternation from the values in the project's vocab module
+# (an `as const` object or an enum). Keep it in sync: a new vocab value means a new entry here.
+id: no-vocab-literal
+language: TypeScript
+severity: error
+message: Use the vocab member (for example Status.Active), not the raw string. New values go in the vocab module.
+rule:
+  kind: string
+  regex: "^['\"](active|closed|pending)['\"]$"
+  not:
+    inside:
+      kind: import_statement
+ignores:
+  - "**/vocab/**"
+  - "**/*.test.ts"
+  - "**/*.test.tsx"
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/core/ast-grep/sgconfig.yml -->
+```yaml
+# sgconfig.yml: ast-grep project config. Custom structural rules only; Oxlint owns everything
+# it already has a rule for (see docs/known-conflicts.md).
+ruleDirs:
+  - rules
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/core/ci/extras.yml -->
+```yaml
+# Additions to the `verify` job in .github/workflows/ci.yml for the opt-in docs tools.
+# Hooks check local links offline. Setting GUARDRAILS_ONLINE makes CI check URLs too.
+# Duplication (jscpd) needs nothing here: `guardrails.mjs check` runs it on every full check.
+#
+# 1. Add to the job:
+#      env:
+#        GUARDRAILS_ONLINE: '1'
+#        LYCHEE_VERSION: 0.24.2
+#
+# 2. Add this step before "Verify":
+      - name: Install lychee
+        run: |
+          curl -sSfL "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/lychee-x86_64-unknown-linux-gnu.tar.gz" \
+            | sudo tar -xz --strip-components=1 -C /usr/local/bin lychee-x86_64-unknown-linux-gnu/lychee
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/core/cspell/.cspell/project-words.txt -->
+```
+acme
+kebabcase
+oxlint
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/core/cspell/cspell.json -->
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/streetsidesoftware/cspell/main/cspell.schema.json",
+  "version": "0.2",
+  "language": "en",
+  "dictionaryDefinitions": [
+    { "name": "project", "path": "./.cspell/project-words.txt", "addWords": true }
+  ],
+  "dictionaries": ["project"],
+  "flagWords": ["utilize", "leverage", "whitelist", "blacklist"],
+  "ignorePaths": [
+    "node_modules",
+    "dist",
+    "coverage",
+    "cspell.json",
+    ".cspell/**",
+    "*.lock",
+    "pnpm-lock.yaml",
+    "package-lock.json",
+    "guardrails.baseline.json"
+  ]
+}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/core/docs/.markdownlint-cli2.jsonc -->
+```jsonc
+{
+  // Prettier owns formatting, so every markdownlint rule that overlaps it or fights it is off.
+  "config": {
+    "default": true,
+    "MD013": false, // line length: Prettier does not wrap prose
+    "MD033": false, // inline HTML: badges, <details> and logos are allowed
+    "MD041": false, // first line heading: front matter and badges come first
+    "MD055": false, // table pipe style: Prettier formats tables
+    "MD060": false // table column style: Prettier aligns columns
+  },
+  "gitignore": true,
+  "ignores": ["node_modules", "CHANGELOG.md"]
+}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/core/docs/lychee.toml -->
+```toml
+# lychee.toml: link checker. Hooks run it with --offline (local links and anchors only).
+# CI runs it online (GUARDRAILS_ONLINE=1). Timeouts never fail the gate.
+include_fragments = "full"
+max_retries = 2
+timeout = 20
+accept = [200, 429]
+exclude_path = ["node_modules", "CHANGELOG.md"]
+exclude = ['^https?://localhost', '^https?://127\.0\.0\.1', '^https?://example\.']
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/core/editorconfig-checker/.ecrc -->
+```
+{
+  "Exclude": ["\\.lock$", "package-lock\\.json$", "pnpm-lock\\.yaml$", "guardrails\\.baseline\\.json$"]
+}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/core/jscpd/monorepo/.jscpd.json -->
+```json
+{
+  "path": ["packages", "apps"],
+  "format": ["typescript", "tsx", "javascript", "jsx"],
+  "minLines": 6,
+  "minTokens": 70,
+  "gitignore": true,
+  "ignore": ["**/*.test.ts", "**/*.test.tsx", "**/*.d.ts", "**/dist/**", "**/node_modules/**"]
+}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/core/jscpd/single/.jscpd.json -->
+```json
+{
+  "path": ["src"],
+  "format": ["typescript", "tsx", "javascript", "jsx"],
+  "minLines": 6,
+  "minTokens": 70,
+  "gitignore": true,
+  "ignore": ["**/*.test.ts", "**/*.test.tsx", "**/*.d.ts", "**/dist/**", "**/node_modules/**"]
+}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/core/lefthook.yml -->
+```yaml
+# lefthook additions for the opt-in docs tools. Merge into lefthook.yml under pre-commit.jobs.
+# The format job in the base file already runs Prettier on staged Markdown.
+pre-commit:
+  jobs:
+    - name: docs
+      glob: '*.{md,mdx}'
+      run: node scripts/guardrails.mjs check --files {staged_files}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/core/ls-lint/monorepo/.ls-lint.yml -->
+```yaml
+# .ls-lint.yml: folder and extension naming.
+# Split with Oxlint: unicorn/filename-case owns the casing of JS and TS file names, so no rule
+# here sets a case for .ts, .tsx, .js or .mjs. ls-lint owns folders, banned extensions, and the
+# non-code files Oxlint never sees.
+ls:
+  packages/*/src:
+    .dir: kebab-case | regex:\[[a-z0-9-]+\]
+    .spec.ts: exists:0
+    .spec.tsx: exists:0
+    .jsx: exists:0
+  apps/*/src:
+    .dir: kebab-case | regex:\[[a-z0-9-]+\]
+    .spec.ts: exists:0
+    .spec.tsx: exists:0
+    .jsx: exists:0
+  docs:
+    .dir: kebab-case
+    .md: kebab-case | regex:[A-Z]+
+ignore:
+  - .git
+  - node_modules
+  - dist
+  - coverage
+  - .turbo
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/core/ls-lint/single/.ls-lint.yml -->
+```yaml
+# .ls-lint.yml: folder and extension naming.
+# Split with Oxlint: unicorn/filename-case owns the casing of JS and TS file names, so no rule
+# here sets a case for .ts, .tsx, .js or .mjs. ls-lint owns folders, banned extensions, and the
+# non-code files Oxlint never sees.
+ls:
+  src:
+    .dir: kebab-case | regex:\[[a-z0-9-]+\] # [id] style route segments
+    .spec.ts: exists:0 # tests are *.test.ts
+    .spec.tsx: exists:0
+    .jsx: exists:0 # use .tsx
+  docs:
+    .dir: kebab-case
+    .md: kebab-case | regex:[A-Z]+ # kebab-case, or ALLCAPS like README
+ignore:
+  - .git
+  - node_modules
+  - dist
+  - coverage
+  - .turbo
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/core/package.json -->
+```json
+{
+  "devDependencies": {
+    "@ast-grep/cli": "^0.51.0",
+    "@ls-lint/ls-lint": "^2.3.2",
+    "cspell": "^10.4.0",
+    "editorconfig-checker": "^6.2.0",
+    "jscpd": "^5.4.2",
+    "markdownlint-cli2": "^0.24.0"
+  }
+}
+```
+<!-- /tmpl -->
+
+#### Python
+
+<!-- tmpl:templates/packs/python/ci.yml -->
+```yaml
+# Job to add to .github/workflows/ci.yml for the Python pack. Everything goes through uv run.
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      UV_LOCKED: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: Sync the locked environment
+        run: uv sync --locked
+      - name: Python guardrails (ruff, pyright, tach, deptry, vulture, coverage floor)
+        run: node scripts/guardrails.mjs check --strict-baseline
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/python/gitignore.txt -->
+```
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.tach/
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/python/lefthook.yml -->
+```yaml
+# lefthook additions for the Python pack. Merge under pre-commit.jobs in lefthook.yml.
+# ruff runs on staged Python files. tach, deptry and vulture are whole-project checks, so they
+# run on pre-push (through `verify`) and in CI, never per file.
+pre-commit:
+  jobs:
+    - name: python
+      glob: '*.py'
+      run: node scripts/guardrails.mjs check --files {staged_files}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/python/pyproject.toml -->
+```toml
+# pyproject.toml additions for the Python pack. Merge these tables into the project's own
+# pyproject.toml; keep the project's [project] table as it is. Replace `acme` with the package.
+# Every tool runs through `uv run`, so they live in the dev dependency group. Each [tool.*] table
+# below is also the switch that turns its tool on.
+
+[dependency-groups]
+dev = [
+  "ruff>=0.16",
+  "pyright>=1.1",
+  "tach>=0.35",
+  "deptry>=0.25",
+  "vulture>=2.16",
+  "pytest>=8",
+  "pytest-cov>=5",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src"]
+
+[tool.ruff.lint]
+# E/F pyflakes and pycodestyle, I imports, B bugbear, UP pyupgrade, S security, C90 complexity,
+# SIM simplify, ANN type annotations.
+select = ["E", "F", "I", "B", "UP", "S", "C90", "SIM", "ANN"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "ANN"] # assert and untyped fixtures are fine in tests
+
+[tool.pyright]
+include = ["src"]
+typeCheckingMode = "standard"
+pythonVersion = "3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+# Switches on the coverage floor (metric python-coverage, up only).
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.deptry]
+known_first_party = ["acme"]
+
+[tool.deptry.per_rule_ignores]
+# DEP002 = "declared but unused" for tools used by binary only, for example:
+# DEP002 = ["uvicorn"]
+
+[tool.vulture]
+paths = ["src"]
+min_confidence = 60
+exclude = ["tests/"]
+ignore_decorators = ["@app.get", "@app.post", "@pytest.fixture"]
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/python/tach.toml -->
+```toml
+# tach.toml: module boundaries, the Python counterpart of dependency-cruiser layers.
+# A module may import only the modules listed in its depends_on. Lowest layer first.
+# `exact = true` also fails when a declared dependency is unused.
+source_roots = ["src"]
+exact = true
+
+[[modules]]
+path = "acme.core"
+depends_on = []
+
+[[modules]]
+path = "acme.api"
+depends_on = ["acme.core"]
+```
+<!-- /tmpl -->
+
+#### Mule
+
+<!-- tmpl:templates/packs/mule/.ls-lint.yml -->
+```yaml
+# .ls-lint.yml for a Mule application: config and DataWeave file names.
+# Flow and sub-flow names are checked by mule-lint (MULE-002), not here.
+ls:
+  src/main/mule:
+    .xml: kebab-case
+    .dir: kebab-case
+  src/main/resources:
+    .dwl: kebab-case
+    .properties: kebab-case
+    .dir: kebab-case
+  src/test/munit:
+    .xml: kebab-case
+ignore:
+  - .git
+  - target
+  - node_modules
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/mule/.mulelintrc.json -->
+```json
+{
+  "extends": "mule-lint:recommended",
+  "rules": {
+    "MULE-002": {
+      "enabled": true,
+      "options": { "flowSuffix": "-flow", "subflowSuffix": "-subflow" }
+    }
+  },
+  "exclude": ["**/*.munit.xml"],
+  "failOnWarning": false
+}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/mule/ci.yml -->
+```yaml
+# Job to add to .github/workflows/ci.yml for the Mule pack. The MUnit coverage floor lives in
+# pom.xml (munit-maven-plugin coverage.requiredApplicationCoverage); a failed floor fails `mvn test`.
+  mule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - run: npm ci
+      - name: Mule guardrails (mule-lint, secrets in properties, MUnit and coverage)
+        run: node scripts/guardrails.mjs check --strict-baseline
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/mule/lefthook.yml -->
+```yaml
+# lefthook additions for the Mule pack. Merge under pre-commit.jobs in lefthook.yml.
+# mule-lint and the properties secret check run on staged files. The MUnit suite runs on
+# pre-push (through `verify`) and in CI, because it needs Maven and the full project.
+pre-commit:
+  jobs:
+    - name: mule
+      glob: '*.{xml,dwl,properties,yaml,yml}'
+      run: node scripts/guardrails.mjs check --files {staged_files}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/mule/package.json -->
+```json
+{
+  "devDependencies": {
+    "@sfdxy/mule-lint": "^2.3.0"
+  }
+}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/mule/pom-munit-snippet.xml -->
+```xml
+<!-- Add to the <build><plugins> of pom.xml. The floor is requiredApplicationCoverage. -->
+<plugin>
+  <groupId>com.mulesoft.munit.tools</groupId>
+  <artifactId>munit-maven-plugin</artifactId>
+  <version>${munit.version}</version>
+  <executions>
+    <execution>
+      <id>test</id>
+      <phase>test</phase>
+      <goals>
+        <goal>test</goal>
+        <goal>coverage-report</goal>
+      </goals>
+    </execution>
+  </executions>
+  <configuration>
+    <coverage>
+      <runCoverage>true</runCoverage>
+      <failBuild>true</failBuild>
+      <requiredApplicationCoverage>80</requiredApplicationCoverage>
+      <formats>
+        <format>console</format>
+      </formats>
+    </coverage>
+  </configuration>
+</plugin>
+```
+<!-- /tmpl -->
+
+#### Salesforce
+
+<!-- tmpl:templates/packs/salesforce/.prettierrc -->
+```
+{
+  "singleQuote": true,
+  "trailingComma": "none",
+  "printWidth": 100,
+  "plugins": ["prettier-plugin-apex"],
+  "overrides": [
+    { "files": "**/*.{cls,trigger,apex}", "options": { "parser": "apex" } },
+    { "files": "**/lwc/**/*.html", "options": { "parser": "lwc" } }
+  ]
+}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/salesforce/ci.yml -->
+```yaml
+# Job to add to .github/workflows/ci.yml for the Salesforce pack. Uses `sf`, never `sfdx`.
+# The Apex coverage floor needs an authenticated org: set SF_TARGET_ORG_AUTH_URL as a secret
+# (an SFDX auth URL for a scratch org or sandbox), and never point it at production.
+  salesforce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: npm ci
+      - run: npm install --global @salesforce/cli
+      - run: sf plugins install code-analyzer
+      - name: Authenticate the test org
+        run: |
+          echo "${SF_TARGET_ORG_AUTH_URL}" > "${RUNNER_TEMP}/org.url"
+          sf org login sfdx-url --sfdx-url-file "${RUNNER_TEMP}/org.url" --alias ci-scratch
+        env:
+          SF_TARGET_ORG_AUTH_URL: ${{ secrets.SF_TARGET_ORG_AUTH_URL }}
+      - name: Salesforce guardrails (Code Analyzer, format, metadata, Apex coverage floor)
+        run: node scripts/guardrails.mjs check --strict-baseline
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/salesforce/code-analyzer.yml -->
+```yaml
+# code-analyzer.yml: Salesforce Code Analyzer config (sf code-analyzer). Its presence switches on
+# the Salesforce pack. Engines: PMD for Apex, ESLint for LWC, retire-js, regex.
+# Reference: run `sf code-analyzer config` to print every option with its default.
+log_level: 3
+rules:
+  pmd:
+    ApexSharingViolations:
+      severity: 2
+engines:
+  eslint:
+    auto_discover_eslint_config: true
+ignores:
+  files:
+    - '**/node_modules/**'
+    - '**/*.test.js'
+    - '**/__tests__/**'
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/salesforce/guardrails/apex-coverage.json -->
+```json
+{
+  "targetOrg": "ci-scratch",
+  "testLevel": "RunLocalTests",
+  "waitMinutes": 60
+}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/salesforce/lefthook.yml -->
+```yaml
+# lefthook additions for the Salesforce pack. Merge under pre-commit.jobs in lefthook.yml.
+# Code Analyzer takes about ten seconds, so it runs once per commit on the staged files and
+# never in the edit hook. The Apex coverage floor needs an org, so it runs in CI only.
+pre-commit:
+  jobs:
+    - name: salesforce
+      glob: '*.{cls,trigger,apex,js,html,cmp,xml}'
+      run: node scripts/guardrails.mjs check --files {staged_files}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/salesforce/package.json -->
+```json
+{
+  "devDependencies": {
+    "prettier": "^3.9.10",
+    "prettier-plugin-apex": "^2.2.6"
+  }
+}
+```
+<!-- /tmpl -->
+
+#### Shell
+
+<!-- tmpl:templates/packs/shell/.shellcheckrc -->
+```
+# .shellcheckrc: shellcheck config. Its presence switches on the shell pack (shellcheck, shfmt).
+# Every disable needs a reason on the line above, for example:
+#   # shellcheck disable=SC2034 -- exported for the sourced file, see docs/adr/0007.md
+shell=bash
+external-sources=true
+enable=require-variable-braces
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/shell/lefthook.yml -->
+```yaml
+# lefthook additions for the shell pack. Merge under pre-commit.jobs in lefthook.yml.
+pre-commit:
+  jobs:
+    - name: shell
+      glob: '*.{sh,bash}'
+      run: node scripts/guardrails.mjs check --files {staged_files}
+```
+<!-- /tmpl -->
+
+#### Docker
+
+<!-- tmpl:templates/packs/docker/.hadolint.yaml -->
+```yaml
+# .hadolint.yaml: hadolint config. Its presence switches on the Docker pack (hadolint, plus
+# `docker compose config` validation of compose files).
+failure-threshold: warning
+trustedRegistries:
+  - docker.io
+  - ghcr.io
+ignored: []
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/docker/lefthook.yml -->
+```yaml
+# lefthook additions for the Docker pack. Merge under pre-commit.jobs in lefthook.yml.
+pre-commit:
+  jobs:
+    - name: docker
+      glob: '{Dockerfile*,*.Dockerfile,*compose*.yml,*compose*.yaml}'
+      run: node scripts/guardrails.mjs check --files {staged_files}
+```
+<!-- /tmpl -->
+
+#### SQL
+
+<!-- tmpl:templates/packs/sql/.sqlfluff -->
+```
+# .sqlfluff: sqlfluff config. Its presence switches on the SQL pack. Set the dialect to the
+# database in use (ansi, postgres, mysql, tsql, bigquery, snowflake, sqlite, ...).
+[sqlfluff]
+dialect = postgres
+max_line_length = 100
+exclude_rules = LT05
+
+[sqlfluff:rules:capitalisation.keywords]
+capitalisation_policy = upper
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/sql/lefthook.yml -->
+```yaml
+# lefthook additions for the SQL pack. Merge under pre-commit.jobs in lefthook.yml.
+pre-commit:
+  jobs:
+    - name: sql
+      glob: '*.sql'
+      run: node scripts/guardrails.mjs check --files {staged_files}
+```
+<!-- /tmpl -->
+
+#### Rust
+
+<!-- tmpl:templates/packs/rust/Cargo-machete-snippet.toml -->
+```toml
+# Add to Cargo.toml to switch on `cargo machete` (unused dependencies). Ignore crates that are
+# used only through macros or build scripts, naming the reason in a comment.
+[package.metadata.cargo-machete]
+ignored = []
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/rust/ci.yml -->
+```yaml
+# Job to add to .github/workflows/ci.yml for the Rust pack. cargo-deny and cargo-machete are
+# installed with cargo install --locked (cache ~/.cargo/bin in a real pipeline).
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - run: cargo install --locked cargo-deny cargo-machete
+      - name: Rust guardrails (fmt, clippy, deny, machete)
+        run: node scripts/guardrails.mjs check --strict-baseline
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/rust/clippy.toml -->
+```toml
+# clippy.toml: its presence switches on `cargo clippy -- -D warnings`.
+cognitive-complexity-threshold = 15
+too-many-arguments-threshold = 5
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/rust/deny.toml -->
+```toml
+# deny.toml: its presence switches on `cargo deny check` (advisories, licenses, bans, sources).
+# Create the full file with `cargo deny init`, then keep these minimum policies.
+[advisories]
+version = 2
+
+[licenses]
+version = 2
+allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "ISC", "Unicode-3.0"]
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/rust/lefthook.yml -->
+```yaml
+# lefthook additions for the Rust pack. Merge under pre-commit.jobs in lefthook.yml.
+# cargo fmt runs on staged files; clippy, deny and machete are whole-crate checks for pre-push.
+pre-commit:
+  jobs:
+    - name: rust
+      glob: '*.rs'
+      run: node scripts/guardrails.mjs check --files {staged_files}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/rust/rustfmt.toml -->
+```toml
+# rustfmt.toml: its presence switches on `cargo fmt --check`.
+edition = "2024"
+max_width = 100
+```
+<!-- /tmpl -->
+
+#### Dart and Flutter
+
+<!-- tmpl:templates/packs/dart/analysis_options.yaml -->
+```yaml
+# analysis_options.yaml: its presence switches on the Dart pack (dart format, dart/flutter
+# analyze, and the Flutter coverage floor).
+include: package:flutter_lints/flutter.yaml
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+  errors:
+    missing_required_param: error
+    missing_return: error
+linter:
+  rules:
+    - avoid_print
+    - prefer_const_constructors
+    - require_trailing_commas
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/dart/ci.yml -->
+```yaml
+# Job to add to .github/workflows/ci.yml for the Dart or Flutter pack.
+  flutter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: Dart guardrails (format, analyze, coverage floor)
+        run: node scripts/guardrails.mjs check --strict-baseline
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/dart/lefthook.yml -->
+```yaml
+# lefthook additions for the Dart pack. Merge under pre-commit.jobs in lefthook.yml.
+pre-commit:
+  jobs:
+    - name: dart
+      glob: '*.dart'
+      run: node scripts/guardrails.mjs check --files {staged_files}
+```
+<!-- /tmpl -->
+
+#### C++ and PlatformIO
+
+<!-- tmpl:templates/packs/cpp/.clang-format -->
+```
+# .clang-format: its presence switches on `clang-format --dry-run --Werror` for C and C++.
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 100
+SortIncludes: CaseSensitive
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/cpp/ci.yml -->
+```yaml
+# Job to add to .github/workflows/ci.yml for the C++ and PlatformIO pack.
+  firmware:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - run: pipx install platformio && sudo apt-get install -y clang-format
+      - name: Firmware guardrails (clang-format, pio check)
+        run: node scripts/guardrails.mjs check --strict-baseline
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/cpp/lefthook.yml -->
+```yaml
+# lefthook additions for the C++ pack. Merge under pre-commit.jobs in lefthook.yml.
+pre-commit:
+  jobs:
+    - name: cpp
+      glob: '*.{c,cc,cpp,cxx,h,hh,hpp,ino}'
+      run: node scripts/guardrails.mjs check --files {staged_files}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/cpp/platformio-check.ini -->
+```ini
+; Add to platformio.ini to switch on `pio check` (a static analyser run, pre-push and CI only).
+; check_tool is cppcheck or clangtidy. Defects at or above check_severity are findings.
+[env]
+check_tool = cppcheck
+check_severity = medium, high
+check_flags =
+  cppcheck: --std=c++17
 ```
 <!-- /tmpl -->
 

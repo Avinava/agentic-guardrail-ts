@@ -26,6 +26,8 @@ const LANG = {
   '.md': 'markdown',
   '.toml': 'toml',
   '.jsonc': 'jsonc',
+  '.xml': 'xml',
+  '.ini': 'ini',
 };
 
 function fence(path) {

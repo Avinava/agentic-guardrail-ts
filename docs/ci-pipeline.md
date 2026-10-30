@@ -11,6 +11,8 @@ The template `.github/workflows/ci.yml` runs the same gate as `git push`, so a g
 5. `node scripts/guardrails.mjs check --strict-baseline`: fails if findings were fixed but `baseline --tighten` was not committed. This keeps the baseline honest.
 6. On pull requests, commitlint over the PR's commit range.
 
+If you enabled packs, their CI jobs come from the pack folders (`templates/packs/<pack>/ci.yml`). Set `GUARDRAILS_ONLINE=1` to make lychee check URLs, and `UV_LOCKED=1` for the Python tools. Ratcheted numbers (duplication, coverage floors) are checked by the same `check --strict-baseline` step. See [Packs](./packs.md).
+
 ## secrets
 
 Installs a pinned gitleaks release and scans the full git history with `--redact`. Pre-commit only sees staged changes; this catches anything that got past it.

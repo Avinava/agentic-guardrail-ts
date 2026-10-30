@@ -45,8 +45,13 @@ you to apply the suggested wave.
 
 ### 3. Config drift
 
-- **`scripts/guardrails.mjs`** should match the template byte for byte. Any difference is drift,
-  because the file is managed and should never be hand-edited. Show the diff summary.
+- **`scripts/guardrails.mjs` and `scripts/guardrails-packs.mjs`** should match the templates byte
+  for byte. Any difference is drift, because the files are managed and should never be
+  hand-edited. Show the diff summary. A repo with only `guardrails.mjs` predates packs: offer the
+  upgrade (both files), which changes nothing until a pack's config file is added.
+- **Packs.** Run `node scripts/guardrails.mjs packs`. Report stacks that are detected but have no
+  tool on (for example `mule: detected` with every tool `off`) as an offer, not a defect: packs
+  are opt-in. Report a tool that is `on` but whose binary is missing.
 - **Other configs** may be tailored on purpose. Report only what is missing:
   - `.oxlintrc.json` without `typescript/no-floating-promises` or `unicorn/no-abusive-eslint-disable`
   - `lefthook.yml` without the `guardrails`, `secrets` or `commitlint` jobs
