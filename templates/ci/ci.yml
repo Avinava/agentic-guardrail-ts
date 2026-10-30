@@ -20,10 +20,11 @@ jobs:
     timeout-minutes: 15
     env:
       # This job runs every enabled pack's cheap checks (as in v3), so install the tools of every pack
-      # you enabled (shellcheck, uv, cargo, ...); each pack's ci.yml job has the install steps. The expensive ci-stage tools (test suites, org
-      # runs) are not run here: each pack's own job (templates/packs/*/ci.yml) runs them once, with
-      # its toolchain. `guardrails.mjs check --strict-baseline` fails if an enabled pack with such
-      # tools has no job. Remove this line only if this single job runs everything.
+      # you enabled (shellcheck, uv, cargo, ...); each pack's ci.yml job has the install steps. The
+      # expensive ci-stage tools (test suites, org runs) are not run here: each pack's own job
+      # (templates/packs/*/ci.yml) runs them once, with its toolchain. Nothing enforces that a pack
+      # has such a job; the gate prints `deferred:` or `ci-stage tools left to other jobs` when they
+      # do not run here. Remove this line only if this single job runs everything.
       GUARDRAILS_CI_PACKS: none
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -58,13 +59,17 @@ jobs:
     timeout-minutes: 5
     env:
       GITLEAKS_VERSION: 8.30.1
+      # sha256 of gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz, from the release's checksums file.
+      # Update both together.
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Install gitleaks
         run: |
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin gitleaks
+          curl -sSfL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum --check --strict
+          sudo tar -xz -C /usr/local/bin -f gitleaks.tar.gz gitleaks
       - name: Scan history
         run: gitleaks git --redact --no-banner --log-opts="--all"

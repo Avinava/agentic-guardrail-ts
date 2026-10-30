@@ -1,9 +1,22 @@
 # Job to add to .github/workflows/ci.yml for the Salesforce pack. Uses `sf`, never `sfdx`.
-# The Apex coverage floor needs an authenticated org: set SF_TARGET_ORG_AUTH_URL as a secret
+# The apex-coverage tool needs an authenticated org: set SF_TARGET_ORG_AUTH_URL as a secret
 # (an SFDX auth URL for a scratch org or sandbox), and never point it at production.
+#
+# apex-coverage runs the tests of the org's DEPLOYED code, not this checkout. Read it as "org
+# health and deployed-code coverage", not as proof that this revision is correct. To test this
+# revision, deploy it to a scratch org first (sf project deploy start) and point targetOrg at it.
+#
+# Fork pull requests do not receive secrets, so the job is skipped for them (it must not fail or
+# run unauthenticated). If you require this check in branch protection, remember that a skipped
+# job counts as passed: do not rely on it to gate fork PRs.
   salesforce:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # Pinned: bump deliberately, with the changelog of each in hand.
+      SF_CLI_VERSION: 2.152.14
+      SF_CODE_ANALYZER_VERSION: 5.14.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -14,8 +27,8 @@
           distribution: temurin
           java-version: '17'
       - run: npm ci
-      - run: npm install --global @salesforce/cli
-      - run: sf plugins install code-analyzer
+      - run: npm install --global "@salesforce/cli@${SF_CLI_VERSION}"
+      - run: sf plugins install "code-analyzer@${SF_CODE_ANALYZER_VERSION}"
       - name: Authenticate the test org
         run: |
           echo "${SF_TARGET_ORG_AUTH_URL}" > "${RUNNER_TEMP}/org.url"

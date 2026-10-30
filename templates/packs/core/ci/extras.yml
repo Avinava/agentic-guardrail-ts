@@ -6,9 +6,12 @@
 #      env:
 #        GUARDRAILS_ONLINE: '1'
 #        LYCHEE_VERSION: 0.24.2
+#        # sha256 of lychee-x86_64-unknown-linux-gnu.tar.gz, from the release's .sha256 file.
+#        LYCHEE_SHA256: 1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a
 #
 # 2. Add this step before "Verify":
       - name: Install lychee
         run: |
-          curl -sSfL "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/lychee-x86_64-unknown-linux-gnu.tar.gz" \
-            | sudo tar -xz --strip-components=1 -C /usr/local/bin lychee-x86_64-unknown-linux-gnu/lychee
+          curl -sSfL -o lychee.tar.gz "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/lychee-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${LYCHEE_SHA256}  lychee.tar.gz" | sha256sum --check --strict
+          sudo tar -xz --strip-components=1 -C /usr/local/bin -f lychee.tar.gz lychee-x86_64-unknown-linux-gnu/lychee

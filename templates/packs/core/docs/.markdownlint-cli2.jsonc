@@ -1,12 +1,31 @@
 {
-  // Prettier owns formatting, so every markdownlint rule that overlaps it or fights it is off.
+  // An allowlist of structural rules only: headings, lists, code fences and links. Prettier owns
+  // formatting (line length, spacing, table style, emphasis, list markers), so none of those rules
+  // are on. Adding a rule here is a decision; do not switch "default" back on.
   "config": {
-    "default": true,
-    "MD013": false, // line length: Prettier does not wrap prose
-    "MD033": false, // inline HTML: badges, <details> and logos are allowed
-    "MD041": false, // first line heading: front matter and badges come first
-    "MD055": false, // table pipe style: Prettier formats tables
-    "MD060": false // table column style: Prettier aligns columns
+    "default": false,
+    // headings
+    "MD001": true, // heading levels increment by one
+    "MD003": { "style": "atx" },
+    "MD018": true, // space after # on atx headings
+    "MD022": true, // blank lines around headings
+    "MD024": { "siblings_only": true }, // no duplicate sibling headings
+    "MD025": true, // one top-level heading
+    // lists
+    "MD032": true, // blank lines around lists
+    // code fences
+    "MD031": true, // blank lines around fences
+    "MD040": true, // fences name a language
+    // links
+    "MD011": true, // reversed link syntax
+    "MD039": true, // no spaces inside link text
+    "MD042": true, // no empty links
+    "MD045": true, // images have alt text
+    "MD051": true, // link fragments point at a heading
+    "MD052": true, // reference links are defined
+    "MD053": true, // reference definitions are used
+    // tables
+    "MD056": true // table column count
   },
   "gitignore": true,
   "ignores": ["node_modules", "CHANGELOG.md"]
