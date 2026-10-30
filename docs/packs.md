@@ -9,7 +9,7 @@ Everything beyond the original TypeScript stack is **opt-in**. A tool switches o
 | Pack | Detect rule | Tools | Default |
 | --- | --- | --- | --- |
 | `core` | every repo | cspell, jscpd, ast-grep, ls-lint, markdownlint-cli2, lychee, editorconfig-checker, actionlint (gitleaks, lefthook, commitlint are installed by the base setup) | opt-in per tool |
-| `ts` | `package.json`, `tsconfig*.json` | Oxlint, dependency-cruiser, Knip, disable check, Prettier, Vitest floors | on in every v3 install (switched on by `.oxlintrc.json`, `.dependency-cruiser.mjs`, `knip.json`) |
+| `ts` | `package.json`, `tsconfig*.json` | Oxlint, dependency-cruiser, Knip, disable check, Prettier, Vitest floors | on in every v3 install (see [ts](#ts)) |
 | `python` | `pyproject.toml`, `uv.lock` | ruff (lint, format), pyright, tach, deptry, vulture, pytest coverage floor | opt-in |
 | `mule` | `mule-artifact.json`, `src/main/mule/*.xml` | mule-lint, Mule XML format check, properties secrets, MUnit through Maven | opt-in |
 | `salesforce` | `sfdx-project.json`, `*.cls`, `*.trigger` | Code Analyzer (PMD, ESLint, retire-js), prettier-apex, metadata checks, Apex coverage floor | opt-in |
@@ -34,13 +34,16 @@ A tool declares:
 | `optIn` | The config files that switch the tool on. A string is a file that must exist. `{ file, has }` also needs the pattern in the file (for example `[tool.ruff]` in `pyproject.toml`). |
 | `exts` | Files the tool covers. The hooks use it to run only the tools whose files changed. |
 | `track` | File types to start tracking when the tool is on (cspell adds Markdown). |
-| `stages` | Where it runs. `edit`: the post-edit hook. `commit`: pre-commit, `check --files`, `check --changed` and the stop hook. `push`: the full check, which is pre-push (through `verify`) and CI. |
+| `stages` | Where it runs. `edit`: the post-edit hook. `commit`: pre-commit, `check --files`, `check --changed` and the stop hook. `push`: the full check, which is pre-push (through `verify`) and CI. `ci`: a full check run with `GUARDRAILS_CI=1`, which only the CI step sets. Expensive tools (test suites, org runs, toolchain downloads) use `ci`, so they run once in CI and never on pre-push. |
 | `whole` | Run on the whole project even in a scoped run; findings are then filtered to the files in scope. For tree-wide tools. |
 | `perFile` | One command per file. |
-| `ok` | Exit codes that mean the tool ran. Anything else is a tool failure and blocks, never a silent pass. Default `[0, 1]`. |
+| `ok` | Exit codes that mean the tool ran. Anything else is a tool failure and blocks, never a silent pass. Default `[0, 1]`. A tool whose JSON report is authoritative (Oxlint, dependency-cruiser, Knip) accepts every exit code, as v3 did, and fails only if the report does not parse. |
+| `quiet` | Non-zero exits that may legitimately print no finding. Any other non-zero exit with nothing parsed fails (`output it could not read`), for `run` tools and, through `h.settle`, for `scan` tools. |
 | `run(ctx)` and `parse(out, ctx)` | The exact command, and how its output becomes `{ rule, file, line, message }`. |
-| `scan(ctx)` | Replaces `run` and `parse` for checks done in JS (naming, metadata). |
+| `scan(ctx)` | Replaces `run` and `parse` for checks done in JS (naming, metadata, tools run in a loop). A finding may set `always: true` for "this whole tool failed" (a test run, a policy, an invalid file): it is never counted in the baseline, so `baseline` refuses to run while one exists and a later failure of the same kind still fails. |
 | `metric`, `measure(ctx)` | A number ratchet instead of findings. |
+
+A file name that starts with `-` (for example `--config=x.md`) is passed to tools as `./--config=x.md`, so no tool can read it as an option.
 
 Non-Node tools need nothing special: `run` returns `{ cmd: 'shellcheck', args: [...] }`. Python tools return `{ cmd: 'uv', args: ['run', 'ruff', ...] }`.
 
@@ -51,8 +54,11 @@ Some things are a ratio, not a count per file. Duplication, test coverage and Ap
 - `check` (full only) fails if the number moves the wrong way.
 - `check --strict-baseline` also fails if it moved the right way, so the win must be committed.
 - `baseline --tighten` moves it the right way only, and records it the first time the tool is enabled (adding its config file is itself a reviewed change).
+- A reading must be a finite number. A missing or non-numeric one (a renamed report field) fails the run; it can never become `null` in the baseline.
+- A metric stored in the baseline that nothing measured this run (its tool config was removed, or it returned nothing) fails the check instead of being skipped, and `--tighten` carries it over unchanged. Only a human `baseline --reset` drops it. A metric whose tool is merely deferred to CI is left alone locally.
+- Metrics from `ci` tools (coverage floors) are measured only with `GUARDRAILS_CI=1`. Record them with `GUARDRAILS_CI=1 node scripts/guardrails.mjs baseline --tighten`.
 
-Metrics run at the `push` stage only, never in hooks, because they scan the whole project or run the test suite.
+Metrics run on full checks only, never in hooks, because they scan the whole project or run the test suite.
 
 ### Adding a stack
 
@@ -88,7 +94,7 @@ Language-agnostic tools. Templates: `templates/packs/core/`. Each switches on wi
 
 **markdownlint-cli2** (npm `markdownlint-cli2`). Prettier owns Markdown formatting, so the template turns off the rules that overlap or fight it: MD013 (line length), MD033 (inline HTML), MD041 (first line heading), MD055 and MD060 (table pipe and column style). MD056 (table column count) stays on because it catches broken tables, which Prettier does not.
 
-**lychee** (Rust binary on PATH: `brew install lychee`). Runs `--offline` (local links and anchors) everywhere except CI. `GUARDRAILS_ONLINE=1`, set by the CI snippet, also checks URLs. Timeouts are not findings, so a slow host cannot fail the gate.
+**lychee** (Rust binary on PATH: `brew install lychee`). Runs `--offline` (local links and anchors) everywhere except CI. `GUARDRAILS_ONLINE=1`, set by the CI snippet, also checks URLs. Exit 2 is lychee's "links failed" and maps to findings; exit 1 (runtime or config error) fails the gate, as does a report with no `error_map` or exit 2 with no failed link and no timeout (the format changed). Timeouts alone are not findings, so a slow host cannot fail the gate.
 
 **editorconfig-checker** (npm `editorconfig-checker`, a downloaded Go binary). Enforces `.editorconfig` (final newline, indent style, trailing whitespace) on every tracked file type the gate watches.
 
@@ -96,7 +102,7 @@ Language-agnostic tools. Templates: `templates/packs/core/`. Each switches on wi
 
 ## ts
 
-The original stack, described in the [Tool reference](./tool-reference.md): Oxlint, dependency-cruiser, Knip, the disable check, Prettier, Vitest coverage floors. These tools are declared in the same registry and switch on with the config files every v3 install already has (`.oxlintrc.json`, `.dependency-cruiser.mjs`, `knip.json`), so they run exactly as before, and a repo without those files (a Mule or Python repo) does not need Oxlint installed. Prettier and Vitest run through the `format:check` and `test:coverage` package scripts that `verify` calls, not through the finding engine.
+The original stack, described in the [Tool reference](./tool-reference.md): Oxlint, dependency-cruiser, Knip, the disable check, Prettier, Vitest coverage floors. These tools are declared in the same registry and switch on with the config files every v3 install already has (`.oxlintrc.json`, `.dependency-cruiser.mjs`, `knip.json`), so they run exactly as before, and a repo without those files (a Mule or Python repo) does not need Oxlint installed. To keep v3 behaviour, Oxlint is also on when `oxlint` is a dependency in `package.json` or any Oxlint config name exists (`.oxlintrc.json`, `.oxlintrc.jsonc`, `oxlint.config.ts`), and Knip when `knip` is a dependency or any Knip config exists (`knip.json`, `knip.jsonc`, `.knip.json`, `.knip.jsonc`, `knip.ts`, `knip.js`, `knip.config.ts`). dependency-cruiser exits with the number of errors, so every exit code is accepted as long as its JSON report parses. Prettier and Vitest run through the `format:check` and `test:coverage` package scripts that `verify` calls, not through the finding engine.
 
 ## python
 
@@ -110,7 +116,7 @@ Templates: `templates/packs/python/`. Needs `uv`; every tool runs as `uv run <to
 | tach | `tach.toml` | `tach:UndeclaredDependency\|file` | push |
 | deptry | `[tool.deptry]` | `deptry:DEP001\|file` | push |
 | vulture | `[tool.vulture]` | `vulture:unused-function\|file` | push |
-| pytest coverage | `[tool.coverage.*]` | metric `python-coverage` (up) | push |
+| pytest coverage | `[tool.coverage.*]` | metric `python-coverage` (up) | ci |
 
 pyright is the type checker; mypy is not wired. tach (module boundaries) is the Python counterpart of dependency-cruiser, deptry of Knip's dependency checks, vulture of dead-code detection. Whole-project tools run on full checks because a file-scoped run misses usages elsewhere. The coverage floor needs `pytest-cov` in the dev group.
 
@@ -123,7 +129,7 @@ Templates: `templates/packs/mule/`. For MuleSoft applications (a `mule-artifact.
 | mule-lint | `.mulelintrc.json` | `mule-lint:<rule-id>\|file` | edit, commit, push |
 | mule-format | `.mulelintrc.json` | `mule-format:format\|file` | commit, push |
 | mule-secrets | `.mulelintrc.json` | `mule-secrets:plain-secret\|file` | edit, commit, push |
-| munit | `munit-maven-plugin` in `pom.xml` | `munit:tests-or-coverage-failed\|pom.xml` | push |
+| munit | `munit-maven-plugin` in `pom.xml` | `munit:tests-or-coverage-failed\|pom.xml` (never baselined) | ci |
 
 **mule-lint** is [`@sfdxy/mule-lint`](https://github.com/Avinava/mule-lint), run as `mule-lint <app> --config .mulelintrc.json --format json`. The profile and per-rule options live in the config (`extends: mule-lint:recommended`; mule-lint does not find the file on its own, so the engine always passes `--config`). Errors and warnings are findings; info findings are advisory and are not counted. Flow and sub-flow naming is rule `MULE-002`, so there is no separate naming check; file names are covered by the ls-lint template in this folder.
 
@@ -142,7 +148,7 @@ Templates: `templates/packs/salesforce/`. For Salesforce DX projects (`sfdx-proj
 | code-analyzer | `code-analyzer.yml` | `code-analyzer:<engine>.<rule>\|file` | commit, push |
 | prettier-apex | `.prettierrc` with `prettier-plugin-apex` | `prettier-apex:format\|file` | commit, push |
 | sf-metadata | `code-analyzer.yml` | `sf-metadata:missing-meta-xml\|file`, `stale-api-version` | commit, push |
-| apex-coverage | `guardrails/apex-coverage.json` | metric `apex-coverage` (up) | push |
+| apex-coverage | `guardrails/apex-coverage.json` | metric `apex-coverage` (up) | ci |
 
 **code-analyzer** is `sf code-analyzer run` (PMD for Apex, ESLint for LWC, retire-js, regex). The engine passes the staged files with `--target` and reads the results file it writes. It takes about ten seconds, so it is not in the edit hook. Rule selection and overrides live in `code-analyzer.yml`.
 
@@ -170,7 +176,7 @@ Templates: `templates/packs/docker/`. Both tools switch on with `.hadolint.yaml`
 | Tool | Findings | Stages |
 | --- | --- | --- |
 | hadolint | `hadolint:<DLxxxx or SCxxxx>\|Dockerfile` | commit, push |
-| compose-config | `compose-config:invalid\|compose file` | commit, push |
+| compose-config | `compose-config:invalid\|compose file` (never baselined) | commit, push |
 
 hadolint runs as `hadolint --format json` on `Dockerfile*` and `*.Dockerfile`. compose-config runs `docker compose -f <file> config --quiet` once per compose file, which validates the schema and variable interpolation and needs no running daemon. Install hadolint with `brew install hadolint` or a release binary; `docker` is already on CI runners.
 
@@ -192,7 +198,7 @@ Templates: `templates/packs/rust/`. Each tool has its own switch file.
 | --- | --- | --- | --- |
 | cargo fmt | `rustfmt.toml` | `cargo-fmt:format\|file` | commit, push |
 | clippy | `clippy.toml` | `clippy:<lint>\|file` | commit, push |
-| cargo-deny | `deny.toml` | `cargo-deny:policy\|deny.toml` | push |
+| cargo-deny | `deny.toml` | `cargo-deny:policy\|deny.toml` (never baselined) | push |
 | cargo-machete | `[package.metadata.cargo-machete]` in `Cargo.toml` | `cargo-machete:unused-dependency\|Cargo.toml` | push |
 
 cargo fmt runs `cargo fmt --check`. clippy runs `cargo clippy --all-targets --message-format json -- -D warnings`, so every warning is an error, keyed by lint name. A clippy run that cannot compile fails the gate instead of passing. cargo-deny runs `cargo deny check` and reports one finding for the whole policy, with the tool's output attached. cargo-machete lists unused dependencies.
@@ -205,7 +211,7 @@ Templates: `templates/packs/dart/`. Switched on by `analysis_options.yaml`.
 | --- | --- | --- |
 | dart-format | `dart-format:format\|file` | commit, push |
 | dart-analyze | `dart-analyze:<code>\|file` | commit, push |
-| flutter-coverage | metric `flutter-coverage` (up) | push |
+| flutter-coverage | metric `flutter-coverage` (up) | ci |
 
 dart-format runs `dart format --output=none --set-exit-if-changed`. dart-analyze runs `dart analyze --format=machine` in a plain Dart package and `flutter analyze --no-pub` when `pubspec.yaml` declares `sdk: flutter`. flutter-coverage runs `flutter test --coverage`, reads `coverage/lcov.info` and ratchets the line coverage upward; it does nothing in a non-Flutter package.
 
@@ -216,7 +222,7 @@ Templates: `templates/packs/cpp/`, for C and C++ including PlatformIO firmware.
 | Tool | Config (switch) | Findings | Stages |
 | --- | --- | --- | --- |
 | clang-format | `.clang-format` | `clang-format:format\|file` | commit, push |
-| pio-check | `check_tool` in `platformio.ini` | `pio-check:<tool>.<id>\|file` | push |
+| pio-check | `check_tool` in `platformio.ini` | `pio-check:<tool>.<id>\|file` | ci |
 
 clang-format runs `clang-format --dry-run --Werror`; each misformatted line is one finding. pio-check runs `pio check --skip-packages --json-output` with cppcheck or clang-tidy (`check_tool`). It downloads toolchains, so it is pre-push and CI only.
 

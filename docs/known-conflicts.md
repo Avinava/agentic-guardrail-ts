@@ -349,3 +349,35 @@ Tool interactions that surprise people, and what to do about them.
 **Why:** it downloads cppcheck or clang-tidy.
 
 **Resolution:** expected on the first run. It runs on pre-push and CI only. Cache `~/.platformio` in CI.
+
+## CI-only tools and the local baseline
+
+**Symptom:** `check --strict-baseline` in CI says `python-coverage is not recorded`, or a local `check` never mentions the Apex or Flutter coverage floor.
+
+**Why:** test suites, org runs and toolchain downloads (`pytest-cov`, `munit`, `apex-coverage`, `flutter-coverage`, `pio-check`) run only when `GUARDRAILS_CI=1`, which the CI step sets. A local pre-push does not run them. Their stored numbers are left alone locally.
+
+**Resolution:** record them once with `GUARDRAILS_CI=1 node scripts/guardrails.mjs baseline --tighten`. `baseline --reset` keeps CI-only metrics that it did not measure.
+
+## "cannot baseline while a tool is failing as a whole"
+
+**Symptom:** `baseline --init`, `--tighten` or `--reset` refuses to run and lists a finding such as `munit tests-or-coverage-failed`, `cargo-deny policy` or `compose-config invalid`.
+
+**Why:** these findings say a whole tool run failed (tests, a policy, an invalid file). A baseline would record the failure as debt and hide every later failure of the same kind.
+
+**Resolution:** fix the failure. There is no baseline for it.
+
+## A recorded metric that nothing measures
+
+**Symptom:** `duplication is recorded in the baseline but was not measured`.
+
+**Why:** the tool's config file was removed, or it no longer reports a number. Skipping it would let the number go unchecked.
+
+**Resolution:** restore the config. If the tool was removed on purpose, a human runs `baseline --reset` in a reviewed commit.
+
+## A file name that looks like an option
+
+**Symptom:** a file named `--config=x.md` appears in a tool's arguments as `./--config=x.md`.
+
+**Why:** the engine prefixes such names so no tool can read them as options.
+
+**Resolution:** none; this is intended.

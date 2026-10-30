@@ -17,6 +17,18 @@ A language-agnostic engine with opt-in packs. Nothing is on by default and exist
 - `setup-guardrails` detects stacks from manifests and offers packs in Wave 8; `guardrails-doctor` reports pack drift.
 - `scripts/pack-harness.mjs` and `scripts/packs-*-test.mjs`: unit tests per pack against fake tool output (no installs, no network). Run in CI.
 
+### Fixed (review of the pack engine)
+- Metric readings must be finite numbers; a missing reading fails instead of becoming `null` in the baseline. A stored metric that nothing measures fails the check, and `--tighten` carries it over.
+- `pytest` failures now fail the gate (a failing run still writes a coverage report).
+- Scan tools (mule-lint, mule-format) get the same "non-zero exit with nothing parsed is a failure" guard as run tools.
+- Whole-tool failures (`munit`, `cargo-deny`, invalid compose files) are never baselined, and `baseline` refuses while one exists.
+- lychee: only exit 2 maps to findings; exit 1, a report without `error_map`, or exit 2 with no failed link fail the gate.
+- v3 drift: Oxlint and Knip also switch on for every supported config name and for a `package.json` dependency; dependency-cruiser, Oxlint and Knip accept any exit code when their JSON report parses, as v3 did.
+- vulture: unused imports owned by ruff no longer turn exit 3 into "could not read".
+- Baseline keys split on the last `|`, so ls-lint regex rules containing `|` scope correctly.
+- File names starting with `-` are passed as `./name`, so they cannot be read as options.
+- Expensive tools (pytest, MUnit, Apex org run, Flutter tests, `pio check`) use the new `ci` stage: they run once, only with `GUARDRAILS_CI=1`, and never on pre-push.
+
 ### Changed
 - The TypeScript tools (Oxlint, dependency-cruiser, Knip, disable check) are declared as the `ts` pack and switch on with `.oxlintrc.json`, `.dependency-cruiser.*` and `knip.json`. A repo without Node (Python, Mule, Rust) no longer needs Oxlint installed.
 - `guardrails.mjs` works without a `package.json`.
