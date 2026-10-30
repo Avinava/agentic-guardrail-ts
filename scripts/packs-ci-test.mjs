@@ -26,6 +26,17 @@ const { PACKS } = await import(join(REPO, 'templates/shared/scripts/guardrails-p
 beforeEach(setup);
 afterEach(teardown);
 
+// A one-job workflow that runs guardrails.mjs; `env` lines go in the job's env block.
+const workflow = (jobs) => {
+  const body = Object.entries(jobs)
+    .map(
+      ([name, env]) =>
+        `  ${name}:\n    env:\n${env.map((e) => `      ${e}`).join('\n')}\n    steps:\n      - run: node scripts/guardrails.mjs check --strict-baseline`,
+    )
+    .join('\n');
+  put('.github/workflows/ci.yml', `name: CI\njobs:\n${body}\n`);
+};
+
 const coverage = (percent, status = 0) =>
   fake('pytest', {
     stdout: status === 0 ? '1 passed' : 'FAILED',
@@ -57,6 +68,7 @@ describe('the ci stage is never silently skipped', () => {
   });
 
   it('--strict-baseline fails while a ci tool is deferred', () => {
+    workflow({ python: ['GUARDRAILS_PACKS: python'] });
     ci(['baseline', '--init']);
     const r = g(['check', '--strict-baseline']);
     assert.equal(r.status, 1);
@@ -149,6 +161,7 @@ describe('pack selection', () => {
   });
 
   it('runs only the selected packs and says which it left to other jobs', () => {
+    workflow({ verify: ['GUARDRAILS_CI_PACKS: none'], core: ['GUARDRAILS_PACKS: core'] });
     put('sgconfig.yml', 'ruleDirs: []\n');
     put('.shellcheckrc', 'shell=bash\n');
     put('a.sh', '#!/bin/sh\n');
@@ -157,7 +170,7 @@ describe('pack selection', () => {
     const r = g(['check'], { GUARDRAILS_PACKS: 'core' });
     assert.equal(r.status, 0, r.out);
     assert.deepEqual(calls('shellcheck'), []);
-    assert.match(r.out, /packs left to other jobs \(GUARDRAILS_PACKS\): .*shell/);
+    assert.match(r.out, /pack shell is not run here \(GUARDRAILS_PACKS\): run by verify/);
   });
 
   it("does not report another job's baseline entries as stale", () => {
@@ -175,33 +188,179 @@ describe('pack selection', () => {
   });
 });
 
-// The workflow set a multi-stack repo gets: the base ci.yml plus each pack's ci.yml job.
-describe('CI templates', () => {
-  const packsOf = (text) => {
-    const m = /GUARDRAILS_PACKS:\s*([\w,\s]+)$/m.exec(text);
-    return m ? m[1].split(',').map((s) => s.trim()) : PACKS.map((p) => p.id);
-  };
-  const jobs = {
-    verify: readFileSync(join(REPO, 'templates/ci/ci.yml'), 'utf8').split('\n  secrets:')[0],
-  };
-  for (const pack of ['python', 'mule', 'salesforce', 'rust', 'dart', 'cpp']) {
-    jobs[pack] = readFileSync(join(REPO, `templates/packs/${pack}/ci.yml`), 'utf8');
-  }
+describe('strict mode checks that a CI job owns every ci-stage pack', () => {
+  beforeEach(() => {
+    put('pyproject.toml', '[tool.coverage.run]\nsource = ["src"]\n');
+    coverage(90);
+    ci(['baseline', '--init']);
+  });
 
-  it('every ci-stage tool is selected by exactly one job, never by the base job', () => {
-    const ciPacks = new Set(
-      PACKS.filter((p) => p.tools.some((t) => t.stages.includes('ci'))).map((p) => p.id),
+  it('a configured pack that no job selects fails, naming the pack', () => {
+    workflow({ verify: ['GUARDRAILS_CI_PACKS: none'] });
+    const r = ci(['check', '--strict-baseline']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /pack python has ci-stage tools \(pytest-cov\) but no CI job selects it/);
+  });
+
+  it('passes when exactly one job selects it', () => {
+    workflow({ verify: ['GUARDRAILS_CI_PACKS: none'], python: ['GUARDRAILS_PACKS: python'] });
+    assert.equal(ci(['check', '--strict-baseline']).status, 0);
+  });
+
+  it('fails when two jobs would run the same expensive tools', () => {
+    workflow({ a: ['GUARDRAILS_PACKS: python'], b: [] });
+    const r = ci(['check', '--strict-baseline']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /would run 2 times, in: a \(.*\), b \(/);
+  });
+
+  it('fails when there is no CI workflow at all', () => {
+    const r = ci(['check', '--strict-baseline']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /no CI job running guardrails\.mjs was found/);
+  });
+
+  it('reads GitLab jobs too', () => {
+    put(
+      '.gitlab-ci.yml',
+      'stages: [test]\nverify:\n  variables:\n    GUARDRAILS_CI_PACKS: none\n  script:\n    - node scripts/guardrails.mjs check\npython:\n  variables:\n    GUARDRAILS_PACKS: python\n  script:\n    - node scripts/guardrails.mjs check --strict-baseline\n',
     );
-    assert.ok(ciPacks.size >= 5);
-    const selected = Object.fromEntries(
-      Object.entries(jobs).map(([name, text]) => [name, packsOf(text)]),
+    assert.equal(ci(['check', '--strict-baseline']).status, 0);
+  });
+
+  it('ci-jobs prints the same verdict', () => {
+    workflow({ verify: ['GUARDRAILS_CI_PACKS: none'] });
+    assert.equal(g(['ci-jobs']).status, 1);
+    workflow({ verify: ['GUARDRAILS_CI_PACKS: none'], python: ['GUARDRAILS_PACKS: python'] });
+    assert.equal(g(['ci-jobs']).status, 0);
+  });
+});
+
+describe('selections that run nothing', () => {
+  it('an empty GUARDRAILS_PACKS is an error', () => {
+    assert.match(g(['check'], { GUARDRAILS_PACKS: ',' }).out, /GUARDRAILS_PACKS names no pack/);
+  });
+
+  it('under strict, a selected pack with no configured tool fails (its config was removed)', () => {
+    workflow({ python: ['GUARDRAILS_PACKS: python'] });
+    const r = ci(['check', '--strict-baseline'], { GUARDRAILS_PACKS: 'python' });
+    assert.equal(r.status, 1);
+    assert.match(r.out, /pack python is selected by GUARDRAILS_PACKS but has no configured tool/);
+  });
+
+  it('a pack left out of this job that no job runs fails under strict', () => {
+    put('.shellcheckrc', 'shell=bash\n');
+    put('a.sh', 'echo hi\n');
+    fake('shellcheck', { stdout: '{"comments":[]}' });
+    fake('shfmt', { stdout: '' });
+    workflow({ ts: ['GUARDRAILS_PACKS: ts'] });
+    const r = g(['check', '--strict-baseline'], { GUARDRAILS_PACKS: 'ts' });
+    assert.equal(r.status, 1);
+    assert.match(r.out, /pack shell is not run here.*no CI job selects it/);
+    assert.match(r.out, /pack shell is configured but no CI job runs it/);
+  });
+});
+
+describe('fix commands name the ci stage and pack', () => {
+  const pio = (defects) => fake('pio', { stdout: JSON.stringify([{ tool: 'cppcheck', defects }]) });
+  const defect = {
+    id: 'nullPointer',
+    severity: 'high',
+    file: 'src/main.cpp',
+    line: 7,
+    message: 'm',
+  };
+
+  beforeEach(() => {
+    put('platformio.ini', '[env:uno]\ncheck_tool = cppcheck\n');
+    put('src/main.cpp', 'int main(){}\n');
+    pio([defect]);
+    workflow({ verify: ['GUARDRAILS_CI_PACKS: none'], cpp: ['GUARDRAILS_PACKS: cpp'] });
+    ci(['baseline', '--init']);
+  });
+
+  it('a stale ci-stage key points at the CI-stage command for its pack', () => {
+    pio([]);
+    const r = ci(['check', '--strict-baseline']);
+    assert.equal(r.status, 1);
+    assert.match(
+      r.out,
+      /Run: GUARDRAILS_CI=1 GUARDRAILS_PACKS=cpp node scripts\/guardrails\.mjs baseline --tighten/,
     );
-    for (const pack of ciPacks) {
-      const owners = Object.entries(selected)
-        .filter(([, packs]) => packs.includes(pack))
-        .map(([n]) => n);
-      assert.deepEqual(owners, [pack], `${pack} ci tools run in: ${owners.join(', ')}`);
-    }
-    assert.ok(!selected.verify.some((p) => ciPacks.has(p)));
+  });
+
+  it('a local tighten that could not touch ci-stage tools says so instead of "tightened"', () => {
+    const r = g(['baseline', '--tighten']);
+    assert.match(r.out, /baseline unchanged: pio-check did not run here/);
+    assert.match(
+      r.out,
+      /GUARDRAILS_CI=1 GUARDRAILS_PACKS=cpp node scripts\/guardrails\.mjs baseline --tighten/,
+    );
+    assert.doesNotMatch(r.out, /baseline tightened/);
+  });
+
+  it('an unrecorded ci metric under strict names the ci command', () => {
+    put('pyproject.toml', '[tool.coverage.run]\nsource = ["src"]\n');
+    coverage(90);
+    workflow({
+      verify: ['GUARDRAILS_CI_PACKS: none'],
+      cpp: ['GUARDRAILS_PACKS: cpp'],
+      py: ['GUARDRAILS_PACKS: python'],
+    });
+    const r = ci(['check', '--strict-baseline']);
+    assert.match(
+      r.out,
+      /python-coverage is not recorded. Run: GUARDRAILS_CI=1 GUARDRAILS_PACKS=python node/,
+    );
+  });
+});
+
+describe('pre-push never runs the ci stage', () => {
+  it('verify ignores a CI variable exported on the machine', () => {
+    put('pyproject.toml', '[tool.coverage.run]\nsource = ["src"]\n');
+    coverage(90);
+    g(['verify'], { CI: 'true' });
+    g(['verify'], { GUARDRAILS_CI: '1' });
+    assert.deepEqual(calls('pytest'), []);
+  });
+});
+
+// The workflow a multi-stack repo gets: the base ci.yml plus each pack's job fragment.
+describe('generated CI workflow', () => {
+  const stacks = ['python', 'mule', 'salesforce', 'dart', 'cpp'];
+  const configure = () => {
+    put('pyproject.toml', '[tool.coverage.run]\nsource = ["src"]\n');
+    put('pom.xml', '<project><artifactId>munit-maven-plugin</artifactId></project>\n');
+    put('guardrails/apex-coverage.json', '{"targetOrg":"ci-scratch"}\n');
+    put('.mulelintrc.json', '{}\n');
+    put('analysis_options.yaml', 'include: x\n');
+    put('platformio.ini', '[env:uno]\ncheck_tool = cppcheck\n');
+  };
+  const generate = (packs) => {
+    const base = readFileSync(join(REPO, 'templates/ci/ci.yml'), 'utf8');
+    const jobs = packs.map((p) => readFileSync(join(REPO, `templates/packs/${p}/ci.yml`), 'utf8'));
+    put('.github/workflows/ci.yml', `${base.trimEnd()}\n${jobs.join('\n')}`);
+  };
+
+  it('every pack with ci-stage tools is owned by exactly one job, never the base job', () => {
+    configure();
+    generate(stacks);
+    const r = g(['ci-jobs']);
+    assert.equal(r.status, 0, r.out);
+    const owners = (pack) =>
+      r.out.split('\n').filter((l) => new RegExp(`ci-stage tools of [^;]*\\b${pack}\\b`).test(l));
+    for (const pack of stacks) assert.equal(owners(pack).length, 1, `${pack}: ${owners(pack)}`);
+    assert.match(r.out, / verify: runs [^;]*; ci-stage tools of no pack/);
+  });
+
+  it('dropping a pack job is caught', () => {
+    configure();
+    generate(stacks.filter((p) => p !== 'salesforce'));
+    const r = g(['ci-jobs']);
+    assert.equal(r.status, 1);
+    assert.match(
+      r.out,
+      /pack salesforce has ci-stage tools \(apex-coverage\) but no CI job selects it/,
+    );
   });
 });

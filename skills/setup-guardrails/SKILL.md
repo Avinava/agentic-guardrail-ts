@@ -267,7 +267,11 @@ on when its config file exists, so enabling a pack is writing its files. For eac
 1. Write the pack's templates (see Templates, Opt-in packs), fitted to the target.
 2. Merge the pack's `package.json` devDependencies, `lefthook.yml` job and `ci.yml` job.
 3. Install any tool that is not an npm package (the Pack table says which).
-4. Run `node scripts/guardrails.mjs packs` and confirm the pack's tools show as `on`.
+4. If the pack has ci-stage tools (python, mule, salesforce, dart, cpp), always add the pack's CI
+   job from its `ci.yml`: it sets `GUARDRAILS_PACKS` to the pack so those tools run once, in a job
+   with the pack's toolchain. The base `verify` job keeps `GUARDRAILS_CI_PACKS: none`. Then run
+   `node scripts/guardrails.mjs ci-jobs`; it must pass.
+   Run `node scripts/guardrails.mjs packs` and confirm the pack's tools show as `on`.
 5. Run `node scripts/guardrails.mjs check`. On a retrofit, record the debt with
    `baseline --init` (or `baseline --tighten` if a baseline already exists; it records new
    metrics the first time and refuses to loosen anything), then show the per-rule totals.
@@ -359,6 +363,7 @@ import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -476,8 +481,8 @@ function configuredTools() {
   return configured;
 }
 
-// GUARDRAILS_PACKS=core,ts limits a run to those packs (default: all). A multi-stack pipeline uses
-// it so each job runs only the packs it has a toolchain for, and each expensive tool runs once.
+// GUARDRAILS_PACKS=python limits a run to those packs (default: all, as in v3). A pack's own CI job
+// uses it to run only that pack, with that pack's toolchain.
 function selectedPacks() {
   const value = process.env.GUARDRAILS_PACKS?.trim();
   if (!value) return null;
@@ -485,6 +490,7 @@ function selectedPacks() {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+  if (ids.length === 0) throw new Error('GUARDRAILS_PACKS names no pack');
   const unknown = ids.filter((id) => !PACKS.some((p) => p.id === id));
   if (unknown.length > 0)
     throw new Error(`GUARDRAILS_PACKS names unknown pack(s): ${unknown.join(', ')}`);
@@ -505,6 +511,14 @@ function ciOn() {
   if (flag === '1') return true;
   const ci = process.env.CI?.toLowerCase();
   return Boolean(ci) && ci !== '0' && ci !== 'false';
+}
+
+// GUARDRAILS_CI_PACKS limits only the ci-stage (expensive) tools to those packs. `none` or `-`
+// selects no pack; unset means every pack, as in v3. Cheap tools are never limited by it.
+function ciPacks() {
+  const value = process.env.GUARDRAILS_CI_PACKS?.trim();
+  if (!value) return null;
+  return new Set(value === 'none' || value === '-' ? [] : value.split(',').map((s) => s.trim()));
 }
 
 // File types the gate tracks: JS/TS always, plus whatever the active tools declare.
@@ -636,16 +650,33 @@ function runRaw(tool, files, ctx) {
 // check only when GUARDRAILS_CI=1. CI sets it on one step, so they run once and never on pre-push.
 const fullStages = () => (ciOn() ? ['push', 'ci'] : ['push']);
 
+// A tool that only the ci stage runs (not the push stage): the expensive ones.
+const needsCi = (t) => t.stages.includes('ci') && !t.stages.includes('push');
+
 // Is this configured tool part of a full run right now? Not if its pack is not selected, or if it
-// is a ci-stage tool and the ci stage is off.
-const dueFull = (t) => activeTools().includes(t) && t.stages.some((s) => fullStages().includes(s));
+// is a ci-stage tool and the ci stage is off or another job owns its pack (GUARDRAILS_CI_PACKS).
+function dueFull(t) {
+  if (!activeTools().includes(t)) return false;
+  if (!needsCi(t)) return t.stages.some((s) => fullStages().includes(s));
+  const owners = ciPacks();
+  return ciOn() && (!owners || owners.has(t.pack));
+}
 
 // Active ci-stage tools that did not run because the ci stage is off.
 function deferredCiIds() {
   return activeTools()
-    .filter((t) => t.stages.includes('ci') && !dueFull(t))
+    .filter((t) => needsCi(t) && !ciOn())
     .map((t) => t.id);
 }
+
+// The command that records a baseline for this tool. A ci-stage tool only runs, so only records,
+// in the ci stage for its own pack.
+function fixCmd(verb, tool) {
+  const prefix = tool && needsCi(tool) ? `GUARDRAILS_CI=1 GUARDRAILS_PACKS=${tool.pack} ` : '';
+  return `${prefix}node scripts/guardrails.mjs baseline ${verb}`;
+}
+
+const toolOfKey = (key) => configuredTools().find((t) => key.startsWith(`${t.id}:`));
 
 // Tools whose findings (or metric) this run did not produce. Their stored baseline entries are
 // carried over and never reported stale.
@@ -656,8 +687,8 @@ function collect(files, stage = 'commit') {
   const all = files ? scopedFiles(files) : null;
   const found = [];
   for (const tool of activeTools()) {
-    const wanted = all ? [stage] : fullStages();
-    if (tool.metric || !tool.stages.some((s) => wanted.includes(s))) continue;
+    if (tool.metric) continue;
+    if (all ? !tool.stages.includes(stage) : !dueFull(tool)) continue;
     const own = all ? all.filter((f) => !tool.exts || tool.exts.test(f)) : null;
     // A whole-project tool still skips a scoped run that touches none of its file types.
     if (own && own.length === 0 && (tool.exts || !tool.whole)) continue;
@@ -689,7 +720,8 @@ function measureMetrics() {
         if (typeof value !== 'number' || !Number.isFinite(value)) {
           throw new Error(`${t.id}: the ${t.metric.name} reading is missing or not a number`);
         }
-        return { ...t.metric, value: Math.round(value * 100) / 100, detail };
+        const fix = (verb) => fixCmd(verb, t);
+        return { ...t.metric, value: Math.round(value * 100) / 100, detail, fix };
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -701,9 +733,7 @@ function measureMetrics() {
 // `baseline --tighten`, --init or --reset records it.
 function compareMetric(m, recorded, strict) {
   if (recorded === null) {
-    return strict
-      ? [`${m.name} is not recorded. Run: node scripts/guardrails.mjs baseline --tighten`]
-      : [];
+    return strict ? [`${m.name} is not recorded. Run: ${m.fix('--tighten')}`] : [];
   }
   const worse =
     m.direction === 'down' ? m.value > recorded + EPSILON : m.value < recorded - EPSILON;
@@ -718,7 +748,7 @@ function compareMetric(m, recorded, strict) {
   }
   if (strict && better) {
     return [
-      `${m.name} improved to ${m.value}${m.unit} (baseline ${recorded}${m.unit}). Run: node scripts/guardrails.mjs baseline --tighten`,
+      `${m.name} improved to ${m.value}${m.unit} (baseline ${recorded}${m.unit}). Run: ${m.fix('--tighten')}`,
     ];
   }
   return [];
@@ -798,6 +828,153 @@ function report(fresh, baseline) {
   return `guardrails: ${fresh.length} new finding(s) above the baseline (${known} known)\n${format(fresh)}\n${NEXT}`;
 }
 
+// ── CI workflow files: which job runs which pack ──
+
+// A heuristic reader for the two CI dialects we template: GitHub Actions (jobs under `jobs:`) and
+// GitLab (top-level keys). It only needs each job's text and the GUARDRAILS_PACKS and
+// GUARDRAILS_CI_PACKS values in it, so it does not parse YAML.
+const GITLAB_RESERVED = new Set(['stages', 'variables', 'default', 'include', 'workflow', 'cache']);
+
+function envValue(text, name) {
+  let value;
+  const re = new RegExp(`^\\s*${name}:\\s*['"]?([^'"#\\n]*?)['"]?\\s*(?:#.*)?$`);
+  for (const line of text.split('\n')) {
+    const m = /^\s*#/.test(line) ? null : re.exec(line);
+    if (m) value = m[1].trim();
+  }
+  return value;
+}
+
+function splitJobs(file, text) {
+  const github = file.startsWith('.github/');
+  const jobs = [];
+  const top = [];
+  let cur = null;
+  let inJobs = !github;
+  for (const line of text.split('\n')) {
+    if (github && /^jobs:\s*$/.test(line)) inJobs = true;
+    else if (github && /^[\w-]+:/.test(line)) inJobs = false;
+    const name = github ? /^ {2}([\w.-]+):\s*$/.exec(line)?.[1] : /^([\w.-]+):\s*$/.exec(line)?.[1];
+    const isJob =
+      name && inJobs && (github || !(name.startsWith('.') || GITLAB_RESERVED.has(name)));
+    if (isJob) {
+      cur = { name, lines: [] };
+      jobs.push(cur);
+    } else if (cur && inJobs && (github ? /^\s/.test(line) || line === '' : /^\s/.test(line))) {
+      cur.lines.push(line);
+    } else {
+      if (!/^\s/.test(line)) cur = null;
+      top.push(line);
+    }
+  }
+  return {
+    top: top.join('\n'),
+    jobs: jobs.map((j) => ({ name: j.name, text: j.lines.join('\n') })),
+  };
+}
+
+const packList = (v) =>
+  new Set(
+    v
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+
+// Every CI job that runs guardrails.mjs, with the packs it runs and the packs whose ci-stage tools
+// it owns.
+function ciJobs() {
+  const dir = join(ROOT, '.github', 'workflows');
+  const files = existsSync(dir)
+    ? readdirSync(dir)
+        .filter((f) => /\.ya?ml$/.test(f))
+        .map((f) => `.github/workflows/${f}`)
+    : [];
+  if (existsSync(join(ROOT, '.gitlab-ci.yml'))) files.push('.gitlab-ci.yml');
+  const all = new Set(PACKS.map((p) => p.id));
+  return files.flatMap((file) => {
+    const { top, jobs } = splitJobs(file, readFileSync(join(ROOT, file), 'utf8'));
+    return jobs
+      .filter((j) => /guardrails\.mjs/.test(j.text))
+      .map((j) => {
+        const get = (name) => envValue(j.text, name) ?? envValue(top, name);
+        const packsValue = get('GUARDRAILS_PACKS');
+        const ciValue = get('GUARDRAILS_CI_PACKS');
+        const runs = packsValue ? packList(packsValue) : all;
+        let ci = runs;
+        if (ciValue) ci = ciValue === 'none' || ciValue === '-' ? new Set() : packList(ciValue);
+        return { file, name: j.name, runs, ci };
+      });
+  });
+}
+
+// Every configured pack with ci-stage tools must be owned by exactly one job, or its expensive
+// checks never run (or run twice).
+function ciProblems() {
+  const jobs = ciJobs();
+  const owned = [
+    ...new Set(
+      configuredTools()
+        .filter(needsCi)
+        .map((t) => t.pack),
+    ),
+  ];
+  return owned.flatMap((pack) => {
+    const tools = configuredTools()
+      .filter((t) => t.pack === pack && needsCi(t))
+      .map((t) => t.id)
+      .join(', ');
+    const owners = jobs.filter((j) => j.ci.has(pack)).map((j) => `${j.name} (${j.file})`);
+    const head = `pack ${pack} has ci-stage tools (${tools})`;
+    if (jobs.length === 0) {
+      return [
+        `${head} but no CI job running guardrails.mjs was found in .github/workflows or .gitlab-ci.yml. Add the pack's CI job (setup-guardrails, Wave 8).`,
+      ];
+    }
+    if (owners.length === 0) {
+      return [
+        `${head} but no CI job selects it. Add the pack's CI job, or put ${pack} in GUARDRAILS_PACKS or GUARDRAILS_CI_PACKS of one job.`,
+      ];
+    }
+    if (owners.length > 1) {
+      return [
+        `${head} that would run ${owners.length} times, in: ${owners.join(', ')}. Limit all but one job with GUARDRAILS_CI_PACKS.`,
+      ];
+    }
+    return [];
+  });
+}
+
+// What a pack job left to other jobs, and who runs it.
+function elsewhereNotes(selected) {
+  const jobs = ciJobs();
+  const left = [
+    ...new Set(
+      configuredTools()
+        .filter((t) => !selected.has(t.pack))
+        .map((t) => t.pack),
+    ),
+  ];
+  return left.map((pack) => {
+    const owners = jobs.filter((j) => j.runs.has(pack)).map((j) => `${j.name} (${j.file})`);
+    return { pack, owners };
+  });
+}
+
+function ciJobsCmd() {
+  const jobs = ciJobs();
+  for (const j of jobs) {
+    console.log(
+      `${j.file} ${j.name}: runs ${[...j.runs].join(',')}; ci-stage tools of ${[...j.ci].join(',') || 'no pack'}`,
+    );
+  }
+  const problems = ciProblems();
+  for (const p of problems) console.error(`guardrails: ${p}`);
+  if (problems.length === 0)
+    console.log('guardrails: every pack with ci-stage tools is owned by exactly one CI job');
+  return problems.length > 0 ? 1 : 0;
+}
+
 // ── Commands ──
 
 function check(argv) {
@@ -832,20 +1009,25 @@ function check(argv) {
     console.error(`guardrails: ${problems.join('\n')}`);
     return 1;
   }
-  // Say which configured packs this run left to another job (GUARDRAILS_PACKS).
+  // Packs this run does not cover (GUARDRAILS_PACKS): say who does, or that nobody does.
   const selected = selectedPacks();
-  const elsewhere = selected
-    ? [
-        ...new Set(
-          configuredTools()
-            .filter((t) => !selected.has(t.pack))
-            .map((t) => t.pack),
-        ),
-      ]
-    : [];
-  if (!scope && elsewhere.length > 0) {
-    console.log(`guardrails: packs left to other jobs (GUARDRAILS_PACKS): ${elsewhere.join(', ')}`);
+  const strictProblems = [];
+  if (!scope && selected) {
+    for (const { pack, owners } of elsewhereNotes(selected)) {
+      const who = owners.length > 0 ? `run by ${owners.join(', ')}` : 'no CI job selects it';
+      console.log(`guardrails: pack ${pack} is not run here (GUARDRAILS_PACKS): ${who}`);
+      if (owners.length === 0)
+        strictProblems.push(`pack ${pack} is configured but no CI job runs it`);
+    }
+    for (const id of selected) {
+      if (!configuredTools().some((t) => t.pack === id)) {
+        strictProblems.push(
+          `pack ${id} is selected by GUARDRAILS_PACKS but has no configured tool (was its config removed?)`,
+        );
+      }
+    }
   }
+  if (strict) strictProblems.push(...ciProblems());
   // Never silent about ci-stage tools that did not run: say so, and under --strict-baseline fail.
   const deferred = scope ? [] : deferredCiIds();
   if (deferred.length > 0) {
@@ -856,9 +1038,14 @@ function check(argv) {
     }
     console.log(`guardrails: ${note}`);
   }
+  if (strictProblems.length > 0) {
+    console.error(`guardrails: ${strictProblems.join('\n')}`);
+    return 1;
+  }
   console.log(`guardrails: clean${scope ? ` (${scope.size} file(s))` : ''}`);
   if (stale.length > 0) {
-    const msg = `guardrails: ${stale.length} baseline entr(ies) improved. Run: node scripts/guardrails.mjs baseline --tighten`;
+    const cmds = [...new Set(stale.map((k) => fixCmd('--tighten', toolOfKey(k))))];
+    const msg = `guardrails: ${stale.length} baseline entr(ies) improved. Run: ${cmds.join(' and ')}`;
     if (strict) {
       console.error(msg);
       return 1;
@@ -875,10 +1062,10 @@ const validNumber = (v) => typeof v === 'number' && Number.isFinite(v);
 function invalidMetricProblems(recorded) {
   return Object.entries(recorded)
     .filter(([, v]) => !validNumber(v))
-    .map(
-      ([name, v]) =>
-        `${name} has an invalid stored value (${JSON.stringify(v)}) in the baseline. A human must run: GUARDRAILS_CI=1 node scripts/guardrails.mjs baseline --reset, or tighten to record the current reading`,
-    );
+    .map(([name, v]) => {
+      const tool = configuredTools().find((t) => t.metric?.name === name);
+      return `${name} has an invalid stored value (${JSON.stringify(v)}) in the baseline. A human must run: ${fixCmd('--reset', tool)}, or tighten to record the current reading`;
+    });
 }
 
 // Metrics only move the right way. Returns the values to record, or null when one regressed. A
@@ -909,6 +1096,22 @@ function tightenMetrics() {
   return next;
 }
 
+// Writes the baseline and says what happened. If nothing changed because the ci-stage tools did not
+// run, say that and name the command that does record them, instead of claiming a tighten.
+function record(counts, metrics, word, verb) {
+  const before = JSON.stringify([readBaseline(), readMetrics()]);
+  const keys = writeBaseline(counts, metrics);
+  const skipped = notDue().filter(needsCi);
+  if (skipped.length > 0 && before === JSON.stringify([readBaseline(), readMetrics()])) {
+    const cmds = [...new Set(skipped.map((t) => fixCmd(verb, t)))];
+    console.log(
+      `guardrails: baseline unchanged: ${skipped.map((t) => t.id).join(', ')} did not run here. Run: ${cmds.join(' and ')}`,
+    );
+    return;
+  }
+  console.log(`guardrails: baseline ${word} (${keys} keys)`);
+}
+
 function baselineCmd(argv) {
   const found = collect(null);
   const whole = found.filter((f) => f.always);
@@ -934,7 +1137,7 @@ function baselineCmd(argv) {
     }
     const metrics = tightenMetrics();
     if (metrics === null) return 1;
-    console.log(`guardrails: baseline tightened (${writeBaseline(counts, metrics)} keys)`);
+    record(counts, metrics, 'tightened', '--tighten');
     return ratchetCoverage();
   }
   if (argv.includes('--init') && existsSync(BASELINE)) {
@@ -954,7 +1157,7 @@ function baselineCmd(argv) {
     ...kept,
     ...Object.fromEntries(measureMetrics().map((m) => [m.name, m.value])),
   };
-  console.log(`guardrails: baseline written (${writeBaseline(counts, metrics)} keys)`);
+  record(counts, metrics, 'written', argv.includes('--init') ? '--init' : '--reset');
   return 0;
 }
 
@@ -993,7 +1196,10 @@ function ratchetCoverage() {
   return r.status ?? 1;
 }
 
+// The pre-push gate never runs the ci stage (test suites, org runs), even when a CI variable is
+// exported on a developer machine or in an agent sandbox. CI runs those tools in its own step.
 function verify() {
+  process.env.GUARDRAILS_CI = '0';
   for (const step of ['format:check', 'typecheck', 'lint', 'test:coverage']) {
     // Repos without Node scripts (Mule, Python, Rust) have no `lint` script: run the check itself.
     const r = step === 'lint' && !pkg().scripts?.lint ? { status: check([]) } : runScript(step);
@@ -1095,7 +1301,16 @@ function hook([kind]) {
   }
 }
 
-const COMMANDS = { check, baseline: baselineCmd, verify, format: formatFiles, exec, packs, hook };
+const COMMANDS = {
+  check,
+  baseline: baselineCmd,
+  verify,
+  format: formatFiles,
+  exec,
+  packs,
+  'ci-jobs': ciJobsCmd,
+  hook,
+};
 const [command, ...argv] = process.argv.slice(2);
 try {
   const fn = COMMANDS[command];
@@ -3928,11 +4143,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      # Each job runs only the packs it has a toolchain for, so every expensive tool runs once per
-      # pipeline. This job owns core and ts. Packs with their own job (templates/packs/*/ci.yml:
-      # python, mule, salesforce, rust, dart, cpp) must NOT be listed here. Add shell, docker or sql
-      # once this job installs their tools. Remove the line to run every pack in this one job.
-      GUARDRAILS_PACKS: core,ts
+      # This job runs every enabled pack's cheap checks (as in v3), so install the tools of every pack
+      # you enabled (shellcheck, uv, cargo, ...). The expensive ci-stage tools (test suites, org
+      # runs) are not run here: each pack's own job (templates/packs/*/ci.yml) runs them once, with
+      # its toolchain. `guardrails.mjs check --strict-baseline` fails if an enabled pack with such
+      # tools has no job. Remove this line only if this single job runs everything.
+      GUARDRAILS_CI_PACKS: none
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
