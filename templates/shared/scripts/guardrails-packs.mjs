@@ -75,7 +75,7 @@ const OXLINT_ON = [
   'oxlint.config.ts',
   { file: 'package.json', has: /"oxlint"\s*:/ },
 ];
-const KNIP_CONFIGS = [
+const KNIP_ON = [
   'knip.json',
   'knip.jsonc',
   '.knip.json',
@@ -83,8 +83,10 @@ const KNIP_CONFIGS = [
   'knip.ts',
   'knip.js',
   'knip.config.ts',
+  'knip.config.js',
+  'knip.config.mjs',
+  { file: 'package.json', has: /"knip"\s*:/ },
 ];
-const KNIP_ON = [...KNIP_CONFIGS, { file: 'package.json', has: /"knip"\s*:/ }];
 
 const ts = {
   id: 'ts',
@@ -151,17 +153,10 @@ const ts = {
       ok: ANY_EXIT,
       stages: ['push'],
       whole: true,
-      // v3 skipped Knip when its binary was absent. Keep that only when nothing configures it: a
-      // Knip config file that exists with no binary installed is a broken install, never a pass.
       run: ({ h }) => {
-        if (h.bin('knip'))
-          return { cmd: h.bin('knip'), args: ['--reporter', 'json', '--no-progress'] };
-        const config = KNIP_CONFIGS.find((f) => h.exists(f));
-        if (config)
-          throw new Error(
-            `knip is configured (${config}) but not installed. Install devDependencies first.`,
-          );
-        return null;
+        // Knip only runs when a switch turned it on (a config file, a knip.config.*, or a knip
+        // entry in package.json), and then a missing binary is a broken install, never a skip.
+        return { cmd: h.needBin('knip'), args: ['--reporter', 'json', '--no-progress'] };
       },
       parse: (out) => json('knip', out.stdout).issues.flatMap(knipItems),
     },
@@ -1006,6 +1001,8 @@ const sql = {
 // ── rust (Cargo) ──
 
 const RS_EXT = /\.rs$/;
+// rustc's closing summaries, which clippy -D warnings emits after any error.
+const RUSTC_SUMMARY = /^(aborting due to|could not compile|\d+ (warnings?|errors?) emitted)/;
 
 const rust = {
   id: 'rust',
@@ -1047,7 +1044,13 @@ const rust = {
           const m = d.message;
           if (d.reason !== 'compiler-message' || !m) continue;
           const span = m.spans?.find((s) => s.is_primary);
-          const compileError = m.level === 'error' && (!m.code || /^E\d{4}$/.test(m.code.code));
+          // rustc closes with summary messages (level error, no code, no span). They say how many
+          // errors there were, not what they were, so they are never findings themselves.
+          if (RUSTC_SUMMARY.test(m.message)) continue;
+          // A compile error needs a primary span: an E-code error, or a code-less one (a syntax
+          // error). A code-less error with no span is a summary, not a failure we can place.
+          const compileError =
+            m.level === 'error' && Boolean(span) && (!m.code || /^E\d{4}$/.test(m.code.code));
           if (!compileError && (!m.code || !span)) continue;
           const found = {
             rule: compileError ? (m.code?.code ?? 'compile-error') : m.code.code,
@@ -1192,7 +1195,11 @@ const dart = {
             .reduce((n, l) => n + Number(l.slice(tag.length + 1)), 0);
         const found = sum('LF');
         // An empty, truncated or all-zero report is not 100% coverage.
-        if (!lcov.includes('end_of_record') || !(found > 0)) {
+        // Every record is closed (a report cut off after the first one still contains one
+        // end_of_record) and the file ends on one.
+        const opened = lcov.split('\n').filter((l) => l.startsWith('SF:')).length;
+        const closed = lcov.split('\n').filter((l) => l.trim() === 'end_of_record').length;
+        if (!lcov.trimEnd().endsWith('end_of_record') || opened !== closed || !(found > 0)) {
           throw new Error(
             'flutter test wrote no usable coverage/lcov.info (empty, truncated or no lines)',
           );

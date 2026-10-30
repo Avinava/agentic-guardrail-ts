@@ -4,6 +4,8 @@
 //   node --test scripts/packs-native-test.mjs
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import {
   baselineFile,
@@ -202,6 +204,14 @@ describe('flutter coverage fails closed', () => {
     ['an empty report', ''],
     ['a report with no lines', 'SF:lib/main.dart\nLF:0\nLH:0\nend_of_record\n'],
     ['a truncated report', 'SF:lib/main.dart\nLF:10\nLH:9\n'],
+    [
+      'a report cut off after its first record',
+      'SF:lib/a.dart\nLF:10\nLH:9\nend_of_record\nSF:lib/b.dart\nLF:10\nLH:9\n',
+    ],
+    [
+      'a report with an unclosed record before the end',
+      'SF:lib/a.dart\nLF:10\nLH:9\nSF:lib/b.dart\nLF:1\nLH:1\nend_of_record\n',
+    ],
   ]) {
     it(`${name} is a failure, never 100%`, () => {
       lcov(0, text);
@@ -217,6 +227,15 @@ describe('flutter coverage fails closed', () => {
     assert.match(ci(['baseline', '--init']).out, /no usable coverage\/lcov\.info/);
   });
 });
+
+// Real `cargo clippy --message-format json -- -D warnings` output from a scratch crate (clippy 1.93).
+const real = (name) => readFileSync(join(import.meta.dirname, 'fixtures', 'clippy', name), 'utf8');
+// rustc's closing summary; cargo here does not forward it, older toolchains do.
+const summary = (text) =>
+  JSON.stringify({
+    reason: 'compiler-message',
+    message: { level: 'error', code: null, spans: [], message: text },
+  });
 
 describe('clippy: a broken build is not lint debt', () => {
   const compileError = JSON.stringify({
@@ -246,15 +265,43 @@ describe('clippy: a broken build is not lint debt', () => {
     assert.equal(g(['check']).status, 1);
   });
 
-  it('an error with no code (a syntax error) is also a compile failure', () => {
+  it('a code-less error with no span (a summary) is never a finding, but the failed run still fails', () => {
     const noCode = JSON.stringify({
       reason: 'compiler-message',
       message: { level: 'error', message: 'expected item', code: null, spans: [] },
     });
     fake('cargo-clippy', { stdout: `${noCode}\n`, status: 101 });
-    assert.match(
-      g(['baseline', '--init']).out,
-      /cannot baseline while a tool is failing as a whole/,
-    );
+    assert.match(g(['check']).out, /clippy failed with output it could not read \(exit 101\)/);
+  });
+});
+
+describe('clippy against real output', () => {
+  beforeEach(() => {
+    put('Cargo.toml', '[package]\nname = "acme"\n');
+    put('clippy.toml', '');
+    put('src/lib.rs', 'pub fn f() {}\n');
+  });
+
+  it("a lint plus rustc's summary is a baselineable lint finding, not a compile error", () => {
+    fake('cargo-clippy', {
+      stdout: `${real('lint.jsonl')}${summary('aborting due to 1 previous error')}\n${summary('could not compile \`acme\` (lib) due to 1 previous error')}\n`,
+      status: 101,
+    });
+    assert.deepEqual(recordedCounts(), { 'clippy:clippy::needless_return|src/lib.rs': 1 });
+    assert.equal(g(['check']).status, 0);
+  });
+
+  it('a real syntax error is a compile error that always fails', () => {
+    fake('cargo-clippy', { stdout: real('syntax-error.jsonl'), status: 101 });
+    const r = g(['baseline', '--init']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /cannot baseline while a tool is failing as a whole/);
+    assert.match(r.out, /clippy compile-error .*unclosed delimiter/);
+  });
+
+  it('a real type error is a compile error that always fails', () => {
+    fake('cargo-clippy', { stdout: real('type-error.jsonl'), status: 101 });
+    assert.equal(g(['baseline', '--init']).status, 1);
+    assert.match(g(['check']).out, /clippy E0308 .*mismatched types/);
   });
 });
