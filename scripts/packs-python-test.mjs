@@ -36,7 +36,12 @@ const full = () => {
   put('src/acme/core/service.py', 'import yaml\n');
   fake('ruff-format', { stdout: '', status: 0 });
   fake('pytest', {
-    writes: [{ prefix: '--cov-report=json:', content: { totals: { percent_covered: 90 } } }],
+    writes: [
+      {
+        prefix: '--cov-report=json:',
+        content: { totals: { percent_covered: 90, num_statements: 10 } },
+      },
+    ],
   });
   fake('ruff', {
     stdout: JSON.stringify([
@@ -155,7 +160,12 @@ describe('python pack', () => {
 describe('python coverage floor', () => {
   const cov = (percent) =>
     fake('pytest', {
-      writes: [{ prefix: '--cov-report=json:', content: { totals: { percent_covered: percent } } }],
+      writes: [
+        {
+          prefix: '--cov-report=json:',
+          content: { totals: { percent_covered: percent, num_statements: 10 } },
+        },
+      ],
     });
 
   beforeEach(() => put('pyproject.toml', '[tool.coverage.run]\nsource = ["src"]\n'));
@@ -192,7 +202,12 @@ describe('python pack, review fixes', () => {
     fake('pytest', {
       stdout: status === 0 ? '1 passed' : 'FAILED tests/test_a.py::test_a',
       status,
-      writes: [{ prefix: '--cov-report=json:', content: { totals: { percent_covered: percent } } }],
+      writes: [
+        {
+          prefix: '--cov-report=json:',
+          content: { totals: { percent_covered: percent, num_statements: 10 } },
+        },
+      ],
     });
 
   it('failing tests fail the gate even though pytest still writes a coverage report', () => {
@@ -244,5 +259,22 @@ describe('vulture and ruff overlap', () => {
     put('pyproject.toml', '[tool.vulture]\nmin_confidence = 60\n');
     fake('vulture', { stdout: 'something new\n', status: 3 });
     assert.match(g(['check']).out, /vulture found dead code but printed nothing readable/);
+  });
+});
+
+describe('pytest-cov zero denominator', () => {
+  it('a run that measured no statements fails instead of recording 100%', () => {
+    put('pyproject.toml', '[tool.coverage.run]\nsource = ["src"]\n');
+    fake('pytest', {
+      writes: [
+        {
+          prefix: '--cov-report=json:',
+          content: { totals: { percent_covered: 100, num_statements: 0 } },
+        },
+      ],
+    });
+    const r = ci(['baseline', '--init']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /pytest-cov measured no statements/);
   });
 });

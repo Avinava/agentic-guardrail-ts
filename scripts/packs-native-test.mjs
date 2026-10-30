@@ -90,13 +90,19 @@ describe('rust pack', () => {
   });
 });
 
+// flutter test writes coverage/lcov.info itself; the engine deletes any old one first.
+const lcov = (hit, text = null) =>
+  fake('flutter-test', {
+    stdout: 'All tests passed!\n',
+    files: { 'coverage/lcov.info': text ?? `SF:lib/main.dart\nLF:10\nLH:${hit}\nend_of_record\n` },
+  });
+
 describe('dart pack', () => {
   beforeEach(() => {
     put('analysis_options.yaml', 'include: package:flutter_lints/flutter.yaml\n');
     put('pubspec.yaml', 'name: app\ndependencies:\n  flutter:\n    sdk: flutter\n');
     put('lib/main.dart', 'void main() {}\n');
-    put('coverage/lcov.info', 'LF:10\nLH:9\n');
-    fake('flutter-test', { stdout: 'All tests passed!\n', status: 0 });
+    lcov(9);
     fake('dart-format', {
       stdout: 'Changed lib/main.dart\nFormatted 1 file (1 changed)\n',
       status: 1,
@@ -127,11 +133,10 @@ describe('dart pack', () => {
   it('ratchets Flutter test coverage upward from lcov.info', () => {
     fake('dart-format', { stdout: '', status: 0 });
     fake('flutter-analyze', { stdout: 'No issues found!\n', status: 0 });
-    fake('flutter-test', { stdout: 'All tests passed!\n', status: 0 });
-    put('coverage/lcov.info', 'SF:lib/main.dart\nLF:10\nLH:8\nend_of_record\n');
+    lcov(8);
     ci(['baseline', '--init']);
     assert.equal(baselineFile().metrics['flutter-coverage'], 80);
-    put('coverage/lcov.info', 'SF:lib/main.dart\nLF:10\nLH:7\nend_of_record\n');
+    lcov(7);
     assert.match(ci(['check']).out, /flutter-coverage 70% is below the baseline 80%/);
   });
 });
@@ -182,5 +187,74 @@ describe('cpp pack', () => {
     put('platformio.ini', '[env:uno]\nboard = uno\n');
     ci(['check']);
     assert.deepEqual(calls('pio'), []);
+  });
+});
+
+describe('flutter coverage fails closed', () => {
+  beforeEach(() => {
+    put('analysis_options.yaml', 'include: x\n');
+    put('pubspec.yaml', 'name: app\ndependencies:\n  flutter:\n    sdk: flutter\n');
+    fake('flutter-analyze', { stdout: 'No issues found!\n' });
+    fake('dart-format', { stdout: '' });
+  });
+
+  for (const [name, text] of [
+    ['an empty report', ''],
+    ['a report with no lines', 'SF:lib/main.dart\nLF:0\nLH:0\nend_of_record\n'],
+    ['a truncated report', 'SF:lib/main.dart\nLF:10\nLH:9\n'],
+  ]) {
+    it(`${name} is a failure, never 100%`, () => {
+      lcov(0, text);
+      const r = ci(['baseline', '--init']);
+      assert.equal(r.status, 1);
+      assert.match(r.out, /no usable coverage\/lcov\.info/);
+    });
+  }
+
+  it('a stale report left by an earlier run is not read when this run writes none', () => {
+    put('coverage/lcov.info', 'SF:lib/main.dart\nLF:10\nLH:10\nend_of_record\n');
+    fake('flutter-test', { stdout: 'ok', status: 0 });
+    assert.match(ci(['baseline', '--init']).out, /no usable coverage\/lcov\.info/);
+  });
+});
+
+describe('clippy: a broken build is not lint debt', () => {
+  const compileError = JSON.stringify({
+    reason: 'compiler-message',
+    message: {
+      level: 'error',
+      message: 'mismatched types',
+      code: { code: 'E0308' },
+      spans: [{ is_primary: true, file_name: 'src/lib.rs', line_start: 3 }],
+    },
+  });
+
+  beforeEach(() => {
+    put('Cargo.toml', '[package]\nname = "acme"\n');
+    put('clippy.toml', '');
+    put('src/lib.rs', 'pub fn f() {}\n');
+    fake('cargo-clippy', { stdout: `${compileError}\n`, status: 101 });
+  });
+
+  it('is an always-finding: the check fails and a baseline refuses it', () => {
+    const r = g(['check']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /clippy E0308/);
+    const b = g(['baseline', '--init']);
+    assert.equal(b.status, 1);
+    assert.match(b.out, /cannot baseline while a tool is failing as a whole/);
+    assert.equal(g(['check']).status, 1);
+  });
+
+  it('an error with no code (a syntax error) is also a compile failure', () => {
+    const noCode = JSON.stringify({
+      reason: 'compiler-message',
+      message: { level: 'error', message: 'expected item', code: null, spans: [] },
+    });
+    fake('cargo-clippy', { stdout: `${noCode}\n`, status: 101 });
+    assert.match(
+      g(['baseline', '--init']).out,
+      /cannot baseline while a tool is failing as a whole/,
+    );
   });
 });

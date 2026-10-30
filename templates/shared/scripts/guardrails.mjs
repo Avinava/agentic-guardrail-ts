@@ -19,7 +19,6 @@ import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -235,6 +234,7 @@ const HELPERS = {
   ROOT,
   active: (id) => activeTools().some((t) => t.id === id),
   exists: (p) => existsSync(isAbsolute(p) ? p : join(ROOT, p)),
+  remove: (p) => rmSync(isAbsolute(p) ? p : join(ROOT, p), { force: true }),
   read: (p) => readFileSync(isAbsolute(p) ? p : join(ROOT, p), 'utf8'),
   run,
   settle,
@@ -444,11 +444,20 @@ function readMetrics() {
   return readBaselineFile().metrics ?? {};
 }
 
+// Tools from packs other than ts. v3 had none of these, so any that are on after an upgrade are new.
+const packToolIds = () =>
+  activeTools()
+    .filter((t) => t.pack !== 'ts')
+    .map((t) => t.id);
+
 function writeBaseline(counts, metrics = {}) {
   const entries = Object.entries(counts).filter(([, n]) => n > 0);
   const sorted = Object.fromEntries(entries.toSorted(([a], [b]) => a.localeCompare(b)));
   const body = { version: 1, counts: sorted };
   if (Object.keys(metrics).length > 0) body.metrics = metrics;
+  // Remember which pack tools were on, so a later run can say which ones are new.
+  const tools = [...new Set([...(readBaselineFile().tools ?? []), ...packToolIds()])].toSorted();
+  if (tools.length > 0) body.tools = tools;
   writeFileSync(BASELINE, `${JSON.stringify(body, null, 2)}\n`);
   return Object.keys(sorted).length;
 }
@@ -492,139 +501,6 @@ function report(fresh, baseline) {
   return `guardrails: ${fresh.length} new finding(s) above the baseline (${known} known)\n${format(fresh)}\n${NEXT}`;
 }
 
-// ── Advisory: which CI job appears to run which pack ──
-
-// A best-effort read of GitHub Actions and GitLab files only. NOTHING in the gate depends on it:
-// `check` and `check --strict-baseline` never fail because of a workflow file. It exists for the
-// doctor skill and for setup, to warn about a pack whose expensive tools no job appears to run.
-const GITLAB_RESERVED = new Set(['stages', 'variables', 'default', 'include', 'workflow', 'cache']);
-const OTHER_CI = [
-  'azure-pipelines.yml',
-  'bitbucket-pipelines.yml',
-  '.circleci/config.yml',
-  'Jenkinsfile',
-  '.travis.yml',
-];
-
-const withoutComments = (text) =>
-  text
-    .split('\n')
-    .filter((l) => !/^\s*#/.test(l))
-    .join('\n');
-
-// NAME: value (an env block) or NAME=value (inline in a script line).
-function envValue(text, name) {
-  const body = withoutComments(text);
-  const block = new RegExp(`^\\s*${name}:\\s*['"]?([\\w,-]*)['"]?\\s*$`, 'm').exec(body);
-  const inline = new RegExp(`\\b${name}=['"]?([\\w,-]+)`).exec(body);
-  return (block ?? inline)?.[1];
-}
-
-function splitJobs(file, text) {
-  const github = file.startsWith('.github/');
-  const jobs = [];
-  const top = [];
-  let cur = null;
-  let inJobs = !github;
-  for (const line of text.split('\n')) {
-    if (github && /^jobs:\s*$/.test(line)) inJobs = true;
-    else if (github && /^[\w-]+:/.test(line)) inJobs = false;
-    const name = github ? /^ {2}([\w.-]+):\s*$/.exec(line)?.[1] : /^([\w.-]+):\s*$/.exec(line)?.[1];
-    const isJob =
-      name && inJobs && (github || !(name.startsWith('.') || GITLAB_RESERVED.has(name)));
-    if (isJob) {
-      cur = { name, lines: [] };
-      jobs.push(cur);
-    } else if (cur && inJobs && (/^\s/.test(line) || line === '')) {
-      cur.lines.push(line);
-    } else {
-      if (!/^\s/.test(line)) cur = null;
-      top.push(line);
-    }
-  }
-  return {
-    top: top.join('\n'),
-    jobs: jobs.map((j) => ({ name: j.name, text: j.lines.join('\n') })),
-  };
-}
-
-const packList = (v) =>
-  new Set(
-    v
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
-
-// Jobs that appear to run `guardrails.mjs check` (not only `verify`, which turns the ci stage off),
-// with the packs they run and the packs whose ci-stage tools they appear to own.
-function ciJobs() {
-  const dir = join(ROOT, '.github', 'workflows');
-  const files = existsSync(dir)
-    ? readdirSync(dir)
-        .filter((f) => /\.ya?ml$/.test(f))
-        .map((f) => `.github/workflows/${f}`)
-    : [];
-  if (existsSync(join(ROOT, '.gitlab-ci.yml'))) files.push('.gitlab-ci.yml');
-  const all = new Set(PACKS.map((p) => p.id));
-  const jobs = files.flatMap((file) => {
-    const { top, jobs: found } = splitJobs(file, readFileSync(join(ROOT, file), 'utf8'));
-    return found
-      .filter((j) => /guardrails\.mjs\s+check/.test(withoutComments(j.text)))
-      .map((j) => {
-        const get = (name) => envValue(j.text, name) ?? envValue(top, name);
-        const packsValue = get('GUARDRAILS_PACKS');
-        const ciValue = get('GUARDRAILS_CI_PACKS');
-        const runs = packsValue ? packList(packsValue) : all;
-        let ci = runs;
-        if (ciValue) ci = ciValue === 'none' || ciValue === '-' ? new Set() : packList(ciValue);
-        return { file, name: j.name, runs, ci };
-      });
-  });
-  return { jobs, unreadable: OTHER_CI.filter((f) => existsSync(join(ROOT, f))) };
-}
-
-// Advisory only: always exits 0.
-function ciJobsCmd() {
-  const { jobs, unreadable } = ciJobs();
-  console.log(
-    'guardrails: CI ownership is a best-effort read of GitHub Actions and GitLab files only. Nothing in the gate depends on it.',
-  );
-  for (const f of unreadable) console.log(`guardrails: could not read this CI system: ${f}`);
-  for (const j of jobs) {
-    const ci = [...j.ci].join(',') || 'no pack';
-    console.log(
-      `${j.file} ${j.name}: appears to run ${[...j.runs].join(',')}; ci-stage tools of ${ci}`,
-    );
-  }
-  const owned = [
-    ...new Set(
-      configuredTools()
-        .filter(needsCi)
-        .map((t) => t.pack),
-    ),
-  ];
-  for (const pack of owned) {
-    const tools = configuredTools()
-      .filter((t) => t.pack === pack && needsCi(t))
-      .map((t) => t.id)
-      .join(', ');
-    const owners = jobs.filter((j) => j.ci.has(pack)).map((j) => `${j.name} (${j.file})`);
-    const head = `warning: pack ${pack} has ci-stage tools (${tools})`;
-    if (owners.length === 0) {
-      const where = unreadable.length > 0 && jobs.length === 0 ? ' in the files it could read' : '';
-      console.log(
-        `${head} and no job${where} appears to select it. Add the pack's CI job (setup-guardrails, Wave 8).`,
-      );
-    } else if (owners.length > 1) {
-      console.log(
-        `${head} and ${owners.length} jobs appear to select it: ${owners.join(', ')}. They would run twice.`,
-      );
-    }
-  }
-  return 0;
-}
-
 // ── Commands ──
 
 function check(argv) {
@@ -644,6 +520,17 @@ function check(argv) {
   if (fresh.length > 0) {
     console.error(report(fresh, baseline));
     return 1;
+  }
+  // After an upgrade, existing configs (ruff, .editorconfig-style files) can switch on pack tools.
+  // Name the new ones once per run until a baseline command acknowledges them.
+  if (!scope && existsSync(BASELINE)) {
+    const seen = new Set(readBaselineFile().tools ?? []);
+    const added = packToolIds().filter((id) => !seen.has(id));
+    if (added.length > 0) {
+      console.log(
+        `guardrails: tools newly active since the baseline was written: ${added.join(', ')}. Run baseline --tighten to acknowledge them.`,
+      );
+    }
   }
   // Metrics (duplication, coverage floors) run on full checks only: pre-push and CI.
   const recorded = readMetrics();
@@ -687,6 +574,14 @@ function check(argv) {
         `guardrails: warning: GUARDRAILS_CI_PACKS names ${dropped.join(', ')} but GUARDRAILS_PACKS excludes it, so its ci-stage tools will not run in this job`,
       );
     }
+  }
+  // Never silent about ci-stage tools that are left out because another job owns their pack.
+  const left = scope ? [] : activeTools().filter((t) => needsCi(t) && ciOn() && !dueFull(t));
+  if (left.length > 0) {
+    const ids = left.map((t) => t.id).join(', ');
+    console.log(
+      `guardrails: ci-stage tools left to other jobs: ${ids} (GUARDRAILS_CI_PACKS=${process.env.GUARDRAILS_CI_PACKS})`,
+    );
   }
   // Never silent about ci-stage tools that did not run: say so, and under --strict-baseline fail.
   const deferred = scope ? [] : deferredCiIds();
@@ -965,7 +860,6 @@ const COMMANDS = {
   format: formatFiles,
   exec,
   packs,
-  'ci-jobs': ciJobsCmd,
   hook,
 };
 const [command, ...argv] = process.argv.slice(2);

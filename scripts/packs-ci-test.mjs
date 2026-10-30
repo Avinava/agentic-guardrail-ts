@@ -41,7 +41,12 @@ const coverage = (percent, status = 0) =>
   fake('pytest', {
     stdout: status === 0 ? '1 passed' : 'FAILED',
     status,
-    writes: [{ prefix: '--cov-report=json:', content: { totals: { percent_covered: percent } } }],
+    writes: [
+      {
+        prefix: '--cov-report=json:',
+        content: { totals: { percent_covered: percent, num_statements: 10 } },
+      },
+    ],
   });
 
 describe('the ci stage is never silently skipped', () => {
@@ -114,8 +119,10 @@ describe('a metric whose tool stopped applying', () => {
   it('names a --reset that can remove it, and the reset drops it', () => {
     put('analysis_options.yaml', 'include: x\n');
     put('pubspec.yaml', 'name: app\ndependencies:\n  flutter:\n    sdk: flutter\n');
-    put('coverage/lcov.info', 'LF:10\nLH:9\n');
-    fake('flutter-test', { stdout: 'ok', status: 0 });
+    fake('flutter-test', {
+      stdout: 'ok',
+      files: { 'coverage/lcov.info': 'LF:10\nLH:9\nend_of_record\n' },
+    });
     fake('flutter-analyze', { stdout: 'No issues found!\n' });
     fake('dart-format', { stdout: '' });
     ci(['baseline', '--init']);
@@ -138,7 +145,7 @@ describe('an invalid stored metric', () => {
         {
           flag: '--output',
           join: 'jscpd-report.json',
-          content: { statistics: { total: { percentage: 9 } }, duplicates: [] },
+          content: { statistics: { total: { percentage: 9, sources: 3 } }, duplicates: [] },
         },
       ],
     });
@@ -191,74 +198,6 @@ describe('pack selection', () => {
     assert.doesNotMatch(g(['check'], { GUARDRAILS_PACKS: 'ts' }).out, /improved/);
     g(['baseline', '--tighten'], { GUARDRAILS_PACKS: 'ts' });
     assert.equal(baselineFile().counts['shellcheck:SC2086|a.sh'], 1);
-  });
-});
-
-describe('the CI ownership read is advisory and never gates', () => {
-  beforeEach(() => {
-    put('pyproject.toml', '[tool.coverage.run]\nsource = ["src"]\n');
-    coverage(90);
-    ci(['baseline', '--init']);
-  });
-
-  it('strict passes whatever the workflow files say (or do not say)', () => {
-    assert.equal(ci(['check', '--strict-baseline']).status, 0);
-    workflow({ verify: ['GUARDRAILS_CI_PACKS: none'] });
-    assert.equal(ci(['check', '--strict-baseline']).status, 0);
-    workflow({ a: ['GUARDRAILS_PACKS: python'], b: [] });
-    assert.equal(ci(['check', '--strict-baseline']).status, 0);
-  });
-
-  it('ci-jobs warns, names the pack, says it is best effort, and exits 0', () => {
-    workflow({ verify: ['GUARDRAILS_CI_PACKS: none'] });
-    const r = g(['ci-jobs']);
-    assert.equal(r.status, 0);
-    assert.match(r.out, /best-effort read of GitHub Actions and GitLab files only/);
-    assert.match(
-      r.out,
-      /warning: pack python has ci-stage tools \(pytest-cov\) and no job appears to select it/,
-    );
-  });
-
-  it('is quiet about a pack that exactly one job appears to select', () => {
-    workflow({ verify: ['GUARDRAILS_CI_PACKS: none'], python: ['GUARDRAILS_PACKS: python'] });
-    assert.doesNotMatch(g(['ci-jobs']).out, /warning/);
-  });
-
-  it('warns when two jobs appear to select the same pack', () => {
-    workflow({ a: ['GUARDRAILS_PACKS: python'], b: [] });
-    assert.match(g(['ci-jobs']).out, /2 jobs appear to select it: a \(.*\), b \(/);
-  });
-
-  it('does not count a job that only runs verify, or a mention in a comment', () => {
-    put(
-      '.github/workflows/ci.yml',
-      'name: CI\njobs:\n  release:\n    env:\n      GUARDRAILS_PACKS: python\n    steps:\n      - run: node scripts/guardrails.mjs verify\n  noted:\n    steps:\n      # node scripts/guardrails.mjs check\n      - run: echo hi\n',
-    );
-    assert.match(g(['ci-jobs']).out, /no job appears to select it/);
-  });
-
-  it('reads an inline NAME=value on the command line', () => {
-    put(
-      '.github/workflows/ci.yml',
-      'name: CI\njobs:\n  py:\n    steps:\n      - run: GUARDRAILS_CI=1 GUARDRAILS_PACKS=python node scripts/guardrails.mjs check --strict-baseline\n  base:\n    steps:\n      - run: GUARDRAILS_CI_PACKS=none node scripts/guardrails.mjs check\n',
-    );
-    assert.doesNotMatch(g(['ci-jobs']).out, /warning/);
-  });
-
-  it('reads GitLab jobs too', () => {
-    put(
-      '.gitlab-ci.yml',
-      'stages: [test]\nverify:\n  variables:\n    GUARDRAILS_CI_PACKS: none\n  script:\n    - node scripts/guardrails.mjs check\npython:\n  variables:\n    GUARDRAILS_PACKS: python\n  script:\n    - node scripts/guardrails.mjs check --strict-baseline\n',
-    );
-    assert.doesNotMatch(g(['ci-jobs']).out, /warning/);
-  });
-
-  it('says plainly when it cannot read the CI system', () => {
-    put('azure-pipelines.yml', 'trigger: [main]\n');
-    const r = g(['ci-jobs']);
-    assert.equal(r.status, 0);
-    assert.match(r.out, /could not read this CI system: azure-pipelines\.yml/);
   });
 });
 
@@ -393,43 +332,76 @@ describe('pre-push never runs the ci stage', () => {
   });
 });
 
-// The workflow a multi-stack repo gets: the base ci.yml plus each pack's job fragment.
+// The workflow a multi-stack repo gets: the base ci.yml plus each pack's job fragment. The engine
+// does not read CI files, so this test is the protection against a pack nobody (or two jobs) run.
 describe('generated CI workflow', () => {
-  const stacks = ['python', 'mule', 'salesforce', 'dart', 'cpp'];
-  const configure = () => {
-    put('pyproject.toml', '[tool.coverage.run]\nsource = ["src"]\n');
-    put('pom.xml', '<project><artifactId>munit-maven-plugin</artifactId></project>\n');
-    put('guardrails/apex-coverage.json', '{"targetOrg":"ci-scratch"}\n');
-    put('.mulelintrc.json', '{}\n');
-    put('analysis_options.yaml', 'include: x\n');
-    put('platformio.ini', '[env:uno]\ncheck_tool = cppcheck\n');
+  const envValue = (text, name) =>
+    [...text.matchAll(new RegExp(`^\\s*${name}:\\s*['"]?([\\w,-]+)['"]?\\s*$`, 'gm'))].at(-1)?.[1];
+  const all = PACKS.map((p) => p.id);
+  // The packs whose ci-stage tools a job owns: GUARDRAILS_CI_PACKS, else GUARDRAILS_PACKS, else all.
+  const owned = (text) => {
+    const ci = envValue(text, 'GUARDRAILS_CI_PACKS');
+    if (ci) return ci === 'none' ? [] : ci.split(',');
+    const packs = envValue(text, 'GUARDRAILS_PACKS');
+    return packs ? packs.split(',') : all;
   };
-  const generate = (packs) => {
-    const base = readFileSync(join(REPO, 'templates/ci/ci.yml'), 'utf8');
-    const jobs = packs.map((p) => readFileSync(join(REPO, `templates/packs/${p}/ci.yml`), 'utf8'));
-    put('.github/workflows/ci.yml', `${base.trimEnd()}\n${jobs.join('\n')}`);
+  const jobs = {
+    verify: readFileSync(join(REPO, 'templates/ci/ci.yml'), 'utf8').split('\n  secrets:')[0],
   };
+  for (const pack of ['python', 'mule', 'salesforce', 'rust', 'dart', 'cpp']) {
+    jobs[pack] = readFileSync(join(REPO, `templates/packs/${pack}/ci.yml`), 'utf8');
+  }
 
-  it('every pack with ci-stage tools is owned by exactly one job, never the base job', () => {
-    configure();
-    generate(stacks);
-    const r = g(['ci-jobs']);
-    assert.equal(r.status, 0, r.out);
-    const owners = (pack) =>
-      r.out.split('\n').filter((l) => new RegExp(`ci-stage tools of [^;]*\\b${pack}\\b`).test(l));
-    for (const pack of stacks) assert.equal(owners(pack).length, 1, `${pack}: ${owners(pack)}`);
-    assert.match(r.out, / verify: appears to run [^;]*; ci-stage tools of no pack/);
-    assert.doesNotMatch(r.out, /warning/);
+  it('every ci-stage pack is owned by exactly one job, and never by the base job', () => {
+    const ciPacks = PACKS.filter((p) => p.tools.some((t) => t.stages.includes('ci'))).map(
+      (p) => p.id,
+    );
+    assert.ok(ciPacks.length >= 5);
+    for (const pack of ciPacks) {
+      const owners = Object.entries(jobs)
+        .filter(([, text]) => owned(text).includes(pack))
+        .map(([name]) => name);
+      assert.deepEqual(owners, [pack], `${pack} ci tools run in: ${owners.join(', ')}`);
+    }
+    assert.deepEqual(owned(jobs.verify), []);
   });
 
-  it('dropping a pack job is warned about (advisory, exit 0)', () => {
-    configure();
-    generate(stacks.filter((p) => p !== 'salesforce'));
-    const r = g(['ci-jobs']);
-    assert.equal(r.status, 0);
+  it('the base job does not promise enforcement the gate does not do', () => {
+    assert.doesNotMatch(jobs.verify, /fails if an enabled pack/);
+  });
+});
+
+describe('ci-stage tools left to other jobs are named', () => {
+  it('prints one line when the ci stage is on but GUARDRAILS_CI_PACKS excludes the pack', () => {
+    put('pyproject.toml', '[tool.coverage.run]\nsource = ["src"]\n');
+    coverage(90);
+    const r = g(['check'], { CI: 'true', GUARDRAILS_CI_PACKS: 'none' });
+    assert.equal(r.status, 0, r.out);
     assert.match(
       r.out,
-      /warning: pack salesforce has ci-stage tools \(apex-coverage\) and no job appears to select it/,
+      /ci-stage tools left to other jobs: pytest-cov \(GUARDRAILS_CI_PACKS=none\)/,
     );
+  });
+});
+
+describe('tools newly active after an upgrade', () => {
+  it('names them until a baseline command acknowledges them', () => {
+    put('guardrails.baseline.json', JSON.stringify({ version: 1, counts: {} }));
+    put('pyproject.toml', '[tool.ruff]\nline-length = 100\n');
+    fake('ruff', { stdout: '[]' });
+    fake('ruff-format', { stdout: '' });
+    assert.match(
+      g(['check']).out,
+      /tools newly active since the baseline was written: ruff, ruff-format/,
+    );
+    g(['baseline', '--tighten']);
+    assert.doesNotMatch(g(['check']).out, /newly active/);
+  });
+
+  it('says nothing for a project with no baseline yet', () => {
+    put('pyproject.toml', '[tool.ruff]\nline-length = 100\n');
+    fake('ruff', { stdout: '[]' });
+    fake('ruff-format', { stdout: '' });
+    assert.doesNotMatch(g(['check']).out, /newly active/);
   });
 });

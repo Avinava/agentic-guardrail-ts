@@ -114,7 +114,7 @@ describe('apex-coverage floor', () => {
     fake('sf-apex', {
       stdout: JSON.stringify({
         status: 0,
-        result: { summary: { outcome, orgWideCoverage, failing: 0 } },
+        result: { summary: { outcome, orgWideCoverage, failing: 0, testsRan: 5 } },
       }),
     });
 
@@ -147,7 +147,7 @@ describe('apex-coverage runs in CI only', () => {
     put('guardrails/apex-coverage.json', '{"targetOrg":"ci-scratch"}\n');
     fake('sf-apex', {
       stdout: JSON.stringify({
-        result: { summary: { outcome: 'Passed', orgWideCoverage: '82%' } },
+        result: { summary: { outcome: 'Passed', orgWideCoverage: '82%', testsRan: 5 } },
       }),
     });
     ci(['baseline', '--init']);
@@ -158,9 +158,25 @@ describe('apex-coverage runs in CI only', () => {
 
   it('a summary without orgWideCoverage fails instead of recording NaN', () => {
     put('guardrails/apex-coverage.json', '{"targetOrg":"ci-scratch"}\n');
-    fake('sf-apex', { stdout: JSON.stringify({ result: { summary: { outcome: 'Passed' } } }) });
+    fake('sf-apex', {
+      stdout: JSON.stringify({ result: { summary: { outcome: 'Passed', testsRan: 5 } } }),
+    });
     const r = ci(['baseline', '--init']);
     assert.equal(r.status, 1);
     assert.match(r.out, /apex-coverage reading is missing or not a number/);
+  });
+});
+
+describe('apex coverage zero denominator', () => {
+  it('a run with no tests fails instead of recording a number', () => {
+    put('guardrails/apex-coverage.json', '{"targetOrg":"ci-scratch"}\n');
+    fake('sf-apex', {
+      stdout: JSON.stringify({
+        result: { summary: { outcome: 'Passed', orgWideCoverage: '0%', testsRan: 0 } },
+      }),
+    });
+    const r = ci(['baseline', '--init']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /ran no tests/);
   });
 });

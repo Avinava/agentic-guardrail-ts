@@ -75,7 +75,7 @@ const OXLINT_ON = [
   'oxlint.config.ts',
   { file: 'package.json', has: /"oxlint"\s*:/ },
 ];
-const KNIP_ON = [
+const KNIP_CONFIGS = [
   'knip.json',
   'knip.jsonc',
   '.knip.json',
@@ -83,8 +83,8 @@ const KNIP_ON = [
   'knip.ts',
   'knip.js',
   'knip.config.ts',
-  { file: 'package.json', has: /"knip"\s*:/ },
 ];
+const KNIP_ON = [...KNIP_CONFIGS, { file: 'package.json', has: /"knip"\s*:/ }];
 
 const ts = {
   id: 'ts',
@@ -151,10 +151,18 @@ const ts = {
       ok: ANY_EXIT,
       stages: ['push'],
       whole: true,
-      run: ({ h }) =>
-        h.bin('knip')
-          ? { cmd: h.bin('knip'), args: ['--reporter', 'json', '--no-progress'] }
-          : null,
+      // v3 skipped Knip when its binary was absent. Keep that only when nothing configures it: a
+      // Knip config file that exists with no binary installed is a broken install, never a pass.
+      run: ({ h }) => {
+        if (h.bin('knip'))
+          return { cmd: h.bin('knip'), args: ['--reporter', 'json', '--no-progress'] };
+        const config = KNIP_CONFIGS.find((f) => h.exists(f));
+        if (config)
+          throw new Error(
+            `knip is configured (${config}) but not installed. Install devDependencies first.`,
+          );
+        return null;
+      },
       parse: (out) => json('knip', out.stdout).issues.flatMap(knipItems),
     },
     {
@@ -366,6 +374,10 @@ const core = {
             (c) =>
               `${c.firstFile.name}:${c.firstFile.start} = ${c.secondFile.name}:${c.secondFile.start} (${c.lines} lines)`,
           );
+        // 0% duplication from a scan of nothing (a wrong path) must not read as perfect.
+        if (!(report.statistics?.total?.sources > 0)) {
+          throw new Error('jscpd scanned no files; check "path" and "format" in .jscpd.json');
+        }
         return { value: report.statistics.total.percentage, detail };
       },
     },
@@ -564,7 +576,12 @@ const python = {
         if (r.status !== 0 || !h.exists(tmp('cov.json'))) {
           throw new Error(`pytest failed (exit ${r.status}):\n${tail(r.stdout || r.stderr)}`);
         }
-        return { value: json('pytest-cov', h.read(tmp('cov.json'))).totals.percent_covered };
+        const totals = json('pytest-cov', h.read(tmp('cov.json'))).totals;
+        // coverage.py reports 100% for a run that measured no statements; that is not coverage.
+        if (!(totals?.num_statements > 0)) {
+          throw new Error('pytest-cov measured no statements; check [tool.coverage.run] source');
+        }
+        return { value: totals.percent_covered };
       },
     },
   ],
@@ -843,6 +860,10 @@ const salesforce = {
           );
         if (summary.outcome !== 'Passed')
           throw new Error(`Apex tests ${summary.outcome}: ${summary.failing} failing`);
+        // An org with no tests run has no coverage to report; do not read that as a number.
+        if (!(Number(summary.testsRan) > 0)) {
+          throw new Error('sf apex run test ran no tests; there is no coverage to record');
+        }
         return { value: Number.parseFloat(summary.orgWideCoverage) };
       },
     },
@@ -1016,21 +1037,26 @@ const rust = {
         args: ['clippy', '--all-targets', '--message-format', 'json', '--', '-D', 'warnings'],
       }),
       // --all-targets compiles a file once per target, so the same lint can print twice.
+      // A compile error (rustc E-codes, or an error with no code) means the build is broken, not
+      // that there is lint debt: it is an always-finding, never baselined, and always fails.
       parse: (out) => {
         const seen = new Map();
         for (const l of out.stdout.split('\n')) {
           if (!l.startsWith('{')) continue;
           const d = json('clippy', l);
           const m = d.message;
-          const span = m?.spans?.find((s) => s.is_primary);
-          if (d.reason !== 'compiler-message' || !m.code || !span) continue;
+          if (d.reason !== 'compiler-message' || !m) continue;
+          const span = m.spans?.find((s) => s.is_primary);
+          const compileError = m.level === 'error' && (!m.code || /^E\d{4}$/.test(m.code.code));
+          if (!compileError && (!m.code || !span)) continue;
           const found = {
-            rule: m.code.code,
-            file: span.file_name,
-            line: span.line_start,
+            rule: compileError ? (m.code?.code ?? 'compile-error') : m.code.code,
+            file: span?.file_name ?? 'Cargo.toml',
+            line: span?.line_start,
             message: m.message,
+            always: compileError,
           };
-          seen.set(`${found.rule}|${found.file}|${found.line}`, found);
+          seen.set(`${found.rule}|${found.file}|${found.line}|${found.message}`, found);
         }
         return [...seen.values()];
       },
@@ -1153,17 +1179,25 @@ const dart = {
       },
       measure: ({ h }) => {
         if (!isFlutter(h)) return null;
+        // Remove any old report first, so the one read below was written by this run.
+        h.remove('coverage/lcov.info');
         const r = h.run('flutter', ['test', '--coverage']);
         if (r.status !== 0)
           throw new Error(`flutter test failed (exit ${r.status}):\n${tail(r.stdout || r.stderr)}`);
+        const lcov = h.exists('coverage/lcov.info') ? h.read('coverage/lcov.info') : '';
         const sum = (tag) =>
-          h
-            .read('coverage/lcov.info')
+          lcov
             .split('\n')
             .filter((l) => l.startsWith(`${tag}:`))
             .reduce((n, l) => n + Number(l.slice(tag.length + 1)), 0);
         const found = sum('LF');
-        return { value: found === 0 ? 100 : (sum('LH') / found) * 100 };
+        // An empty, truncated or all-zero report is not 100% coverage.
+        if (!lcov.includes('end_of_record') || !(found > 0)) {
+          throw new Error(
+            'flutter test wrote no usable coverage/lcov.info (empty, truncated or no lines)',
+          );
+        }
+        return { value: (sum('LH') / found) * 100 };
       },
     },
   ],

@@ -4,7 +4,7 @@
 //   node --test scripts/packs-core-test.mjs
 
 import assert from 'node:assert/strict';
-import { rmSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import {
@@ -219,7 +219,7 @@ describe('markdownlint and lychee', () => {
 
 describe('jscpd percentage ratchet', () => {
   const report = (percentage) => ({
-    statistics: { total: { percentage } },
+    statistics: { total: { percentage, sources: 2 } },
     duplicates: [
       { lines: 11, firstFile: { name: 'a.ts', start: 1 }, secondFile: { name: 'b.ts', start: 1 } },
     ],
@@ -346,9 +346,9 @@ describe('metric readings are validated', () => {
   beforeEach(() => put('.jscpd.json', '{"path":["src"]}\n'));
 
   it('a missing reading fails the check and cannot erase the stored ratchet', () => {
-    measure({ total: { percentage: 4.1 } });
+    measure({ total: { percentage: 4.1, sources: 2 } });
     g(['baseline', '--init']);
-    measure({ total: {} });
+    measure({ total: { sources: 2 } });
     const r = g(['check']);
     assert.equal(r.status, 1);
     assert.match(r.out, /duplication reading is missing or not a number/);
@@ -357,7 +357,7 @@ describe('metric readings are validated', () => {
   });
 
   it('a recorded metric that nothing measures fails instead of being skipped', () => {
-    measure({ total: { percentage: 4.1 } });
+    measure({ total: { percentage: 4.1, sources: 2 } });
     g(['baseline', '--init']);
     rmSync(join(state.dir, '.jscpd.json'));
     const r = g(['check']);
@@ -366,7 +366,7 @@ describe('metric readings are validated', () => {
   });
 
   it('tighten never drops a stored metric that was not measured', () => {
-    measure({ total: { percentage: 4.1 } });
+    measure({ total: { percentage: 4.1, sources: 2 } });
     g(['baseline', '--init']);
     rmSync(join(state.dir, '.jscpd.json'));
     g(['baseline', '--tighten']);
@@ -507,5 +507,66 @@ describe('paths that contain a pipe', () => {
     assert.equal(r.status, 1);
     assert.match(r.out, /src\/we\|rd\.ts:1 {2}ast-grep r/);
     assert.equal(g(['check', '--files', 'src/a.ts']).status, 0);
+  });
+});
+
+describe('a configured tool whose binary is missing fails, never skips', () => {
+  it('Knip with a config file and no binary fails with an install hint', () => {
+    put('knip.json', '{}\n');
+    rmSync(join(state.dir, 'node_modules/.bin/knip'));
+    const r = g(['check']);
+    assert.equal(r.status, 1);
+    assert.match(
+      r.out,
+      /knip is configured \(knip\.json\) but not installed\. Install devDependencies first/,
+    );
+  });
+
+  it('keeps v3 behaviour: no Knip config and no binary is skipped', () => {
+    rmSync(join(state.dir, 'node_modules/.bin/knip'));
+    assert.equal(g(['check']).status, 0);
+  });
+});
+
+describe('a zero denominator is not perfect', () => {
+  it('jscpd that scanned no files fails instead of reporting 0%', () => {
+    put('.jscpd.json', '{"path":["nowhere"]}\n');
+    fake('jscpd', {
+      writes: [
+        {
+          flag: '--output',
+          join: 'jscpd-report.json',
+          content: { statistics: { total: { percentage: 0, sources: 0 } }, duplicates: [] },
+        },
+      ],
+    });
+    const r = g(['baseline', '--init']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /jscpd scanned no files/);
+  });
+});
+
+describe('nested Python projects are not supported', () => {
+  it('a pyproject.toml below the repo root does not switch Python tools on', () => {
+    put('services/api/pyproject.toml', '[tool.ruff]\nline-length = 100\n');
+    const r = g(['packs']);
+    assert.match(r.out, /off ruff/);
+    assert.deepEqual(calls('uv'), []);
+  });
+});
+
+describe('markdownlint template', () => {
+  it('is an allowlist of structural rules, not all rules with exceptions', () => {
+    const text = readFileSync(
+      join(import.meta.dirname, '..', 'templates/packs/core/docs/.markdownlint-cli2.jsonc'),
+      'utf8',
+    );
+    assert.match(text, /"default": false/);
+    for (const rule of ['MD001', 'MD022', 'MD031', 'MD032', 'MD040', 'MD042', 'MD051', 'MD056']) {
+      assert.match(text, new RegExp(`"${rule}"`));
+    }
+    for (const formatting of ['MD009', 'MD012', 'MD013', 'MD033', 'MD041', 'MD055', 'MD060']) {
+      assert.doesNotMatch(text, new RegExp(`"${formatting}"`));
+    }
   });
 });

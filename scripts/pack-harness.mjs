@@ -59,7 +59,7 @@ const PATH_BINS = [
 // A fake binary. Which canned spec answers a call:
 //   uv run <tool> <sub> ...  -> <tool>-<sub>.json when it exists, else <tool>.json
 //   <name> <sub> ...   -> <name>-<sub>.json when it exists, else <name>.json
-// A spec is { stdout, stderr, status, writes: [{ flag, join?, content }] }; `writes` creates the
+// A spec is { stdout, stderr, status, files: { path: text }, writes: [{ flag, join?, content }] }; `writes` creates the
 // files the real tool would write to a flag's value. Every call is logged to <name>.args.
 const FAKE = `#!/usr/bin/env node
 const fs = require('node:fs');
@@ -78,6 +78,10 @@ for (const w of canned.writes ?? []) {
   const base = arg ? arg.slice(w.prefix.length) : argv[argv.indexOf(w.flag) + 1];
   fs.mkdirSync(w.join ? base : path.dirname(base), { recursive: true });
   fs.writeFileSync(w.join ? path.join(base, w.join) : base, JSON.stringify(w.content));
+}
+for (const [p, text] of Object.entries(canned.files ?? {})) {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, text);
 }
 process.stdout.write(canned.stdout ?? '');
 process.stderr.write(canned.stderr ?? '');
