@@ -118,7 +118,10 @@ function installFakes(binDir, names) {
 
 function envFor(extra = {}) {
   const path = `${join(state.dir, '.path')}:${process.env.PATH}`;
-  return { ...process.env, FAKE_DIR: state.fakeDir, PATH: path, ...extra };
+  // The runner's own CI settings must not leak in: tests choose the stage explicitly.
+  const clean = { ...process.env };
+  for (const k of ['CI', 'GUARDRAILS_CI', 'GUARDRAILS_PACKS', 'GUARDRAILS_ONLINE']) delete clean[k];
+  return { ...clean, FAKE_DIR: state.fakeDir, PATH: path, ...extra };
 }
 
 export function setup() {

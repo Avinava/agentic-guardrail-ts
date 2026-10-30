@@ -153,3 +153,15 @@ describe('mule pack, review fixes', () => {
     assert.deepEqual(calls('mvn'), []);
   });
 });
+
+describe('directories that look like options', () => {
+  it('passes a Mule application directory named -legacy as ./-legacy', () => {
+    put('-legacy/mule-artifact.json', '{}\n');
+    put('-legacy/src/main/mule/a.xml', '<mule/>\n');
+    fake('mule-lint-format', { stdout: '' });
+    g(['check']);
+    const dirs = calls('mule-lint').map((a) => (a[0] === 'format' ? a[2] : a[0]));
+    assert.ok(dirs.includes('./-legacy'), JSON.stringify(dirs));
+    assert.ok(!dirs.includes('-legacy'));
+  });
+});

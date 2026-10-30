@@ -11,4 +11,6 @@
       - name: Firmware guardrails (clang-format, pio check)
         run: node scripts/guardrails.mjs check --strict-baseline
         env:
+          # Only this pack runs in this job; the verify job in ci.yml runs core and ts.
+          GUARDRAILS_PACKS: cpp
           GUARDRAILS_CI: '1'

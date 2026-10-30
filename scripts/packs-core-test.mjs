@@ -489,3 +489,23 @@ describe('keys and arguments', () => {
     assert.ok(!args.includes('--config=x.md'));
   });
 });
+
+describe('paths that contain a pipe', () => {
+  it('still scopes findings (and whole-tool failures) to the right file', () => {
+    put('sgconfig.yml', 'ruleDirs: []\n');
+    put('src/we|rd.ts', 'export {};\n');
+    fake('ast-grep', {
+      stdout: JSON.stringify({
+        ruleId: 'r',
+        file: 'src/we|rd.ts',
+        message: 'm',
+        range: { start: { line: 0 } },
+      }),
+      status: 1,
+    });
+    const r = g(['check', '--files', 'src/we|rd.ts']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /src\/we\|rd\.ts:1 {2}ast-grep r/);
+    assert.equal(g(['check', '--files', 'src/a.ts']).status, 0);
+  });
+});

@@ -15,4 +15,6 @@
       - name: Dart guardrails (format, analyze, coverage floor)
         run: node scripts/guardrails.mjs check --strict-baseline
         env:
+          # Only this pack runs in this job; the verify job in ci.yml runs core and ts.
+          GUARDRAILS_PACKS: dart
           GUARDRAILS_CI: '1'

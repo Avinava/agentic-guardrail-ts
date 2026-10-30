@@ -597,7 +597,7 @@ const mule = {
       scan: ({ h }) =>
         muleProjects(h).flatMap((dir) => {
           const r = h.run(h.needBin('mule-lint'), [
-            dir,
+            h.safe(dir),
             '--config',
             MULE_CONFIG,
             '--format',
@@ -627,7 +627,7 @@ const mule = {
       whole: true,
       scan: ({ h }) =>
         muleProjects(h).flatMap((dir) => {
-          const r = h.run(h.needBin('mule-lint'), ['format', '--check', dir]);
+          const r = h.run(h.needBin('mule-lint'), ['format', '--check', h.safe(dir)]);
           if (r.status !== 0 && r.status !== 1) {
             throw new Error(
               `mule-lint format failed (exit ${r.status}):\n${tail(r.stderr || r.stdout)}`,
@@ -685,7 +685,7 @@ const mule = {
           .projectFiles(/(^|\/)pom\.xml$/)
           .filter((pom) => /munit-maven-plugin/.test(h.read(pom)))
           .flatMap((pom) => {
-            const r = h.run('mvn', ['-B', '-ntp', '-q', '-f', pom, 'test']);
+            const r = h.run('mvn', ['-B', '-ntp', '-q', '-f', h.safe(pom), 'test']);
             return r.status === 0
               ? []
               : [
@@ -738,7 +738,7 @@ const salesforce = {
           args: [
             'code-analyzer',
             'run',
-            ...dirs.flatMap((d) => ['--workspace', d]),
+            ...dirs.flatMap((d) => ['--workspace', h.safe(d)]),
             ...inside.flatMap((f) => ['--target', f]),
             '--output-file',
             tmp('code-analyzer.json'),

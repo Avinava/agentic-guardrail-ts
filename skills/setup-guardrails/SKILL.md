@@ -465,15 +465,46 @@ function matchesOptIn(o) {
   return existsSync(file) && o.has.test(readFileSync(file, 'utf8'));
 }
 
-let active = null;
+let configured = null;
 
-// A tool is on when any of its optIn entries matches: a config file that exists (a string), or
-// exists and matches a pattern ({ file, has }). optIn === null means always on (no pack uses it).
-function activeTools() {
-  active ??= PACKS.flatMap((p) => p.tools.map((t) => ({ ...t, pack: p.id }))).filter(
+// A tool is configured when any of its optIn entries matches: a config file that exists (a string),
+// or exists and matches a pattern ({ file, has }). optIn === null means always on.
+function configuredTools() {
+  configured ??= PACKS.flatMap((p) => p.tools.map((t) => ({ ...t, pack: p.id }))).filter(
     (t) => t.optIn === null || t.optIn.some(matchesOptIn),
   );
-  return active;
+  return configured;
+}
+
+// GUARDRAILS_PACKS=core,ts limits a run to those packs (default: all). A multi-stack pipeline uses
+// it so each job runs only the packs it has a toolchain for, and each expensive tool runs once.
+function selectedPacks() {
+  const value = process.env.GUARDRAILS_PACKS?.trim();
+  if (!value) return null;
+  const ids = value
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const unknown = ids.filter((id) => !PACKS.some((p) => p.id === id));
+  if (unknown.length > 0)
+    throw new Error(`GUARDRAILS_PACKS names unknown pack(s): ${unknown.join(', ')}`);
+  return new Set(ids);
+}
+
+// The tools this run may use: configured, and in a selected pack.
+function activeTools() {
+  const selected = selectedPacks();
+  return configuredTools().filter((t) => !selected || selected.has(t.pack));
+}
+
+// The ci stage is on when GUARDRAILS_CI=1, or when the standard CI variable is set (GitHub Actions
+// and GitLab both set CI=true). GUARDRAILS_CI=0 forces it off.
+function ciOn() {
+  const flag = process.env.GUARDRAILS_CI;
+  if (flag === '0') return false;
+  if (flag === '1') return true;
+  const ci = process.env.CI?.toLowerCase();
+  return Boolean(ci) && ci !== '0' && ci !== 'false';
 }
 
 // File types the gate tracks: JS/TS always, plus whatever the active tools declare.
@@ -529,6 +560,8 @@ const HELPERS = {
   read: (p) => readFileSync(isAbsolute(p) ? p : join(ROOT, p), 'utf8'),
   run,
   settle,
+  // A path that starts with '-' would be read as an option; scan tools wrap paths they pass.
+  safe: (p) => (p.startsWith('-') ? `./${p}` : p),
   bin,
   needBin,
   rel,
@@ -601,7 +634,23 @@ function runRaw(tool, files, ctx) {
 // run (files === null) is the 'push' stage: pre-push and CI.
 // Tools that declare the 'ci' stage (test suites, org runs, toolchain downloads) run on a full
 // check only when GUARDRAILS_CI=1. CI sets it on one step, so they run once and never on pre-push.
-const fullStages = () => (process.env.GUARDRAILS_CI === '1' ? ['push', 'ci'] : ['push']);
+const fullStages = () => (ciOn() ? ['push', 'ci'] : ['push']);
+
+// Is this configured tool part of a full run right now? Not if its pack is not selected, or if it
+// is a ci-stage tool and the ci stage is off.
+const dueFull = (t) => activeTools().includes(t) && t.stages.some((s) => fullStages().includes(s));
+
+// Active ci-stage tools that did not run because the ci stage is off.
+function deferredCiIds() {
+  return activeTools()
+    .filter((t) => t.stages.includes('ci') && !dueFull(t))
+    .map((t) => t.id);
+}
+
+// Tools whose findings (or metric) this run did not produce. Their stored baseline entries are
+// carried over and never reported stale.
+const notDue = () => configuredTools().filter((t) => !dueFull(t));
+const isNotDueKey = (key) => notDue().some((t) => key.startsWith(`${t.id}:`));
 
 function collect(files, stage = 'commit') {
   const all = files ? scopedFiles(files) : null;
@@ -621,16 +670,14 @@ function collect(files, stage = 'commit') {
 
 // Metric tools that exist but are not due this run (the 'ci' ones on a local check).
 function deferredMetrics() {
-  const due = fullStages();
-  return activeTools()
-    .filter((t) => t.metric && !t.stages.some((s) => due.includes(s)))
+  return notDue()
+    .filter((t) => t.metric)
     .map((t) => t.metric.name);
 }
 
 function measureMetrics() {
-  const due = fullStages();
   return activeTools()
-    .filter((t) => t.metric && t.stages.some((s) => due.includes(s)))
+    .filter((t) => t.metric && dueFull(t))
     .map((t) => {
       const dir = mkdtempSync(join(tmpdir(), 'guardrails-metric-'));
       const ctx = { files: null, h: HELPERS, online: false, tmp: (name) => join(dir, name) };
@@ -685,7 +732,7 @@ function unmeasuredProblems(measured, recorded) {
     .filter((name) => !known.has(name))
     .map(
       (name) =>
-        `${name} is recorded in the baseline but was not measured (its tool is not configured, or does not apply here). Restore the tool, or have a human run: node scripts/guardrails.mjs baseline --reset`,
+        `${name} is recorded in the baseline but was not measured (its tool is not configured, or does not apply here). Restore the tool, or have a human run: GUARDRAILS_CI=1 node scripts/guardrails.mjs baseline --reset`,
     );
 }
 
@@ -720,18 +767,18 @@ function tally(findings) {
   return counts;
 }
 
-// Keys are `tool:rule|file`. A rule can contain `|` (an ls-lint regex), a file path rarely does,
-// so the file is whatever follows the LAST `|`.
-const fileOfKey = (key) => key.slice(key.lastIndexOf('|') + 1);
-
 function compare(findings, baseline, scope) {
   const counts = tally(findings);
-  const inScope = (key) => !scope || scope.has(fileOfKey(key));
+  // The file of a key comes from the finding, not from parsing the key (paths may contain `|`).
+  const fileOf = new Map(findings.map((f) => [f.key, f.file]));
+  const inScope = (key) => !scope || scope.has(fileOf.get(key));
   const grown = new Set(
     Object.keys(counts).filter((k) => inScope(k) && counts[k] > (baseline[k] ?? 0)),
   );
   const fresh = findings.filter((f) => (f.always ? inScope(f.key) : grown.has(f.key)));
-  const stale = scope ? [] : Object.keys(baseline).filter((k) => (counts[k] ?? 0) < baseline[k]);
+  const stale = scope
+    ? []
+    : Object.keys(baseline).filter((k) => (counts[k] ?? 0) < baseline[k] && !isNotDueKey(k));
   return { fresh, stale, counts };
 }
 
@@ -777,12 +824,37 @@ function check(argv) {
   const problems = scope
     ? []
     : [
+        ...invalidMetricProblems(recorded),
         ...measured.flatMap((m) => compareMetric(m, recorded[m.name] ?? null, strict)),
         ...unmeasuredProblems(measured, recorded),
       ];
   if (problems.length > 0) {
     console.error(`guardrails: ${problems.join('\n')}`);
     return 1;
+  }
+  // Say which configured packs this run left to another job (GUARDRAILS_PACKS).
+  const selected = selectedPacks();
+  const elsewhere = selected
+    ? [
+        ...new Set(
+          configuredTools()
+            .filter((t) => !selected.has(t.pack))
+            .map((t) => t.pack),
+        ),
+      ]
+    : [];
+  if (!scope && elsewhere.length > 0) {
+    console.log(`guardrails: packs left to other jobs (GUARDRAILS_PACKS): ${elsewhere.join(', ')}`);
+  }
+  // Never silent about ci-stage tools that did not run: say so, and under --strict-baseline fail.
+  const deferred = scope ? [] : deferredCiIds();
+  if (deferred.length > 0) {
+    const note = `deferred: ${deferred.join(', ')} (set GUARDRAILS_CI=1 or run in CI)`;
+    if (strict) {
+      console.error(`guardrails: --strict-baseline cannot pass with ${note}`);
+      return 1;
+    }
+    console.log(`guardrails: ${note}`);
   }
   console.log(`guardrails: clean${scope ? ` (${scope.size} file(s))` : ''}`);
   if (stale.length > 0) {
@@ -796,6 +868,19 @@ function check(argv) {
   return 0;
 }
 
+// A stored metric that is not a finite number (a null left by an old bug) must not read as
+// "unrecorded", which would let any value through.
+const validNumber = (v) => typeof v === 'number' && Number.isFinite(v);
+
+function invalidMetricProblems(recorded) {
+  return Object.entries(recorded)
+    .filter(([, v]) => !validNumber(v))
+    .map(
+      ([name, v]) =>
+        `${name} has an invalid stored value (${JSON.stringify(v)}) in the baseline. A human must run: GUARDRAILS_CI=1 node scripts/guardrails.mjs baseline --reset, or tighten to record the current reading`,
+    );
+}
+
 // Metrics only move the right way. Returns the values to record, or null when one regressed. A
 // first recording is allowed: enabling a tool is itself a reviewed config change.
 function tightenMetrics() {
@@ -803,7 +888,13 @@ function tightenMetrics() {
   // Stored metrics that were not measured this run are carried over, never dropped.
   const next = { ...old };
   for (const m of measureMetrics()) {
-    const was = old[m.name] ?? null;
+    let was = old[m.name] ?? null;
+    if (m.name in old && !validNumber(old[m.name])) {
+      console.error(
+        `guardrails: the stored ${m.name} was invalid (${JSON.stringify(old[m.name])}); recording the current reading ${m.value}${m.unit} explicitly. Review it.`,
+      );
+      was = null;
+    }
     const regressed =
       was !== null && (m.direction === 'down' ? m.value > was + EPSILON : m.value < was - EPSILON);
     if (regressed) {
@@ -828,7 +919,10 @@ function baselineCmd(argv) {
     );
     return 1;
   }
-  const counts = tally(found);
+  // Entries of tools that did not run this time (ci-stage, or another job's pack) are carried over.
+  const oldCounts = readBaseline();
+  const carried = Object.fromEntries(Object.entries(oldCounts).filter(([k]) => isNotDueKey(k)));
+  const counts = { ...tally(found), ...carried };
   if (argv.includes('--tighten')) {
     const old = readBaseline();
     const grown = Object.keys(counts).filter((k) => counts[k] > (old[k] ?? 0));
@@ -1619,7 +1713,7 @@ const mule = {
       scan: ({ h }) =>
         muleProjects(h).flatMap((dir) => {
           const r = h.run(h.needBin('mule-lint'), [
-            dir,
+            h.safe(dir),
             '--config',
             MULE_CONFIG,
             '--format',
@@ -1649,7 +1743,7 @@ const mule = {
       whole: true,
       scan: ({ h }) =>
         muleProjects(h).flatMap((dir) => {
-          const r = h.run(h.needBin('mule-lint'), ['format', '--check', dir]);
+          const r = h.run(h.needBin('mule-lint'), ['format', '--check', h.safe(dir)]);
           if (r.status !== 0 && r.status !== 1) {
             throw new Error(
               `mule-lint format failed (exit ${r.status}):\n${tail(r.stderr || r.stdout)}`,
@@ -1707,7 +1801,7 @@ const mule = {
           .projectFiles(/(^|\/)pom\.xml$/)
           .filter((pom) => /munit-maven-plugin/.test(h.read(pom)))
           .flatMap((pom) => {
-            const r = h.run('mvn', ['-B', '-ntp', '-q', '-f', pom, 'test']);
+            const r = h.run('mvn', ['-B', '-ntp', '-q', '-f', h.safe(pom), 'test']);
             return r.status === 0
               ? []
               : [
@@ -1760,7 +1854,7 @@ const salesforce = {
           args: [
             'code-analyzer',
             'run',
-            ...dirs.flatMap((d) => ['--workspace', d]),
+            ...dirs.flatMap((d) => ['--workspace', h.safe(d)]),
             ...inside.flatMap((f) => ['--target', f]),
             '--output-file',
             tmp('code-analyzer.json'),
@@ -3196,6 +3290,8 @@ ignore:
       - name: Python guardrails (ruff, pyright, tach, deptry, vulture, coverage floor)
         run: node scripts/guardrails.mjs check --strict-baseline
         env:
+          # Only this pack runs in this job; the verify job in ci.yml runs core and ts.
+          GUARDRAILS_PACKS: python
           GUARDRAILS_CI: '1'
 ```
 <!-- /tmpl -->
@@ -3364,6 +3460,8 @@ ignore:
       - name: Mule guardrails (mule-lint, secrets in properties, MUnit and coverage)
         run: node scripts/guardrails.mjs check --strict-baseline
         env:
+          # Only this pack runs in this job; the verify job in ci.yml runs core and ts.
+          GUARDRAILS_PACKS: mule
           GUARDRAILS_CI: '1'
 ```
 <!-- /tmpl -->
@@ -3468,6 +3566,8 @@ pre-commit:
       - name: Salesforce guardrails (Code Analyzer, format, metadata, Apex coverage floor)
         run: node scripts/guardrails.mjs check --strict-baseline
         env:
+          # Only this pack runs in this job; the verify job in ci.yml runs core and ts.
+          GUARDRAILS_PACKS: salesforce
           GUARDRAILS_CI: '1'
 ```
 <!-- /tmpl -->
@@ -3634,6 +3734,8 @@ ignored = []
       - name: Rust guardrails (fmt, clippy, deny, machete)
         run: node scripts/guardrails.mjs check --strict-baseline
         env:
+          # Only this pack runs in this job; the verify job in ci.yml runs core and ts.
+          GUARDRAILS_PACKS: rust
           GUARDRAILS_CI: '1'
 ```
 <!-- /tmpl -->
@@ -3728,6 +3830,8 @@ linter:
       - name: Dart guardrails (format, analyze, coverage floor)
         run: node scripts/guardrails.mjs check --strict-baseline
         env:
+          # Only this pack runs in this job; the verify job in ci.yml runs core and ts.
+          GUARDRAILS_PACKS: dart
           GUARDRAILS_CI: '1'
 ```
 <!-- /tmpl -->
@@ -3770,6 +3874,8 @@ SortIncludes: CaseSensitive
       - name: Firmware guardrails (clang-format, pio check)
         run: node scripts/guardrails.mjs check --strict-baseline
         env:
+          # Only this pack runs in this job; the verify job in ci.yml runs core and ts.
+          GUARDRAILS_PACKS: cpp
           GUARDRAILS_CI: '1'
 ```
 <!-- /tmpl -->
@@ -3821,6 +3927,12 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # Each job runs only the packs it has a toolchain for, so every expensive tool runs once per
+      # pipeline. This job owns core and ts. Packs with their own job (templates/packs/*/ci.yml:
+      # python, mule, salesforce, rust, dart, cpp) must NOT be listed here. Add shell, docker or sql
+      # once this job installs their tools. Remove the line to run every pack in this one job.
+      GUARDRAILS_PACKS: core,ts
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -3839,11 +3951,8 @@ jobs:
       - name: Verify (format, typecheck, guardrails, tests with coverage)
         run: node scripts/guardrails.mjs verify
 
-      # GUARDRAILS_CI=1 also runs the expensive pack tools (test suites, org runs) exactly once.
       - name: Baseline is tight
         run: node scripts/guardrails.mjs check --strict-baseline
-        env:
-          GUARDRAILS_CI: '1'
 
       - name: Commit messages
         if: github.event_name == 'pull_request'
