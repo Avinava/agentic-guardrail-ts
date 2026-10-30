@@ -10,6 +10,7 @@ import {
   calls,
   fake,
   g,
+  ci,
   put,
   recordedCounts,
   setup,
@@ -53,9 +54,17 @@ describe('rust pack', () => {
     });
   });
 
-  it('keys cargo-fmt, clippy, cargo-deny and cargo-machete findings', () => {
+  it('a failing cargo-deny policy is never baselined, so it keeps failing', () => {
+    const r = g(['baseline', '--init']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /cannot baseline while a tool is failing as a whole/);
+    assert.match(r.out, /cargo-deny policy/);
+    assert.equal(g(['check']).status, 1);
+  });
+
+  it('keys cargo-fmt, clippy and cargo-machete findings', () => {
+    fake('cargo-deny', { status: 0 });
     assert.deepEqual(recordedCounts(), {
-      'cargo-deny:policy|deny.toml': 1,
       'cargo-fmt:format|src/lib.rs': 1,
       'cargo-machete:unused-dependency|Cargo.toml': 2,
       'clippy:clippy::needless_return|src/lib.rs': 1,
@@ -120,10 +129,10 @@ describe('dart pack', () => {
     fake('flutter-analyze', { stdout: 'No issues found!\n', status: 0 });
     fake('flutter-test', { stdout: 'All tests passed!\n', status: 0 });
     put('coverage/lcov.info', 'SF:lib/main.dart\nLF:10\nLH:8\nend_of_record\n');
-    g(['baseline', '--init']);
+    ci(['baseline', '--init']);
     assert.equal(baselineFile().metrics['flutter-coverage'], 80);
     put('coverage/lcov.info', 'SF:lib/main.dart\nLF:10\nLH:7\nend_of_record\n');
-    assert.match(g(['check']).out, /flutter-coverage 70% is below the baseline 80%/);
+    assert.match(ci(['check']).out, /flutter-coverage 70% is below the baseline 80%/);
   });
 });
 
@@ -157,19 +166,21 @@ describe('cpp pack', () => {
   });
 
   it('keys clang-format:format and pio-check findings', () => {
-    const counts = recordedCounts();
+    const counts = recordedCounts({ GUARDRAILS_CI: '1' });
     assert.equal(counts['clang-format:format|src/main.cpp'], 1);
     assert.equal(counts['pio-check:cppcheck.nullPointer|src/main.cpp'], 1);
   });
 
-  it('runs pio check on full checks only', () => {
-    g(['check', '--files', 'src/main.cpp']);
+  it('runs pio check on a CI full check only: not scoped, not on pre-push', () => {
+    ci(['check', '--files', 'src/main.cpp']);
+    assert.deepEqual(calls('pio'), []);
+    g(['check']);
     assert.deepEqual(calls('pio'), []);
   });
 
   it('is off for pio check without check_tool in platformio.ini', () => {
     put('platformio.ini', '[env:uno]\nboard = uno\n');
-    g(['check']);
+    ci(['check']);
     assert.deepEqual(calls('pio'), []);
   });
 });

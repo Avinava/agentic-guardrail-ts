@@ -11,6 +11,7 @@ import {
   calls,
   fake,
   g,
+  ci,
   postEdit,
   put,
   recordedCounts,
@@ -161,22 +162,84 @@ describe('python coverage floor', () => {
 
   it('records the floor and fails when coverage drops', () => {
     cov(82.5);
-    assert.equal(g(['baseline', '--init']).status, 0);
+    assert.equal(ci(['baseline', '--init']).status, 0);
     assert.equal(baselineFile().metrics['python-coverage'], 82.5);
     cov(80);
-    const r = g(['check']);
+    const r = ci(['check']);
     assert.equal(r.status, 1);
     assert.match(r.out, /python-coverage 80% is below the baseline 82\.5%/);
   });
 
   it('only tightens upward', () => {
     cov(82.5);
-    g(['baseline', '--init']);
+    ci(['baseline', '--init']);
     cov(80);
-    assert.equal(g(['baseline', '--tighten']).status, 1);
+    assert.equal(ci(['baseline', '--tighten']).status, 1);
     cov(90);
-    assert.equal(g(['check', '--strict-baseline']).status, 1);
+    assert.equal(ci(['check', '--strict-baseline']).status, 1);
+    assert.equal(ci(['baseline', '--tighten']).status, 0);
+    assert.equal(baselineFile().metrics['python-coverage'], 90);
+  });
+});
+
+describe('python pack, review fixes', () => {
+  beforeEach(() => {
+    put('pyproject.toml', '[tool.coverage.run]\nsource = ["src"]\n');
+    put('tests/test_a.py', 'def test_a():\n    assert True\n');
+  });
+
+  const cov = (percent, status = 0) =>
+    fake('pytest', {
+      stdout: status === 0 ? '1 passed' : 'FAILED tests/test_a.py::test_a',
+      status,
+      writes: [{ prefix: '--cov-report=json:', content: { totals: { percent_covered: percent } } }],
+    });
+
+  it('failing tests fail the gate even though pytest still writes a coverage report', () => {
+    cov(95, 1);
+    const r = ci(['baseline', '--init']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /pytest failed \(exit 1\)/);
+    assert.match(r.out, /FAILED tests\/test_a\.py::test_a/);
+  });
+
+  it('the test suite runs only when GUARDRAILS_CI=1, and once per run', () => {
+    cov(90);
+    g(['check']);
+    g(['check', '--files', 'tests/test_a.py']);
+    assert.deepEqual(calls('pytest'), []);
+    ci(['baseline', '--init']);
+    assert.equal(calls('uv').filter((a) => a[1] === 'pytest').length, 1);
+  });
+
+  it('a local check leaves a CI-recorded coverage floor alone', () => {
+    cov(90);
+    ci(['baseline', '--init']);
+    assert.equal(g(['check']).status, 0);
     assert.equal(g(['baseline', '--tighten']).status, 0);
     assert.equal(baselineFile().metrics['python-coverage'], 90);
+  });
+});
+
+describe('vulture and ruff overlap', () => {
+  it('exit 3 whose only lines are unused imports (owned by ruff) is clean', () => {
+    put(
+      'pyproject.toml',
+      '[tool.ruff]\nline-length = 100\n\n[tool.vulture]\nmin_confidence = 60\n',
+    );
+    put('src/acme/a.py', 'import yaml\n');
+    fake('ruff', { stdout: '[]' });
+    fake('ruff-format', { stdout: '' });
+    fake('vulture', {
+      stdout: "src/acme/a.py:1: unused import 'yaml' (90% confidence)\n",
+      status: 3,
+    });
+    assert.equal(g(['check']).status, 0);
+  });
+
+  it('exit 3 with output it cannot read is still a failure', () => {
+    put('pyproject.toml', '[tool.vulture]\nmin_confidence = 60\n');
+    fake('vulture', { stdout: 'something new\n', status: 3 });
+    assert.match(g(['check']).out, /vulture found dead code but printed nothing readable/);
   });
 });

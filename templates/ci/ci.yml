@@ -36,8 +36,11 @@ jobs:
       - name: Verify (format, typecheck, guardrails, tests with coverage)
         run: node scripts/guardrails.mjs verify
 
+      # GUARDRAILS_CI=1 also runs the expensive pack tools (test suites, org runs) exactly once.
       - name: Baseline is tight
         run: node scripts/guardrails.mjs check --strict-baseline
+        env:
+          GUARDRAILS_CI: '1'
 
       - name: Commit messages
         if: github.event_name == 'pull_request'

@@ -24,3 +24,5 @@
           SF_TARGET_ORG_AUTH_URL: ${{ secrets.SF_TARGET_ORG_AUTH_URL }}
       - name: Salesforce guardrails (Code Analyzer, format, metadata, Apex coverage floor)
         run: node scripts/guardrails.mjs check --strict-baseline
+        env:
+          GUARDRAILS_CI: '1'

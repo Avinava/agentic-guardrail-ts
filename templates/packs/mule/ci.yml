@@ -16,3 +16,5 @@
       - run: npm ci
       - name: Mule guardrails (mule-lint, secrets in properties, MUnit and coverage)
         run: node scripts/guardrails.mjs check --strict-baseline
+        env:
+          GUARDRAILS_CI: '1'

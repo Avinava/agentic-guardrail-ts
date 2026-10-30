@@ -21,6 +21,10 @@
 const TS_EXT = /\.[cm]?[jt]sx?$/;
 const MD_EXT = /\.mdx?$/;
 
+// Exit codes for tools whose JSON report is the authority (v3 ignored their exit status): any exit
+// is fine as long as the report parses, and an unparsable report throws.
+const ANY_EXIT = Array.from({ length: 256 }, (_, i) => i);
+
 // ── Parsing helpers ──
 
 const tail = (s) => s.trim().slice(-2000);
@@ -63,13 +67,33 @@ const knipItems = (issue) =>
       })),
     );
 
+// v3 ran Oxlint unconditionally and Knip whenever its binary was installed. So each tool is on
+// when it has any supported config file, or when the package is a dependency (the v3 shape).
+const OXLINT_ON = [
+  '.oxlintrc.json',
+  '.oxlintrc.jsonc',
+  'oxlint.config.ts',
+  { file: 'package.json', has: /"oxlint"\s*:/ },
+];
+const KNIP_ON = [
+  'knip.json',
+  'knip.jsonc',
+  '.knip.json',
+  '.knip.jsonc',
+  'knip.ts',
+  'knip.js',
+  'knip.config.ts',
+  { file: 'package.json', has: /"knip"\s*:/ },
+];
+
 const ts = {
   id: 'ts',
   detect: [/(^|\/)package\.json$/, /(^|\/)tsconfig[^/]*\.json$/],
   tools: [
     {
       id: 'oxlint',
-      optIn: ['.oxlintrc.json'],
+      optIn: OXLINT_ON,
+      ok: ANY_EXIT,
       exts: TS_EXT,
       stages: ['edit', 'commit', 'push'],
       run: ({ files, h }) =>
@@ -96,6 +120,8 @@ const ts = {
     {
       id: 'depcruise',
       optIn: ['.dependency-cruiser.mjs', '.dependency-cruiser.cjs', '.dependency-cruiser.js'],
+      // dependency-cruiser exits with the number of errors, so any code is a normal report.
+      ok: ANY_EXIT,
       exts: TS_EXT,
       stages: ['commit', 'push'],
       run: ({ files, h }) => {
@@ -121,7 +147,8 @@ const ts = {
     {
       // Needs the whole graph, so full checks only.
       id: 'knip',
-      optIn: ['knip.json'],
+      optIn: KNIP_ON,
+      ok: ANY_EXIT,
       stages: ['push'],
       whole: true,
       run: ({ h }) =>
@@ -133,7 +160,7 @@ const ts = {
     {
       // Every disable comment needs a rule and a reason.
       id: 'guardrails',
-      optIn: ['.oxlintrc.json'],
+      optIn: OXLINT_ON,
       exts: TS_EXT,
       stages: ['edit', 'commit', 'push'],
       scan: ({ files, h }) => {
@@ -274,7 +301,7 @@ const core = {
       optIn: ['lychee.toml', '.lychee.toml'],
       exts: MD_EXT,
       stages: ['commit', 'push'],
-      ok: [0, 1, 2],
+      ok: [0, 2],
       quiet: [2],
       run: ({ files, online, h }) => {
         const docs = targets({ files }, h.projectFiles(MD_EXT));
@@ -286,15 +313,27 @@ const core = {
           args: ['--config', config, '--no-progress', '--format', 'json', ...mode, ...docs],
         };
       },
-      parse: (out, { h }) =>
-        Object.entries(json('lychee', out.stdout).error_map ?? {}).flatMap(([file, errors]) =>
+      // Exit 2 is lychee's "links failed". Exit 1 is a runtime or config error and throws. A report
+      // without error_map, or exit 2 with no failed link and no timeout, means the format changed.
+      parse: (out, { h }) => {
+        const report = json('lychee', out.stdout);
+        if (typeof report.error_map !== 'object' || report.error_map === null) {
+          throw new Error('lychee report has no error_map; its output format changed');
+        }
+        const found = Object.entries(report.error_map).flatMap(([file, errors]) =>
           errors.map((e) => ({
             rule: 'broken-link',
             file,
             line: e.span?.line,
             message: `${e.url.replace(`file://${h.ROOT}/`, '')}: ${e.status?.text ?? 'unreachable'}`,
           })),
-        ),
+        );
+        const timeouts = Object.keys(report.timeout_map ?? {}).length;
+        if (out.status === 2 && found.length === 0 && timeouts === 0) {
+          throw new Error('lychee exited 2 but its report lists no failed link');
+        }
+        return found;
+      },
     },
     {
       // Duplication is a relation between files, so it ratchets as one percentage that may only
@@ -479,9 +518,12 @@ const python = {
       stages: ['push'],
       whole: true,
       ok: [0, 3],
+      // Exit 3 means dead code was found. The ruff filter below may legitimately empty the list, so
+      // the unreadable-output check is done here, on the unfiltered lines.
+      quiet: [3],
       run: () => uvRun('vulture'),
-      parse: (out, { h }) =>
-        lines(/^(.+?):(\d+): (.+?) \(\d+% confidence\)/, ([, file, row, text]) => ({
+      parse: (out, { h }) => {
+        const all = lines(/^(.+?):(\d+): (.+?) \(\d+% confidence\)/, ([, file, row, text]) => ({
           rule: text
             .replace(/'[^']*'/g, '')
             .trim()
@@ -489,15 +531,21 @@ const python = {
           file,
           line: +row,
           message: text,
-        }))(out)
-          // ruff F401 owns unused imports, so vulture does not report them a second time.
-          .filter((f) => !(f.rule === 'unused-import' && h.active('ruff'))),
+        }))(out);
+        if (out.status === 3 && all.length === 0) {
+          throw new Error(
+            `vulture found dead code but printed nothing readable:\n${tail(out.stdout)}`,
+          );
+        }
+        // ruff F401 owns unused imports, so vulture does not report them a second time.
+        return all.filter((f) => !(f.rule === 'unused-import' && h.active('ruff')));
+      },
     },
     {
       // Test coverage may only go up. Needs pytest-cov in the dev group.
       id: 'pytest-cov',
       optIn: [inPyproject('coverage')],
-      stages: ['push'],
+      stages: ['ci'],
       metric: {
         name: 'python-coverage',
         direction: 'up',
@@ -512,8 +560,10 @@ const python = {
           `--cov-report=json:${tmp('cov.json')}`,
           '-q',
         ]);
-        if (!h.exists(tmp('cov.json')))
+        // Failing tests still write a coverage report. They must fail the gate, not pass with a number.
+        if (r.status !== 0 || !h.exists(tmp('cov.json'))) {
           throw new Error(`pytest failed (exit ${r.status}):\n${tail(r.stdout || r.stderr)}`);
+        }
         return { value: json('pytest-cov', h.read(tmp('cov.json'))).totals.percent_covered };
       },
     },
@@ -556,7 +606,7 @@ const mule = {
           if (r.status !== 0 && r.status !== 1) {
             throw new Error(`mule-lint failed (exit ${r.status}):\n${tail(r.stderr || r.stdout)}`);
           }
-          return json('mule-lint', r.stdout)
+          const found = json('mule-lint', r.stdout)
             .filter((d) => d.severity === 'error' || d.severity === 'warning')
             .map((d) => ({
               rule: d.ruleId,
@@ -564,6 +614,7 @@ const mule = {
               line: d.line,
               message: d.message,
             }));
+          return h.settle('mule-lint', r, found);
         }),
     },
     {
@@ -582,11 +633,12 @@ const mule = {
               `mule-lint format failed (exit ${r.status}):\n${tail(r.stderr || r.stdout)}`,
             );
           }
-          return lines(/^\s*✗ (.+?) \(needs formatting\)/, ([, file]) => ({
+          const found = lines(/^\s*✗ (.+?) \(needs formatting\)/, ([, file]) => ({
             rule: 'format',
             file: join2(dir, file),
             message: 'run mule-lint format',
           }))(r);
+          return h.settle('mule-format', r, found);
         }),
     },
     {
@@ -625,7 +677,8 @@ const mule = {
       // coverage miss fails `mvn test`. Only poms that configure the MUnit plugin run.
       id: 'munit',
       optIn: [{ file: 'pom.xml', has: /munit-maven-plugin/ }],
-      stages: ['push'],
+      // Runs the whole suite: CI only (GUARDRAILS_CI=1), once, never on pre-push.
+      stages: ['ci'],
       whole: true,
       scan: ({ h }) =>
         h
@@ -640,6 +693,7 @@ const mule = {
                     rule: 'tests-or-coverage-failed',
                     file: pom,
                     message: tail(r.stdout || r.stderr),
+                    always: true,
                   },
                 ];
           }),
@@ -759,7 +813,8 @@ const salesforce = {
       // test org named in guardrails/apex-coverage.json; never point it at production.
       id: 'apex-coverage',
       optIn: ['guardrails/apex-coverage.json'],
-      stages: ['push'],
+      // An org test run can take up to an hour: CI only (GUARDRAILS_CI=1), once, never on pre-push.
+      stages: ['ci'],
       metric: {
         name: 'apex-coverage',
         direction: 'up',
@@ -884,7 +939,14 @@ const docker = {
       parse: (out, { files }) =>
         out.status === 0
           ? []
-          : [{ rule: 'invalid', file: files[0], message: tail(out.stderr || out.stdout) }],
+          : [
+              {
+                rule: 'invalid',
+                file: files[0],
+                message: tail(out.stderr || out.stdout),
+                always: true,
+              },
+            ],
     },
   ],
 };
@@ -982,7 +1044,14 @@ const rust = {
       parse: (out) =>
         out.status === 0
           ? []
-          : [{ rule: 'policy', file: 'deny.toml', message: tail(out.stderr || out.stdout) }],
+          : [
+              {
+                rule: 'policy',
+                file: 'deny.toml',
+                message: tail(out.stderr || out.stdout),
+                always: true,
+              },
+            ],
     },
     {
       // Unused dependencies. Switched on by [package.metadata.cargo-machete] in Cargo.toml.
@@ -1075,7 +1144,7 @@ const dart = {
       // Coverage may only go up. Flutter packages only (`flutter test --coverage`).
       id: 'flutter-coverage',
       optIn: DART_MARKER,
-      stages: ['push'],
+      stages: ['ci'],
       metric: {
         name: 'flutter-coverage',
         direction: 'up',
@@ -1130,7 +1199,7 @@ const cpp = {
       // platformio.ini). It downloads toolchains, so it is pre-push and CI only.
       id: 'pio-check',
       optIn: [{ file: 'platformio.ini', has: /^check_tool\s*=/m }],
-      stages: ['push'],
+      stages: ['ci'],
       whole: true,
       run: () => ({ cmd: 'pio', args: ['check', '--skip-packages', '--json-output'] }),
       parse: (out) =>

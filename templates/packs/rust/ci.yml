@@ -15,3 +15,5 @@
       - run: cargo install --locked cargo-deny cargo-machete
       - name: Rust guardrails (fmt, clippy, deny, machete)
         run: node scripts/guardrails.mjs check --strict-baseline
+        env:
+          GUARDRAILS_CI: '1'

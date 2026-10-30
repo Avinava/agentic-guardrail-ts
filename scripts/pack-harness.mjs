@@ -19,7 +19,9 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-const SCRIPTS = join(import.meta.dirname, '..', 'templates', 'shared', 'scripts');
+// PACK_SCRIPTS_DIR lets a test run an older copy of the scripts (to prove a test fails without a fix).
+const SCRIPTS =
+  process.env.PACK_SCRIPTS_DIR ?? join(import.meta.dirname, '..', 'templates', 'shared', 'scripts');
 
 // Tools found in node_modules/.bin, and tools found on PATH.
 const NODE_BINS = [
@@ -32,6 +34,8 @@ const NODE_BINS = [
   'editorconfig-checker',
   'mule-lint',
   'prettier',
+  'knip',
+  'depcruise',
 ];
 const PATH_BINS = [
   'lychee',
@@ -163,8 +167,14 @@ export function baselineFile() {
 }
 
 // Inits a baseline and returns the recorded counts.
-export function recordedCounts() {
-  const r = g(['baseline', '--init']);
+export function recordedCounts(env = {}) {
+  const r = g(['baseline', '--init'], env);
   if (r.status !== 0) throw new Error(`baseline --init failed:\n${r.out}`);
   return baselineFile().counts;
+}
+
+// Runs guardrails.mjs the way the CI step does: GUARDRAILS_CI=1 turns on the 'ci' stage tools
+// (test suites, org runs, toolchain downloads).
+export function ci(args, env = {}) {
+  return g(args, { GUARDRAILS_CI: '1', ...env });
 }

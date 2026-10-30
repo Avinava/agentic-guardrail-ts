@@ -10,3 +10,5 @@
       - run: pipx install platformio && sudo apt-get install -y clang-format
       - name: Firmware guardrails (clang-format, pio check)
         run: node scripts/guardrails.mjs check --strict-baseline
+        env:
+          GUARDRAILS_CI: '1'

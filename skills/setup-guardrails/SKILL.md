@@ -482,10 +482,16 @@ function trackedExt() {
   return new RegExp(parts.map((r) => `(?:${r.source})`).join('|'));
 }
 
+// Every file name handed to a tool. A name that starts with '-' would be read as an option, so
+// runRaw prefixes those with './' (see dashSafe).
+const fileArgs = new Set();
+
 function sourcePaths(files, ext = trackedExt()) {
-  return [...new Set(files.map(rel))].filter(
+  const kept = [...new Set(files.map(rel))].filter(
     (f) => ext.test(f) && !f.startsWith('..') && !f.includes('node_modules/'),
   );
+  for (const f of kept) fileArgs.add(f);
+  return kept;
 }
 
 // JS/TS files that exist (the Oxlint, dependency-cruiser and disable-check scope).
@@ -522,6 +528,7 @@ const HELPERS = {
   exists: (p) => existsSync(isAbsolute(p) ? p : join(ROOT, p)),
   read: (p) => readFileSync(isAbsolute(p) ? p : join(ROOT, p), 'utf8'),
   run,
+  settle,
   bin,
   needBin,
   rel,
@@ -551,20 +558,34 @@ function runTool(tool, files) {
 
 // Tools return plain { rule, file, line, message }; the engine adds the tool id and the key.
 function toFindings(tool, list) {
-  return list.map((f) =>
-    finding(tool.id, f.rule, { file: rel(f.file), line: f.line, message: f.message }),
-  );
+  return list.map((f) => ({
+    ...finding(tool.id, f.rule, { file: rel(f.file), line: f.line, message: f.message }),
+    always: f.always === true,
+  }));
+}
+
+// A file named like an option (--config=x.md) must not be read as one.
+const dashSafe = (args) => args.map((a) => (a.startsWith('-') && fileArgs.has(a) ? `./${a}` : a));
+
+// Scan tools run their own commands, so they settle the exit code themselves: an exit the tool
+// reports as failure with nothing parsed is a failure, never a pass (see h.settle).
+function settle(id, r, found, quiet = []) {
+  if (r.status === 0 || found.length > 0 || quiet.includes(r.status)) return found;
+  const text = (r.stderr || r.stdout).trim().slice(-2000);
+  throw new Error(`${id} failed with output it could not read (exit ${r.status}):\n${text}`);
 }
 
 function runRaw(tool, files, ctx) {
   if (tool.scan) return tool.scan(ctx);
   // perFile tools take one file per command (docker compose config, for example).
-  const each = (files ?? projectFiles(tool.exts)).map((f) => ({ ...ctx, files: [f] }));
+  const each = tool.perFile
+    ? (files ?? projectFiles(tool.exts)).map((f) => ({ ...ctx, files: [f] }))
+    : [];
   const jobs = tool.perFile ? each : [ctx];
   return jobs.flatMap((job) => {
     const spec = tool.run(job);
     if (!spec) return [];
-    const r = run(spec.cmd, spec.args, spec.opts);
+    const r = run(spec.cmd, dashSafe(spec.args), spec.opts);
     const failed = (why) => {
       const text = (r.stderr || r.stdout).trim().slice(-2000);
       throw new Error(`${tool.id} ${why} (exit ${r.status}):\n${text}`);
@@ -572,20 +593,22 @@ function runRaw(tool, files, ctx) {
     if (!(tool.ok ?? [0, 1]).includes(r.status)) failed('failed');
     const out = tool.parse({ stdout: r.stdout, stderr: r.stderr, status: r.status }, job);
     // A failing exit with nothing parsed means the output format changed. Never read that as clean.
-    if (r.status !== 0 && out.length === 0 && !(tool.quiet ?? []).includes(r.status)) {
-      failed('failed with output it could not read');
-    }
-    return out;
+    return settle(tool.id, r, out, tool.quiet);
   });
 }
 
 // stage: 'edit' (post-edit hook), 'commit' (pre-commit, --files, --changed, stop hook). A full
 // run (files === null) is the 'push' stage: pre-push and CI.
+// Tools that declare the 'ci' stage (test suites, org runs, toolchain downloads) run on a full
+// check only when GUARDRAILS_CI=1. CI sets it on one step, so they run once and never on pre-push.
+const fullStages = () => (process.env.GUARDRAILS_CI === '1' ? ['push', 'ci'] : ['push']);
+
 function collect(files, stage = 'commit') {
   const all = files ? scopedFiles(files) : null;
   const found = [];
   for (const tool of activeTools()) {
-    if (tool.metric || !tool.stages.includes(all ? stage : 'push')) continue;
+    const wanted = all ? [stage] : fullStages();
+    if (tool.metric || !tool.stages.some((s) => wanted.includes(s))) continue;
     const own = all ? all.filter((f) => !tool.exts || tool.exts.test(f)) : null;
     // A whole-project tool still skips a scoped run that touches none of its file types.
     if (own && own.length === 0 && (tool.exts || !tool.whole)) continue;
@@ -596,9 +619,18 @@ function collect(files, stage = 'commit') {
 
 // ── Metrics: ratchets on a number, not on per-file counts (docs/packs.md#metric-ratchets) ──
 
-function measureMetrics() {
+// Metric tools that exist but are not due this run (the 'ci' ones on a local check).
+function deferredMetrics() {
+  const due = fullStages();
   return activeTools()
-    .filter((t) => t.metric && t.stages.includes('push'))
+    .filter((t) => t.metric && !t.stages.some((s) => due.includes(s)))
+    .map((t) => t.metric.name);
+}
+
+function measureMetrics() {
+  const due = fullStages();
+  return activeTools()
+    .filter((t) => t.metric && t.stages.some((s) => due.includes(s)))
     .map((t) => {
       const dir = mkdtempSync(join(tmpdir(), 'guardrails-metric-'));
       const ctx = { files: null, h: HELPERS, online: false, tmp: (name) => join(dir, name) };
@@ -607,6 +639,9 @@ function measureMetrics() {
         const result = t.measure(ctx);
         if (!result) return null;
         const { value, detail = [] } = result;
+        if (typeof value !== 'number' || !Number.isFinite(value)) {
+          throw new Error(`${t.id}: the ${t.metric.name} reading is missing or not a number`);
+        }
         return { ...t.metric, value: Math.round(value * 100) / 100, detail };
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -642,6 +677,18 @@ function compareMetric(m, recorded, strict) {
   return [];
 }
 
+// A recorded metric that nothing measured this run (its tool was removed or does not apply) must
+// not be skipped: that would let the number go unchecked. Metrics merely deferred to CI are fine.
+function unmeasuredProblems(measured, recorded) {
+  const known = new Set([...measured.map((m) => m.name), ...deferredMetrics()]);
+  return Object.keys(recorded)
+    .filter((name) => !known.has(name))
+    .map(
+      (name) =>
+        `${name} is recorded in the baseline but was not measured (its tool is not configured, or does not apply here). Restore the tool, or have a human run: node scripts/guardrails.mjs baseline --reset`,
+    );
+}
+
 // ── Ratchet ──
 
 function readBaselineFile() {
@@ -665,19 +712,25 @@ function writeBaseline(counts, metrics = {}) {
   return Object.keys(sorted).length;
 }
 
+// Findings marked `always` say a whole tool failed (tests, policy, an invalid file). They are never
+// counted, so a baseline cannot hide them and a later failure of the same kind still fails.
 function tally(findings) {
   const counts = {};
-  for (const f of findings) counts[f.key] = (counts[f.key] ?? 0) + 1;
+  for (const f of findings.filter((x) => !x.always)) counts[f.key] = (counts[f.key] ?? 0) + 1;
   return counts;
 }
 
+// Keys are `tool:rule|file`. A rule can contain `|` (an ls-lint regex), a file path rarely does,
+// so the file is whatever follows the LAST `|`.
+const fileOfKey = (key) => key.slice(key.lastIndexOf('|') + 1);
+
 function compare(findings, baseline, scope) {
   const counts = tally(findings);
-  const inScope = (key) => !scope || scope.has(key.slice(key.indexOf('|') + 1));
+  const inScope = (key) => !scope || scope.has(fileOfKey(key));
   const grown = new Set(
     Object.keys(counts).filter((k) => inScope(k) && counts[k] > (baseline[k] ?? 0)),
   );
-  const fresh = findings.filter((f) => grown.has(f.key));
+  const fresh = findings.filter((f) => (f.always ? inScope(f.key) : grown.has(f.key)));
   const stale = scope ? [] : Object.keys(baseline).filter((k) => (counts[k] ?? 0) < baseline[k]);
   return { fresh, stale, counts };
 }
@@ -720,9 +773,13 @@ function check(argv) {
   }
   // Metrics (duplication, coverage floors) run on full checks only: pre-push and CI.
   const recorded = readMetrics();
+  const measured = scope ? [] : measureMetrics();
   const problems = scope
     ? []
-    : measureMetrics().flatMap((m) => compareMetric(m, recorded[m.name] ?? null, strict));
+    : [
+        ...measured.flatMap((m) => compareMetric(m, recorded[m.name] ?? null, strict)),
+        ...unmeasuredProblems(measured, recorded),
+      ];
   if (problems.length > 0) {
     console.error(`guardrails: ${problems.join('\n')}`);
     return 1;
@@ -743,7 +800,8 @@ function check(argv) {
 // first recording is allowed: enabling a tool is itself a reviewed config change.
 function tightenMetrics() {
   const old = readMetrics();
-  const next = {};
+  // Stored metrics that were not measured this run are carried over, never dropped.
+  const next = { ...old };
   for (const m of measureMetrics()) {
     const was = old[m.name] ?? null;
     const regressed =
@@ -761,7 +819,16 @@ function tightenMetrics() {
 }
 
 function baselineCmd(argv) {
-  const counts = tally(collect(null));
+  const found = collect(null);
+  const whole = found.filter((f) => f.always);
+  if (whole.length > 0) {
+    // A baseline would record the failure as if it were debt. Fix the tool first.
+    console.error(
+      `guardrails: cannot baseline while a tool is failing as a whole\n${format(whole)}`,
+    );
+    return 1;
+  }
+  const counts = tally(found);
   if (argv.includes('--tighten')) {
     const old = readBaseline();
     const grown = Object.keys(counts).filter((k) => counts[k] > (old[k] ?? 0));
@@ -784,7 +851,15 @@ function baselineCmd(argv) {
     console.error('guardrails: pass --init, --tighten or --reset');
     return 1;
   }
-  const metrics = Object.fromEntries(measureMetrics().map((m) => [m.name, m.value]));
+  // --init and --reset record what was measured, and keep metrics deferred to CI as they are.
+  const old = readMetrics();
+  const kept = Object.fromEntries(
+    deferredMetrics().flatMap((n) => (n in old ? [[n, old[n]]] : [])),
+  );
+  const metrics = {
+    ...kept,
+    ...Object.fromEntries(measureMetrics().map((m) => [m.name, m.value])),
+  };
   console.log(`guardrails: baseline written (${writeBaseline(counts, metrics)} keys)`);
   return 0;
 }
@@ -968,6 +1043,10 @@ try {
 const TS_EXT = /\.[cm]?[jt]sx?$/;
 const MD_EXT = /\.mdx?$/;
 
+// Exit codes for tools whose JSON report is the authority (v3 ignored their exit status): any exit
+// is fine as long as the report parses, and an unparsable report throws.
+const ANY_EXIT = Array.from({ length: 256 }, (_, i) => i);
+
 // ── Parsing helpers ──
 
 const tail = (s) => s.trim().slice(-2000);
@@ -1010,13 +1089,33 @@ const knipItems = (issue) =>
       })),
     );
 
+// v3 ran Oxlint unconditionally and Knip whenever its binary was installed. So each tool is on
+// when it has any supported config file, or when the package is a dependency (the v3 shape).
+const OXLINT_ON = [
+  '.oxlintrc.json',
+  '.oxlintrc.jsonc',
+  'oxlint.config.ts',
+  { file: 'package.json', has: /"oxlint"\s*:/ },
+];
+const KNIP_ON = [
+  'knip.json',
+  'knip.jsonc',
+  '.knip.json',
+  '.knip.jsonc',
+  'knip.ts',
+  'knip.js',
+  'knip.config.ts',
+  { file: 'package.json', has: /"knip"\s*:/ },
+];
+
 const ts = {
   id: 'ts',
   detect: [/(^|\/)package\.json$/, /(^|\/)tsconfig[^/]*\.json$/],
   tools: [
     {
       id: 'oxlint',
-      optIn: ['.oxlintrc.json'],
+      optIn: OXLINT_ON,
+      ok: ANY_EXIT,
       exts: TS_EXT,
       stages: ['edit', 'commit', 'push'],
       run: ({ files, h }) =>
@@ -1043,6 +1142,8 @@ const ts = {
     {
       id: 'depcruise',
       optIn: ['.dependency-cruiser.mjs', '.dependency-cruiser.cjs', '.dependency-cruiser.js'],
+      // dependency-cruiser exits with the number of errors, so any code is a normal report.
+      ok: ANY_EXIT,
       exts: TS_EXT,
       stages: ['commit', 'push'],
       run: ({ files, h }) => {
@@ -1068,7 +1169,8 @@ const ts = {
     {
       // Needs the whole graph, so full checks only.
       id: 'knip',
-      optIn: ['knip.json'],
+      optIn: KNIP_ON,
+      ok: ANY_EXIT,
       stages: ['push'],
       whole: true,
       run: ({ h }) =>
@@ -1080,7 +1182,7 @@ const ts = {
     {
       // Every disable comment needs a rule and a reason.
       id: 'guardrails',
-      optIn: ['.oxlintrc.json'],
+      optIn: OXLINT_ON,
       exts: TS_EXT,
       stages: ['edit', 'commit', 'push'],
       scan: ({ files, h }) => {
@@ -1221,7 +1323,7 @@ const core = {
       optIn: ['lychee.toml', '.lychee.toml'],
       exts: MD_EXT,
       stages: ['commit', 'push'],
-      ok: [0, 1, 2],
+      ok: [0, 2],
       quiet: [2],
       run: ({ files, online, h }) => {
         const docs = targets({ files }, h.projectFiles(MD_EXT));
@@ -1233,15 +1335,27 @@ const core = {
           args: ['--config', config, '--no-progress', '--format', 'json', ...mode, ...docs],
         };
       },
-      parse: (out, { h }) =>
-        Object.entries(json('lychee', out.stdout).error_map ?? {}).flatMap(([file, errors]) =>
+      // Exit 2 is lychee's "links failed". Exit 1 is a runtime or config error and throws. A report
+      // without error_map, or exit 2 with no failed link and no timeout, means the format changed.
+      parse: (out, { h }) => {
+        const report = json('lychee', out.stdout);
+        if (typeof report.error_map !== 'object' || report.error_map === null) {
+          throw new Error('lychee report has no error_map; its output format changed');
+        }
+        const found = Object.entries(report.error_map).flatMap(([file, errors]) =>
           errors.map((e) => ({
             rule: 'broken-link',
             file,
             line: e.span?.line,
             message: `${e.url.replace(`file://${h.ROOT}/`, '')}: ${e.status?.text ?? 'unreachable'}`,
           })),
-        ),
+        );
+        const timeouts = Object.keys(report.timeout_map ?? {}).length;
+        if (out.status === 2 && found.length === 0 && timeouts === 0) {
+          throw new Error('lychee exited 2 but its report lists no failed link');
+        }
+        return found;
+      },
     },
     {
       // Duplication is a relation between files, so it ratchets as one percentage that may only
@@ -1426,9 +1540,12 @@ const python = {
       stages: ['push'],
       whole: true,
       ok: [0, 3],
+      // Exit 3 means dead code was found. The ruff filter below may legitimately empty the list, so
+      // the unreadable-output check is done here, on the unfiltered lines.
+      quiet: [3],
       run: () => uvRun('vulture'),
-      parse: (out, { h }) =>
-        lines(/^(.+?):(\d+): (.+?) \(\d+% confidence\)/, ([, file, row, text]) => ({
+      parse: (out, { h }) => {
+        const all = lines(/^(.+?):(\d+): (.+?) \(\d+% confidence\)/, ([, file, row, text]) => ({
           rule: text
             .replace(/'[^']*'/g, '')
             .trim()
@@ -1436,15 +1553,21 @@ const python = {
           file,
           line: +row,
           message: text,
-        }))(out)
-          // ruff F401 owns unused imports, so vulture does not report them a second time.
-          .filter((f) => !(f.rule === 'unused-import' && h.active('ruff'))),
+        }))(out);
+        if (out.status === 3 && all.length === 0) {
+          throw new Error(
+            `vulture found dead code but printed nothing readable:\n${tail(out.stdout)}`,
+          );
+        }
+        // ruff F401 owns unused imports, so vulture does not report them a second time.
+        return all.filter((f) => !(f.rule === 'unused-import' && h.active('ruff')));
+      },
     },
     {
       // Test coverage may only go up. Needs pytest-cov in the dev group.
       id: 'pytest-cov',
       optIn: [inPyproject('coverage')],
-      stages: ['push'],
+      stages: ['ci'],
       metric: {
         name: 'python-coverage',
         direction: 'up',
@@ -1459,8 +1582,10 @@ const python = {
           `--cov-report=json:${tmp('cov.json')}`,
           '-q',
         ]);
-        if (!h.exists(tmp('cov.json')))
+        // Failing tests still write a coverage report. They must fail the gate, not pass with a number.
+        if (r.status !== 0 || !h.exists(tmp('cov.json'))) {
           throw new Error(`pytest failed (exit ${r.status}):\n${tail(r.stdout || r.stderr)}`);
+        }
         return { value: json('pytest-cov', h.read(tmp('cov.json'))).totals.percent_covered };
       },
     },
@@ -1503,7 +1628,7 @@ const mule = {
           if (r.status !== 0 && r.status !== 1) {
             throw new Error(`mule-lint failed (exit ${r.status}):\n${tail(r.stderr || r.stdout)}`);
           }
-          return json('mule-lint', r.stdout)
+          const found = json('mule-lint', r.stdout)
             .filter((d) => d.severity === 'error' || d.severity === 'warning')
             .map((d) => ({
               rule: d.ruleId,
@@ -1511,6 +1636,7 @@ const mule = {
               line: d.line,
               message: d.message,
             }));
+          return h.settle('mule-lint', r, found);
         }),
     },
     {
@@ -1529,11 +1655,12 @@ const mule = {
               `mule-lint format failed (exit ${r.status}):\n${tail(r.stderr || r.stdout)}`,
             );
           }
-          return lines(/^\s*✗ (.+?) \(needs formatting\)/, ([, file]) => ({
+          const found = lines(/^\s*✗ (.+?) \(needs formatting\)/, ([, file]) => ({
             rule: 'format',
             file: join2(dir, file),
             message: 'run mule-lint format',
           }))(r);
+          return h.settle('mule-format', r, found);
         }),
     },
     {
@@ -1572,7 +1699,8 @@ const mule = {
       // coverage miss fails `mvn test`. Only poms that configure the MUnit plugin run.
       id: 'munit',
       optIn: [{ file: 'pom.xml', has: /munit-maven-plugin/ }],
-      stages: ['push'],
+      // Runs the whole suite: CI only (GUARDRAILS_CI=1), once, never on pre-push.
+      stages: ['ci'],
       whole: true,
       scan: ({ h }) =>
         h
@@ -1587,6 +1715,7 @@ const mule = {
                     rule: 'tests-or-coverage-failed',
                     file: pom,
                     message: tail(r.stdout || r.stderr),
+                    always: true,
                   },
                 ];
           }),
@@ -1706,7 +1835,8 @@ const salesforce = {
       // test org named in guardrails/apex-coverage.json; never point it at production.
       id: 'apex-coverage',
       optIn: ['guardrails/apex-coverage.json'],
-      stages: ['push'],
+      // An org test run can take up to an hour: CI only (GUARDRAILS_CI=1), once, never on pre-push.
+      stages: ['ci'],
       metric: {
         name: 'apex-coverage',
         direction: 'up',
@@ -1831,7 +1961,14 @@ const docker = {
       parse: (out, { files }) =>
         out.status === 0
           ? []
-          : [{ rule: 'invalid', file: files[0], message: tail(out.stderr || out.stdout) }],
+          : [
+              {
+                rule: 'invalid',
+                file: files[0],
+                message: tail(out.stderr || out.stdout),
+                always: true,
+              },
+            ],
     },
   ],
 };
@@ -1929,7 +2066,14 @@ const rust = {
       parse: (out) =>
         out.status === 0
           ? []
-          : [{ rule: 'policy', file: 'deny.toml', message: tail(out.stderr || out.stdout) }],
+          : [
+              {
+                rule: 'policy',
+                file: 'deny.toml',
+                message: tail(out.stderr || out.stdout),
+                always: true,
+              },
+            ],
     },
     {
       // Unused dependencies. Switched on by [package.metadata.cargo-machete] in Cargo.toml.
@@ -2022,7 +2166,7 @@ const dart = {
       // Coverage may only go up. Flutter packages only (`flutter test --coverage`).
       id: 'flutter-coverage',
       optIn: DART_MARKER,
-      stages: ['push'],
+      stages: ['ci'],
       metric: {
         name: 'flutter-coverage',
         direction: 'up',
@@ -2077,7 +2221,7 @@ const cpp = {
       // platformio.ini). It downloads toolchains, so it is pre-push and CI only.
       id: 'pio-check',
       optIn: [{ file: 'platformio.ini', has: /^check_tool\s*=/m }],
-      stages: ['push'],
+      stages: ['ci'],
       whole: true,
       run: () => ({ cmd: 'pio', args: ['check', '--skip-packages', '--json-output'] }),
       parse: (out) =>
@@ -3051,6 +3195,8 @@ ignore:
         run: uv sync --locked
       - name: Python guardrails (ruff, pyright, tach, deptry, vulture, coverage floor)
         run: node scripts/guardrails.mjs check --strict-baseline
+        env:
+          GUARDRAILS_CI: '1'
 ```
 <!-- /tmpl -->
 
@@ -3217,6 +3363,8 @@ ignore:
       - run: npm ci
       - name: Mule guardrails (mule-lint, secrets in properties, MUnit and coverage)
         run: node scripts/guardrails.mjs check --strict-baseline
+        env:
+          GUARDRAILS_CI: '1'
 ```
 <!-- /tmpl -->
 
@@ -3319,6 +3467,8 @@ pre-commit:
           SF_TARGET_ORG_AUTH_URL: ${{ secrets.SF_TARGET_ORG_AUTH_URL }}
       - name: Salesforce guardrails (Code Analyzer, format, metadata, Apex coverage floor)
         run: node scripts/guardrails.mjs check --strict-baseline
+        env:
+          GUARDRAILS_CI: '1'
 ```
 <!-- /tmpl -->
 
@@ -3483,6 +3633,8 @@ ignored = []
       - run: cargo install --locked cargo-deny cargo-machete
       - name: Rust guardrails (fmt, clippy, deny, machete)
         run: node scripts/guardrails.mjs check --strict-baseline
+        env:
+          GUARDRAILS_CI: '1'
 ```
 <!-- /tmpl -->
 
@@ -3575,6 +3727,8 @@ linter:
       - run: flutter pub get
       - name: Dart guardrails (format, analyze, coverage floor)
         run: node scripts/guardrails.mjs check --strict-baseline
+        env:
+          GUARDRAILS_CI: '1'
 ```
 <!-- /tmpl -->
 
@@ -3615,6 +3769,8 @@ SortIncludes: CaseSensitive
       - run: pipx install platformio && sudo apt-get install -y clang-format
       - name: Firmware guardrails (clang-format, pio check)
         run: node scripts/guardrails.mjs check --strict-baseline
+        env:
+          GUARDRAILS_CI: '1'
 ```
 <!-- /tmpl -->
 
@@ -3683,8 +3839,11 @@ jobs:
       - name: Verify (format, typecheck, guardrails, tests with coverage)
         run: node scripts/guardrails.mjs verify
 
+      # GUARDRAILS_CI=1 also runs the expensive pack tools (test suites, org runs) exactly once.
       - name: Baseline is tight
         run: node scripts/guardrails.mjs check --strict-baseline
+        env:
+          GUARDRAILS_CI: '1'
 
       - name: Commit messages
         if: github.event_name == 'pull_request'

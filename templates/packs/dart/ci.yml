@@ -14,3 +14,5 @@
       - run: flutter pub get
       - name: Dart guardrails (format, analyze, coverage floor)
         run: node scripts/guardrails.mjs check --strict-baseline
+        env:
+          GUARDRAILS_CI: '1'

@@ -10,6 +10,7 @@ import {
   calls,
   fake,
   g,
+  ci,
   put,
   recordedCounts,
   setup,
@@ -121,22 +122,45 @@ describe('apex-coverage floor', () => {
 
   it('records the floor and fails below it, using sf with the configured org', () => {
     run('82%');
-    g(['baseline', '--init']);
+    ci(['baseline', '--init']);
     assert.equal(baselineFile().metrics['apex-coverage'], 82);
     assert.ok(calls('sf').at(-1).includes('ci-scratch'));
     assert.equal(calls('sf').at(-1)[0], 'apex');
     run('78%');
-    assert.match(g(['check']).out, /apex-coverage 78% is below the baseline 82%/);
+    assert.match(ci(['check']).out, /apex-coverage 78% is below the baseline 82%/);
   });
 
   it('fails when the Apex tests themselves fail', () => {
     run('90%', 'Failed');
-    assert.match(g(['baseline', '--init']).out, /Apex tests Failed/);
+    assert.match(ci(['baseline', '--init']).out, /Apex tests Failed/);
   });
 
   it('never runs on scoped checks', () => {
     run('90%');
-    g(['check', '--files', 'force-app/main/default/classes/Foo.cls']);
+    ci(['check', '--files', 'force-app/main/default/classes/Foo.cls']);
     assert.deepEqual(calls('sf-apex'), []);
+  });
+});
+
+describe('apex-coverage runs in CI only', () => {
+  it('is not run by a pre-push full check, and is not dropped from the baseline', () => {
+    put('guardrails/apex-coverage.json', '{"targetOrg":"ci-scratch"}\n');
+    fake('sf-apex', {
+      stdout: JSON.stringify({
+        result: { summary: { outcome: 'Passed', orgWideCoverage: '82%' } },
+      }),
+    });
+    ci(['baseline', '--init']);
+    const runs = calls('sf').length;
+    assert.equal(g(['check']).status, 0);
+    assert.equal(calls('sf').length, runs);
+  });
+
+  it('a summary without orgWideCoverage fails instead of recording NaN', () => {
+    put('guardrails/apex-coverage.json', '{"targetOrg":"ci-scratch"}\n');
+    fake('sf-apex', { stdout: JSON.stringify({ result: { summary: { outcome: 'Passed' } } }) });
+    const r = ci(['baseline', '--init']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /apex-coverage reading is missing or not a number/);
   });
 });

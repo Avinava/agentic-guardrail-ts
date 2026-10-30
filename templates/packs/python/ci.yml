@@ -14,3 +14,5 @@
         run: uv sync --locked
       - name: Python guardrails (ruff, pyright, tach, deptry, vulture, coverage floor)
         run: node scripts/guardrails.mjs check --strict-baseline
+        env:
+          GUARDRAILS_CI: '1'

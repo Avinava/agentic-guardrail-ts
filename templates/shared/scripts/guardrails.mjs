@@ -142,10 +142,16 @@ function trackedExt() {
   return new RegExp(parts.map((r) => `(?:${r.source})`).join('|'));
 }
 
+// Every file name handed to a tool. A name that starts with '-' would be read as an option, so
+// runRaw prefixes those with './' (see dashSafe).
+const fileArgs = new Set();
+
 function sourcePaths(files, ext = trackedExt()) {
-  return [...new Set(files.map(rel))].filter(
+  const kept = [...new Set(files.map(rel))].filter(
     (f) => ext.test(f) && !f.startsWith('..') && !f.includes('node_modules/'),
   );
+  for (const f of kept) fileArgs.add(f);
+  return kept;
 }
 
 // JS/TS files that exist (the Oxlint, dependency-cruiser and disable-check scope).
@@ -182,6 +188,7 @@ const HELPERS = {
   exists: (p) => existsSync(isAbsolute(p) ? p : join(ROOT, p)),
   read: (p) => readFileSync(isAbsolute(p) ? p : join(ROOT, p), 'utf8'),
   run,
+  settle,
   bin,
   needBin,
   rel,
@@ -211,20 +218,34 @@ function runTool(tool, files) {
 
 // Tools return plain { rule, file, line, message }; the engine adds the tool id and the key.
 function toFindings(tool, list) {
-  return list.map((f) =>
-    finding(tool.id, f.rule, { file: rel(f.file), line: f.line, message: f.message }),
-  );
+  return list.map((f) => ({
+    ...finding(tool.id, f.rule, { file: rel(f.file), line: f.line, message: f.message }),
+    always: f.always === true,
+  }));
+}
+
+// A file named like an option (--config=x.md) must not be read as one.
+const dashSafe = (args) => args.map((a) => (a.startsWith('-') && fileArgs.has(a) ? `./${a}` : a));
+
+// Scan tools run their own commands, so they settle the exit code themselves: an exit the tool
+// reports as failure with nothing parsed is a failure, never a pass (see h.settle).
+function settle(id, r, found, quiet = []) {
+  if (r.status === 0 || found.length > 0 || quiet.includes(r.status)) return found;
+  const text = (r.stderr || r.stdout).trim().slice(-2000);
+  throw new Error(`${id} failed with output it could not read (exit ${r.status}):\n${text}`);
 }
 
 function runRaw(tool, files, ctx) {
   if (tool.scan) return tool.scan(ctx);
   // perFile tools take one file per command (docker compose config, for example).
-  const each = (files ?? projectFiles(tool.exts)).map((f) => ({ ...ctx, files: [f] }));
+  const each = tool.perFile
+    ? (files ?? projectFiles(tool.exts)).map((f) => ({ ...ctx, files: [f] }))
+    : [];
   const jobs = tool.perFile ? each : [ctx];
   return jobs.flatMap((job) => {
     const spec = tool.run(job);
     if (!spec) return [];
-    const r = run(spec.cmd, spec.args, spec.opts);
+    const r = run(spec.cmd, dashSafe(spec.args), spec.opts);
     const failed = (why) => {
       const text = (r.stderr || r.stdout).trim().slice(-2000);
       throw new Error(`${tool.id} ${why} (exit ${r.status}):\n${text}`);
@@ -232,20 +253,22 @@ function runRaw(tool, files, ctx) {
     if (!(tool.ok ?? [0, 1]).includes(r.status)) failed('failed');
     const out = tool.parse({ stdout: r.stdout, stderr: r.stderr, status: r.status }, job);
     // A failing exit with nothing parsed means the output format changed. Never read that as clean.
-    if (r.status !== 0 && out.length === 0 && !(tool.quiet ?? []).includes(r.status)) {
-      failed('failed with output it could not read');
-    }
-    return out;
+    return settle(tool.id, r, out, tool.quiet);
   });
 }
 
 // stage: 'edit' (post-edit hook), 'commit' (pre-commit, --files, --changed, stop hook). A full
 // run (files === null) is the 'push' stage: pre-push and CI.
+// Tools that declare the 'ci' stage (test suites, org runs, toolchain downloads) run on a full
+// check only when GUARDRAILS_CI=1. CI sets it on one step, so they run once and never on pre-push.
+const fullStages = () => (process.env.GUARDRAILS_CI === '1' ? ['push', 'ci'] : ['push']);
+
 function collect(files, stage = 'commit') {
   const all = files ? scopedFiles(files) : null;
   const found = [];
   for (const tool of activeTools()) {
-    if (tool.metric || !tool.stages.includes(all ? stage : 'push')) continue;
+    const wanted = all ? [stage] : fullStages();
+    if (tool.metric || !tool.stages.some((s) => wanted.includes(s))) continue;
     const own = all ? all.filter((f) => !tool.exts || tool.exts.test(f)) : null;
     // A whole-project tool still skips a scoped run that touches none of its file types.
     if (own && own.length === 0 && (tool.exts || !tool.whole)) continue;
@@ -256,9 +279,18 @@ function collect(files, stage = 'commit') {
 
 // ── Metrics: ratchets on a number, not on per-file counts (docs/packs.md#metric-ratchets) ──
 
-function measureMetrics() {
+// Metric tools that exist but are not due this run (the 'ci' ones on a local check).
+function deferredMetrics() {
+  const due = fullStages();
   return activeTools()
-    .filter((t) => t.metric && t.stages.includes('push'))
+    .filter((t) => t.metric && !t.stages.some((s) => due.includes(s)))
+    .map((t) => t.metric.name);
+}
+
+function measureMetrics() {
+  const due = fullStages();
+  return activeTools()
+    .filter((t) => t.metric && t.stages.some((s) => due.includes(s)))
     .map((t) => {
       const dir = mkdtempSync(join(tmpdir(), 'guardrails-metric-'));
       const ctx = { files: null, h: HELPERS, online: false, tmp: (name) => join(dir, name) };
@@ -267,6 +299,9 @@ function measureMetrics() {
         const result = t.measure(ctx);
         if (!result) return null;
         const { value, detail = [] } = result;
+        if (typeof value !== 'number' || !Number.isFinite(value)) {
+          throw new Error(`${t.id}: the ${t.metric.name} reading is missing or not a number`);
+        }
         return { ...t.metric, value: Math.round(value * 100) / 100, detail };
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -302,6 +337,18 @@ function compareMetric(m, recorded, strict) {
   return [];
 }
 
+// A recorded metric that nothing measured this run (its tool was removed or does not apply) must
+// not be skipped: that would let the number go unchecked. Metrics merely deferred to CI are fine.
+function unmeasuredProblems(measured, recorded) {
+  const known = new Set([...measured.map((m) => m.name), ...deferredMetrics()]);
+  return Object.keys(recorded)
+    .filter((name) => !known.has(name))
+    .map(
+      (name) =>
+        `${name} is recorded in the baseline but was not measured (its tool is not configured, or does not apply here). Restore the tool, or have a human run: node scripts/guardrails.mjs baseline --reset`,
+    );
+}
+
 // ── Ratchet ──
 
 function readBaselineFile() {
@@ -325,19 +372,25 @@ function writeBaseline(counts, metrics = {}) {
   return Object.keys(sorted).length;
 }
 
+// Findings marked `always` say a whole tool failed (tests, policy, an invalid file). They are never
+// counted, so a baseline cannot hide them and a later failure of the same kind still fails.
 function tally(findings) {
   const counts = {};
-  for (const f of findings) counts[f.key] = (counts[f.key] ?? 0) + 1;
+  for (const f of findings.filter((x) => !x.always)) counts[f.key] = (counts[f.key] ?? 0) + 1;
   return counts;
 }
 
+// Keys are `tool:rule|file`. A rule can contain `|` (an ls-lint regex), a file path rarely does,
+// so the file is whatever follows the LAST `|`.
+const fileOfKey = (key) => key.slice(key.lastIndexOf('|') + 1);
+
 function compare(findings, baseline, scope) {
   const counts = tally(findings);
-  const inScope = (key) => !scope || scope.has(key.slice(key.indexOf('|') + 1));
+  const inScope = (key) => !scope || scope.has(fileOfKey(key));
   const grown = new Set(
     Object.keys(counts).filter((k) => inScope(k) && counts[k] > (baseline[k] ?? 0)),
   );
-  const fresh = findings.filter((f) => grown.has(f.key));
+  const fresh = findings.filter((f) => (f.always ? inScope(f.key) : grown.has(f.key)));
   const stale = scope ? [] : Object.keys(baseline).filter((k) => (counts[k] ?? 0) < baseline[k]);
   return { fresh, stale, counts };
 }
@@ -380,9 +433,13 @@ function check(argv) {
   }
   // Metrics (duplication, coverage floors) run on full checks only: pre-push and CI.
   const recorded = readMetrics();
+  const measured = scope ? [] : measureMetrics();
   const problems = scope
     ? []
-    : measureMetrics().flatMap((m) => compareMetric(m, recorded[m.name] ?? null, strict));
+    : [
+        ...measured.flatMap((m) => compareMetric(m, recorded[m.name] ?? null, strict)),
+        ...unmeasuredProblems(measured, recorded),
+      ];
   if (problems.length > 0) {
     console.error(`guardrails: ${problems.join('\n')}`);
     return 1;
@@ -403,7 +460,8 @@ function check(argv) {
 // first recording is allowed: enabling a tool is itself a reviewed config change.
 function tightenMetrics() {
   const old = readMetrics();
-  const next = {};
+  // Stored metrics that were not measured this run are carried over, never dropped.
+  const next = { ...old };
   for (const m of measureMetrics()) {
     const was = old[m.name] ?? null;
     const regressed =
@@ -421,7 +479,16 @@ function tightenMetrics() {
 }
 
 function baselineCmd(argv) {
-  const counts = tally(collect(null));
+  const found = collect(null);
+  const whole = found.filter((f) => f.always);
+  if (whole.length > 0) {
+    // A baseline would record the failure as if it were debt. Fix the tool first.
+    console.error(
+      `guardrails: cannot baseline while a tool is failing as a whole\n${format(whole)}`,
+    );
+    return 1;
+  }
+  const counts = tally(found);
   if (argv.includes('--tighten')) {
     const old = readBaseline();
     const grown = Object.keys(counts).filter((k) => counts[k] > (old[k] ?? 0));
@@ -444,7 +511,15 @@ function baselineCmd(argv) {
     console.error('guardrails: pass --init, --tighten or --reset');
     return 1;
   }
-  const metrics = Object.fromEntries(measureMetrics().map((m) => [m.name, m.value]));
+  // --init and --reset record what was measured, and keep metrics deferred to CI as they are.
+  const old = readMetrics();
+  const kept = Object.fromEntries(
+    deferredMetrics().flatMap((n) => (n in old ? [[n, old[n]]] : [])),
+  );
+  const metrics = {
+    ...kept,
+    ...Object.fromEntries(measureMetrics().map((m) => [m.name, m.value])),
+  };
   console.log(`guardrails: baseline written (${writeBaseline(counts, metrics)} keys)`);
   return 0;
 }

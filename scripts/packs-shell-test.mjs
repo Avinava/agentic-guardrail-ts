@@ -77,11 +77,15 @@ describe('docker pack', () => {
     fake('docker', { stderr: 'service "web" has neither an image nor a build context', status: 1 });
   });
 
-  it('keys hadolint:<DLxxxx> and compose-config:invalid findings', () => {
-    assert.deepEqual(recordedCounts(), {
-      'compose-config:invalid|docker-compose.yml': 1,
-      'hadolint:DL3007|Dockerfile': 1,
-    });
+  it('an invalid compose file is never baselined, so it keeps failing', () => {
+    const r = g(['baseline', '--init']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /compose-config invalid/);
+  });
+
+  it('keys hadolint:<DLxxxx> findings and runs compose config', () => {
+    fake('docker', { stdout: '', status: 0 });
+    assert.deepEqual(recordedCounts(), { 'hadolint:DL3007|Dockerfile': 1 });
     assert.deepEqual(calls('docker').at(-1), [
       'compose',
       '-f',

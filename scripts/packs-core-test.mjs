@@ -334,3 +334,158 @@ describe('verify without package scripts', () => {
     assert.match(r.out, /ast-grep r/);
   });
 });
+
+describe('metric readings are validated', () => {
+  const measure = (statistics) =>
+    fake('jscpd', {
+      writes: [
+        { flag: '--output', join: 'jscpd-report.json', content: { statistics, duplicates: [] } },
+      ],
+    });
+
+  beforeEach(() => put('.jscpd.json', '{"path":["src"]}\n'));
+
+  it('a missing reading fails the check and cannot erase the stored ratchet', () => {
+    measure({ total: { percentage: 4.1 } });
+    g(['baseline', '--init']);
+    measure({ total: {} });
+    const r = g(['check']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /duplication reading is missing or not a number/);
+    assert.equal(g(['baseline', '--tighten']).status, 1);
+    assert.equal(baselineFile().metrics.duplication, 4.1);
+  });
+
+  it('a recorded metric that nothing measures fails instead of being skipped', () => {
+    measure({ total: { percentage: 4.1 } });
+    g(['baseline', '--init']);
+    rmSync(join(state.dir, '.jscpd.json'));
+    const r = g(['check']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /duplication is recorded in the baseline but was not measured/);
+  });
+
+  it('tighten never drops a stored metric that was not measured', () => {
+    measure({ total: { percentage: 4.1 } });
+    g(['baseline', '--init']);
+    rmSync(join(state.dir, '.jscpd.json'));
+    g(['baseline', '--tighten']);
+    assert.equal(baselineFile().metrics.duplication, 4.1);
+  });
+});
+
+describe('lychee exit handling', () => {
+  beforeEach(() => {
+    put('lychee.toml', 'max_retries = 2\n');
+    put('docs/a.md', '# hi\n');
+  });
+
+  it('exit 2 with a report that lists no failed link is a failure, not a pass', () => {
+    fake('lychee', { stdout: JSON.stringify({ error_map: {}, timeout_map: {} }), status: 2 });
+    assert.match(g(['check']).out, /lychee exited 2 but its report lists no failed link/);
+  });
+
+  it('a report without error_map (a renamed field) is a failure', () => {
+    fake('lychee', { stdout: JSON.stringify({ errors: { 'docs/a.md': [] } }), status: 2 });
+    assert.match(g(['check']).out, /no error_map/);
+  });
+
+  it('exit 1 (a runtime or config error) is a failure', () => {
+    fake('lychee', { stderr: 'bad config', status: 1 });
+    assert.match(g(['check']).out, /lychee failed \(exit 1\)/);
+  });
+
+  it('timeouts alone do not fail the gate', () => {
+    fake('lychee', {
+      stdout: JSON.stringify({
+        error_map: {},
+        timeout_map: { 'docs/a.md': [{ url: 'https://slow' }] },
+      }),
+      status: 2,
+    });
+    assert.equal(g(['check']).status, 0);
+  });
+});
+
+describe('v3 installs keep their checks', () => {
+  const knipHit = JSON.stringify({ issues: [{ file: 'src/a.ts', files: [{ name: 'src/a.ts' }] }] });
+
+  it('runs Knip for every supported config name and for a knip devDependency', () => {
+    fake('knip', { stdout: knipHit, status: 1 });
+    const variants = [
+      ['knip.json', '{}'],
+      ['knip.jsonc', '{}'],
+      ['.knip.json', '{}'],
+      ['knip.ts', 'export default {};'],
+      ['package.json', '{"name":"x","devDependencies":{"knip":"^6.0.0"}}'],
+    ];
+    for (const [file, text] of variants) {
+      const before = calls('knip').length;
+      put(file, text);
+      assert.equal(g(['check']).status, 1, file);
+      assert.ok(calls('knip').length > before, `${file} did not run knip`);
+      rmSync(join(state.dir, file));
+      put('package.json', '{"name":"fixture"}\n');
+    }
+  });
+
+  it('runs Oxlint for other config names and for an oxlint devDependency', () => {
+    rmSync(join(state.dir, '.oxlintrc.json'));
+    const variants = [
+      ['.oxlintrc.jsonc', '{}'],
+      ['oxlint.config.ts', 'export default {};'],
+      ['package.json', '{"name":"x","devDependencies":{"oxlint":"^1.0.0"}}'],
+    ];
+    for (const [file, text] of variants) {
+      const before = calls('oxlint').length;
+      put(file, text);
+      g(['check', '--files', 'src/a.ts']);
+      assert.ok(calls('oxlint').length > before, `${file} did not run oxlint`);
+      rmSync(join(state.dir, file));
+      put('package.json', '{"name":"fixture"}\n');
+    }
+  });
+
+  it('treats any dependency-cruiser exit code with a JSON report as findings', () => {
+    put('.dependency-cruiser.mjs', 'export default {};\n');
+    const violation = (rule) => ({ rule: { name: rule }, from: 'src/a.ts', to: 'src/b.ts' });
+    fake('depcruise', {
+      stdout: JSON.stringify({
+        summary: {
+          violations: [violation('no-circular'), violation('layer-domain'), violation('x')],
+        },
+      }),
+      status: 3,
+    });
+    assert.deepEqual(recordedCounts(), {
+      'depcruise:layer-domain|src/a.ts': 1,
+      'depcruise:no-circular|src/a.ts': 1,
+      'depcruise:x|src/a.ts': 1,
+    });
+  });
+});
+
+describe('keys and arguments', () => {
+  it('scopes findings whose rule contains a pipe (an ls-lint regex)', () => {
+    put('.ls-lint.yml', 'ls: {}\n');
+    put('src/x.ts', 'export {};\n');
+    fake('ls-lint', {
+      stderr: '{"src/x.ts":{".ts":["regex:(a|b)"]}}',
+      status: 1,
+    });
+    const r = g(['check', '--files', 'src/x.ts']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /ls-lint ts-regex:\(a\|b\)/);
+    assert.equal(g(['check', '--files', 'src/a.ts']).status, 0);
+  });
+
+  it('never lets a file name be read as an option', () => {
+    put('cspell.json', '{}\n');
+    put('--config=x.md', '# hi\n');
+    fake('cspell', { stdout: '', status: 0 });
+    g(['check', '--files', '--config=x.md']);
+    const args = calls('cspell').at(-1);
+    assert.ok(args.includes('./--config=x.md'), JSON.stringify(args));
+    assert.ok(!args.includes('--config=x.md'));
+  });
+});

@@ -10,6 +10,7 @@ import {
   calls,
   fake,
   g,
+  ci,
   postEdit,
   put,
   recordedCounts,
@@ -24,6 +25,7 @@ beforeEach(() => {
   put('mule-artifact.json', '{"minMuleVersion":"4.4.0"}\n');
   put('src/main/mule/orders-api.xml', '<mule/>\n');
   fake('mule-lint', { stdout: '[]' });
+  fake('mule-lint-format', { stdout: '' });
 });
 afterEach(teardown);
 
@@ -113,9 +115,9 @@ describe('munit', () => {
   it('runs Maven on full checks only and gates on its exit code', () => {
     put('pom.xml', '<project><artifactId>munit-maven-plugin</artifactId></project>\n');
     fake('mvn', { stdout: 'COVERAGE FAILED', status: 1 });
-    g(['check', '--files', 'src/main/mule/orders-api.xml']);
+    ci(['check', '--files', 'src/main/mule/orders-api.xml']);
     assert.deepEqual(calls('mvn'), []);
-    const r = g(['check']);
+    const r = ci(['check']);
     assert.equal(r.status, 1);
     assert.match(r.out, /munit tests-or-coverage-failed/);
     assert.deepEqual(calls('mvn').at(-1), ['-B', '-ntp', '-q', '-f', 'pom.xml', 'test']);
@@ -123,6 +125,30 @@ describe('munit', () => {
 
   it('is off when the pom does not configure the MUnit plugin', () => {
     put('pom.xml', '<project/>\n');
+    ci(['check']);
+    assert.deepEqual(calls('mvn'), []);
+  });
+});
+
+describe('mule pack, review fixes', () => {
+  it('mule-format with exit 1 and output it cannot read is a failure', () => {
+    fake('mule-lint-format', { stdout: 'formatting check failed\n', status: 1 });
+    const r = g(['check']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /mule-format failed with output it could not read \(exit 1\)/);
+  });
+
+  it('a failing MUnit run cannot be baselined, so it keeps failing', () => {
+    put('pom.xml', '<project><artifactId>munit-maven-plugin</artifactId></project>\n');
+    fake('mvn', { stdout: 'COVERAGE FAILED', status: 1 });
+    const r = ci(['baseline', '--init']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /cannot baseline while a tool is failing as a whole/);
+    assert.equal(ci(['check']).status, 1);
+  });
+
+  it('MUnit does not run on a local full check (pre-push)', () => {
+    put('pom.xml', '<project><artifactId>munit-maven-plugin</artifactId></project>\n');
     g(['check']);
     assert.deepEqual(calls('mvn'), []);
   });
