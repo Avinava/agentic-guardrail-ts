@@ -274,32 +274,83 @@ const tsKind = (tsApi, file) => {
 const tsParse = (tsApi, file, text) =>
   tsApi.createSourceFile(file, text, tsApi.ScriptTarget.Latest, true, tsKind(tsApi, file));
 
-// TypeScript: `export const X = { A: 'a' } as const` and `enum X { A = 'a' }`.
-function tsVocab(tsApi, file, text) {
-  const found = [];
-  const visit = (node) => {
-    if (tsApi.isEnumDeclaration(node)) {
-      for (const m of node.members) {
-        const key = propertyName(tsApi, m.name);
-        if (key !== null && m.initializer && isStringNode(tsApi, m.initializer)) {
-          found.push([`${node.name.text}.${key}`, m.initializer.text]);
-        }
+// The names a module exports without a modifier: `export { A, B as C }` and `export default A`.
+function tsExportedNames(tsApi, sf) {
+  const names = new Map();
+  for (const st of sf.statements) {
+    if (tsApi.isExportDeclaration(st) && !st.moduleSpecifier && st.exportClause) {
+      for (const el of tsApi.isNamedExports(st.exportClause) ? st.exportClause.elements : []) {
+        names.set((el.propertyName ?? el.name).text, el.name.text);
       }
-    } else if (
-      tsApi.isVariableDeclaration(node) &&
-      tsApi.isIdentifier(node.name) &&
-      node.initializer &&
-      isConstAssertion(tsApi, node.initializer)
-    ) {
-      const value = unwrap(tsApi, node.initializer);
-      if (tsApi.isObjectLiteralExpression(value)) {
-        found.push(...tsObjectMembers(tsApi, value, node.name.text));
-      }
+    } else if (tsApi.isExportAssignment(st) && tsApi.isIdentifier(st.expression)) {
+      names.set(st.expression.text, st.expression.text);
     }
-    tsApi.forEachChild(node, visit);
+  }
+  return names;
+}
+
+const hasExportModifier = (tsApi, node) =>
+  (tsApi.canHaveModifiers(node) ? (tsApi.getModifiers(node) ?? []) : []).some(
+    (m) => m.kind === tsApi.SyntaxKind.ExportKeyword,
+  );
+
+// TypeScript: `export const X = { A: 'a' } as const` and `enum X { A = 'a' }`, at module scope or
+// inside an exported namespace, named the way a caller writes them (`Domain.Status.Active`).
+// Declarations inside functions or blocks, and names that are not exported, are not members.
+function tsVocab(tsApi, file, text) {
+  const sf = tsParse(tsApi, file, text);
+  const renamed = tsExportedNames(tsApi, sf);
+  const found = [];
+  // The name a caller writes for a declaration, or null when it is not reachable. `top` is true at
+  // module scope, false in a namespace (members need `export`), 'inner' for `namespace A.B`.
+  const exportedAs = (node, name, top) => {
+    if (top === 'inner' || hasExportModifier(tsApi, node)) return name;
+    return top === true ? (renamed.get(name) ?? null) : null;
   };
-  visit(tsParse(tsApi, file, text));
+  const collectModule = (mod, prefix, top) => {
+    const name = tsApi.isIdentifier(mod.name) ? exportedAs(mod, mod.name.text, top) : null;
+    if (name === null || !mod.body) return;
+    if (tsApi.isModuleBlock(mod.body)) collect(mod.body.statements, `${prefix}${name}.`, false);
+    else if (tsApi.isModuleDeclaration(mod.body))
+      collectModule(mod.body, `${prefix}${name}.`, 'inner');
+  };
+  const collectStatement = (st, prefix, top) => {
+    if (tsApi.isEnumDeclaration(st)) {
+      const name = exportedAs(st, st.name.text, top);
+      if (name !== null) found.push(...tsEnumMembers(tsApi, st, `${prefix}${name}`));
+    } else if (tsApi.isVariableStatement(st)) {
+      for (const d of st.declarationList.declarations) {
+        const name = tsApi.isIdentifier(d.name) ? exportedAs(st, d.name.text, top) : null;
+        if (name !== null) found.push(...tsConstObjectMembers(tsApi, d, `${prefix}${name}`));
+      }
+    } else if (tsApi.isModuleDeclaration(st)) {
+      collectModule(st, prefix, top);
+    }
+  };
+  const collect = (statements, prefix, top) => {
+    for (const st of statements) collectStatement(st, prefix, top);
+  };
+  collect(sf.statements, '', true);
   return found;
+}
+
+// `Name.Key` and value of each string member of an enum.
+function tsEnumMembers(tsApi, node, name) {
+  const found = [];
+  for (const m of node.members) {
+    const key = propertyName(tsApi, m.name);
+    const value = m.initializer && unwrap(tsApi, m.initializer);
+    if (key !== null && value && isStringNode(tsApi, value))
+      found.push([`${name}.${key}`, value.text]);
+  }
+  return found;
+}
+
+// Members of `const X = { ... } as const`; nothing for any other declaration.
+function tsConstObjectMembers(tsApi, decl, name) {
+  if (!decl.initializer || !isConstAssertion(tsApi, decl.initializer)) return [];
+  const value = unwrap(tsApi, decl.initializer);
+  return tsApi.isObjectLiteralExpression(value) ? tsObjectMembers(tsApi, value, name) : [];
 }
 
 // A string that names a module (imports, re-exports, require(), import(), `declare module`).
@@ -342,30 +393,58 @@ const PY_READER = `
 import ast, json, sys
 req = json.load(sys.stdin)
 
-def base_names(cls):
-    return {b.id if isinstance(b, ast.Name) else getattr(b, "attr", None) for b in cls.bases}
-
-def is_enum(cls):
-    names = base_names(cls)
-    return "StrEnum" in names or ("str" in names and "Enum" in names)
+def enum_aliases(tree):
+    names = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "enum":
+            for alias in node.names:
+                names[alias.asname or alias.name] = alias.name
+    return names
 
 def is_str(node):
     return isinstance(node, ast.Constant) and isinstance(node.value, str)
 
+def exported_names(tree):
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__all__" for t in stmt.targets):
+            if isinstance(stmt.value, (ast.List, ast.Tuple)) and all(is_str(e) for e in stmt.value.elts):
+                return {e.value for e in stmt.value.elts}
+    return None
+
 def members(tree):
+    aliases = enum_aliases(tree)
+    public = exported_names(tree)
     out = []
-    for cls in ast.walk(tree):
-        if not (isinstance(cls, ast.ClassDef) and is_enum(cls)):
-            continue
-        for stmt in cls.body:
-            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
-                target, value = stmt.targets[0], stmt.value
-            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
-                target, value = stmt.target, stmt.value
-            else:
+
+    def is_enum(cls):
+        names = set()
+        for b in cls.bases:
+            if isinstance(b, ast.Name):
+                names.add(aliases.get(b.id, b.id))
+            elif isinstance(b, ast.Attribute):
+                names.add(b.attr)
+        return "StrEnum" in names or ("str" in names and "Enum" in names)
+
+    def walk(body, prefix, top):
+        for cls in body:
+            if not isinstance(cls, ast.ClassDef) or cls.name.startswith("_"):
                 continue
-            if isinstance(target, ast.Name) and is_str(value):
-                out.append([cls.name + "." + target.id, value.value])
+            if top and public is not None and cls.name not in public:
+                continue
+            name = prefix + cls.name
+            if is_enum(cls):
+                for stmt in cls.body:
+                    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                        target, value = stmt.targets[0], stmt.value
+                    elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                        target, value = stmt.target, stmt.value
+                    else:
+                        continue
+                    if isinstance(target, ast.Name) and is_str(value):
+                        out.append([name + "." + target.id, value.value])
+            walk(cls.body, name + ".", False)
+
+    walk(tree.body, "", True)
     return out
 
 class Literals(ast.NodeVisitor):

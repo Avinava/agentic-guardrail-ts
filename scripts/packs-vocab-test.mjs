@@ -270,6 +270,111 @@ describe('vocab-literal, review regressions', { skip: NO_TS || NO_PY }, () => {
     assert.match(r.out, /python3 could not read/);
   });
 
+  it('names members by scope: no function-local or non-exported helpers, namespaces qualified', () => {
+    put(
+      'src/vocab.ts',
+      [
+        'function draft() {',
+        '  const Tmp = { Active: "active", Other: "other" } as const;',
+        '  return Tmp.Active;',
+        '}',
+        'const Hidden = { Secret: "secret" } as const;',
+        'export const Status = { Active: "active" } as const;',
+        'export namespace Domain {',
+        '  export enum Level { High = "high" }',
+        '  enum Private { Low = "low" }',
+        '  export namespace Inner { export const Kind = { A: "kind-a" } as const; }',
+        '}',
+        'export namespace Outer.Deep { export enum E { X = "deep-x" } }',
+        'const Renamed = { R: "renamed" } as const;',
+        'export { Renamed as Public };',
+        '',
+      ].join('\n'),
+    );
+    config(['src/vocab.ts']);
+    put(
+      'src/svc.ts',
+      [
+        'export const v = ["active", "other", "secret", "high", "low", "kind-a", "deep-x", "renamed"];',
+        '',
+      ].join('\n'),
+    );
+    assert.deepEqual(recordedCounts(), {
+      'vocab-literal:Status.Active|src/svc.ts': 1,
+      'vocab-literal:Domain.Level.High|src/svc.ts': 1,
+      'vocab-literal:Domain.Inner.Kind.A|src/svc.ts': 1,
+      'vocab-literal:Outer.Deep.E.X|src/svc.ts': 1,
+      'vocab-literal:Public.R|src/svc.ts': 1,
+    });
+  });
+
+  it('unwraps parenthesised and asserted enum initialisers', () => {
+    put(
+      'src/vocab.ts',
+      'export enum Role { Admin = ("admin"), Guest = "guest" as const, Own = ("own") }\n',
+    );
+    config(['src/vocab.ts']);
+    put('src/svc.ts', 'export const v = ["admin", "guest", "own"];\n');
+    assert.deepEqual(recordedCounts(), {
+      'vocab-literal:Role.Admin|src/svc.ts': 1,
+      'vocab-literal:Role.Guest|src/svc.ts': 1,
+      'vocab-literal:Role.Own|src/svc.ts': 1,
+    });
+  });
+
+  it('Python: module-level classes only, nested names qualified, aliased StrEnum resolved', () => {
+    put(
+      'app/vocab.py',
+      [
+        'from enum import StrEnum as S, Enum as E',
+        'import enum as e',
+        'def draft():',
+        '    class Tmp(S):',
+        '        OTHER = "other"',
+        'class Status(S):',
+        '    ACTIVE = "active"',
+        'class Kind(str, E):',
+        '    K = "kind"',
+        'class Third(e.StrEnum):',
+        '    T = "third"',
+        'class Outer:',
+        '    class Inner(S):',
+        '        I = "inner"',
+        'class _Private(S):',
+        '    P = "private"',
+        'class Dup(S):',
+        '    ACTIVE = "active"',
+        '',
+      ].join('\n'),
+    );
+    config(['app/vocab.py']);
+    put('app/svc.py', 'v = ["other", "active", "kind", "third", "inner", "private"]\n');
+    assert.deepEqual(recordedCounts(), {
+      'vocab-literal:Status.ACTIVE|app/svc.py': 1,
+      'vocab-literal:Kind.K|app/svc.py': 1,
+      'vocab-literal:Third.T|app/svc.py': 1,
+      'vocab-literal:Outer.Inner.I|app/svc.py': 1,
+    });
+  });
+
+  it('Python: __all__ limits the exported classes', () => {
+    put(
+      'app/vocab.py',
+      [
+        'from enum import StrEnum',
+        '__all__ = ["Status"]',
+        'class Status(StrEnum):',
+        '    A = "active"',
+        'class Helper(StrEnum):',
+        '    H = "helper"',
+        '',
+      ].join('\n'),
+    );
+    config(['app/vocab.py']);
+    put('app/svc.py', 'v = ["active", "helper"]\n');
+    assert.deepEqual(recordedCounts(), { 'vocab-literal:Status.A|app/svc.py': 1 });
+  });
+
   it('flags literals in nested templates, not the fixed text of a template', () => {
     put('src/vocab.ts', 'export const Status = { Active: "active" } as const;\n');
     config(['src/vocab.ts']);

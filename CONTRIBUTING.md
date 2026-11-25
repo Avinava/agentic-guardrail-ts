@@ -64,3 +64,14 @@ Before a PR, also try the changed skill in a scratch project with a real agent.
 Conventional Commits: `type(scope): description`. Keep messages short.
 
 Types: `feat`, `fix`, `docs`, `chore`, `refactor`, `test`. Scopes: `skills`, `templates`, `scripts`, `docs`, `ci`.
+
+## Release
+
+Consumers install the plugin from the tag and the marketplace, so a change that is merged but not tagged is not shipped.
+
+1. Bump `version` in `package.json` and `.claude-plugin/plugin.json` (`marketplace.json` carries none).
+2. Add the CHANGELOG entry under `## [X.Y.Z] - date`, with a Breaking section if needed.
+3. Merge to `main` through a PR.
+4. Tag `origin/main` with an annotated tag and push it: `git fetch origin && git tag -a vX.Y.Z -m "vX.Y.Z" origin/main && git push origin vX.Y.Z`.
+5. Write the CHANGELOG entry to a file and run `gh release create vX.Y.Z --verify-tag --title vX.Y.Z --notes-file <notes>`. `--verify-tag` aborts if the tag is not on the remote.
+6. Check it: `gh release view vX.Y.Z` and `claude plugin validate .`.
