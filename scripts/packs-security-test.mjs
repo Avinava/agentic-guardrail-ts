@@ -271,10 +271,23 @@ describe('real binaries', () => {
     put('src/req.ts', "require('child_process').exec(cmd);\n");
     put('src/own.ts', "import { exec } from './mine';\nexec(cmd);\nconst m = /x/.exec(s);\n");
     put('src/lit.ts', "import { exec } from 'child_process';\nexec('ls');\n");
+    put('src/node.ts', 'const { exec } = require("node:child_process");\nexec(cmd);\n');
     put(
       'src/sh.py',
-      'from subprocess import run\nrun(x, shell=True)\nimport subprocess\nsubprocess.call(x, shell=True)\n',
+      [
+        'from subprocess import run, PIPE, STDOUT',
+        'run(cmd, shell=True, stdout=PIPE, stderr=STDOUT)',
+        'import subprocess',
+        'subprocess.call(x, shell=True)',
+        '',
+      ].join('\n'),
     );
+    put('src/alias.py', 'from subprocess import run as execute\nexecute(cmd, shell=True)\n');
+    put(
+      'src/paren.py',
+      'from subprocess import (\n    Popen,\n    PIPE,\n)\nPopen(cmd, shell=True, stdout=PIPE)\n',
+    );
+    put('src/other.py', 'from mylib import run\nrun(cmd, shell=True)\n');
     put(
       'src/yml.py',
       [
@@ -289,7 +302,10 @@ describe('real binaries', () => {
       'semgrep:js-child-process-shell|src/imp.ts': 1,
       'semgrep:js-child-process-shell|src/mod.ts': 1,
       'semgrep:js-child-process-shell|src/req.ts': 1,
+      'semgrep:js-child-process-shell|src/node.ts': 1,
       'semgrep:py-shell-true|src/sh.py': 2,
+      'semgrep:py-shell-true|src/alias.py': 1,
+      'semgrep:py-shell-true|src/paren.py': 1,
       'semgrep:py-unsafe-deserialize|src/yml.py': 1,
     });
   });

@@ -63,6 +63,12 @@ rules:
               - pattern-inside: |
                   const {..., execSync, ...} = require("child_process");
                   ...
+              - pattern-inside: |
+                  const {..., exec, ...} = require("node:child_process");
+                  ...
+              - pattern-inside: |
+                  const {..., execSync, ...} = require("node:child_process");
+                  ...
 
   - id: js-html-injection
     languages: [javascript, typescript]
@@ -105,22 +111,8 @@ rules:
     pattern-either:
       - pattern: subprocess.$FN(..., shell=True, ...)
       - pattern: os.system(...)
-      # from subprocess import run; run(cmd, shell=True). The call must use an imported name.
-      - patterns:
-          - pattern: $FN(..., shell=True, ...)
-          - pattern-either:
-              - pattern-inside: |
-                  from subprocess import $FN
-                  ...
-              - pattern-inside: |
-                  from subprocess import $FN, $B
-                  ...
-              - pattern-inside: |
-                  from subprocess import $A, $FN
-                  ...
-              - pattern-inside: |
-                  from subprocess import $A, $FN, $B
-                  ...
+      # semgrep resolves imports, so this also covers `from subprocess import run, PIPE` (any
+      # number of names, parenthesised, or aliased with `as`) and `import subprocess as sp`.
 
   - id: py-unsafe-deserialize
     languages: [python]

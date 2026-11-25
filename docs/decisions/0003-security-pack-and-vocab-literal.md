@@ -17,5 +17,5 @@ The packs of 3.1.0 cover quality but not security: no dependency advisories, no 
 
 - A repo that upgrades without migrating keeps running the old rule (ast-grep still reads `rules/`), but nothing ships it any more.
 - Findings for the same literal move to new baseline keys, so the migration ends with a reviewed `baseline --reset`.
-- `vocab-literal` uses a small scanner, not a parser. It skips comments, docstrings, f-strings and templates with `${}`, and a string never spans lines, so a stray apostrophe in JSX text cannot hide the rest of a file. It can still miss a literal after an unusual regex.
+- `vocab-literal` reads source with each language's own parser: the project's `typescript` package for TS and JS, and `python3`'s `ast` module for Python. Two reviews found edge cases in a hand-written tokenizer, so none is kept. The cost is two runtime requirements for the tool: the `typescript` package (already a devDependency of every install) and `python3`, needed only when a Python module is configured. A missing parser, or a file that does not parse, fails the gate; TypeScript's recovering parser still yields literals from a file with a syntax error.
 - osv-scanner can fail a push for an advisory published after the last commit. The documented way out is an `[[IgnoredVulns]]` entry with a reason and an end date.

@@ -5,10 +5,24 @@
 //   node --test scripts/packs-vocab-test.mjs
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { fake, g, postEdit, put, recordedCounts, setup, state, teardown } from './pack-harness.mjs';
+import {
+  TYPESCRIPT,
+  fake,
+  g,
+  postEdit,
+  put,
+  recordedCounts,
+  setup,
+  state,
+  teardown,
+} from './pack-harness.mjs';
+
+const NO_TS = !TYPESCRIPT && 'typescript is not installed (npm install --no-save typescript)';
+const NO_PY = spawnSync('python3', ['--version']).status !== 0 && 'python3 is not installed';
 
 const REPO = join(import.meta.dirname, '..');
 const config = (modules, extra = {}) =>
@@ -17,7 +31,7 @@ const config = (modules, extra = {}) =>
 beforeEach(setup);
 afterEach(teardown);
 
-describe('vocab-literal, TypeScript', () => {
+describe('vocab-literal, TypeScript', { skip: NO_TS }, () => {
   beforeEach(() => {
     put('src/a.ts', '');
     config(['src/vocab.ts'], { ignore: ['**/generated/**'] });
@@ -108,7 +122,7 @@ describe('vocab-literal, TypeScript', () => {
   });
 });
 
-describe('vocab-literal, review regressions', () => {
+describe('vocab-literal, review regressions', { skip: NO_TS || NO_PY }, () => {
   beforeEach(() => put('src/a.ts', ''));
 
   it('ignores commented-out declarations and braces inside comments', () => {
@@ -167,11 +181,13 @@ describe('vocab-literal, review regressions', () => {
     });
   });
 
-  it('finds a literal after an apostrophe on the same line', () => {
+  it('reads JSX text as text and finds a literal after an apostrophe on the same line', () => {
     put('src/vocab.ts', 'export const Status = { Active: "active" } as const;\n');
     config(['src/vocab.ts']);
     put('src/v.tsx', "export const V = () => <p>Don't use 'active', it's old</p>;\n");
-    assert.deepEqual(recordedCounts(), { 'vocab-literal:Status.Active|src/v.tsx': 1 });
+    assert.equal(g(['check']).status, 0, 'JSX text is not a string');
+    put('src/w.tsx', "export const W = () => <p>Don't</p>; export const s = 'active';\n");
+    assert.deepEqual(recordedCounts(), { 'vocab-literal:Status.Active|src/w.tsx': 1 });
   });
 
   it('ignores locals in Python methods and keeps class-level members', () => {
@@ -198,15 +214,79 @@ describe('vocab-literal, review regressions', () => {
     });
   });
 
-  it('skips triple-quoted strings, docstrings or not', () => {
+  it('skips docstrings but not triple-quoted values, and keeps docstring text out of the members', () => {
+    put(
+      'app/vocab.py',
+      [
+        'from enum import StrEnum',
+        'class Status(StrEnum):',
+        '    """Lifecycle.',
+        '',
+        '    LEGACY = "retired"',
+        '    """',
+        '    ACTIVE = "active"',
+        'class Closing(StrEnum):',
+        '    """',
+        'Use closed when done.',
+        '"""',
+        '    CLOSED = "closed"',
+        '',
+      ].join('\n'),
+    );
+    config(['app/vocab.py']);
+    put(
+      'app/svc.py',
+      ['"""active"""', 'a = "retired"', 'g = """active"""', 'h = "closed"', ''].join('\n'),
+    );
+    assert.deepEqual(recordedCounts(), {
+      'vocab-literal:Status.ACTIVE|app/svc.py': 1,
+      'vocab-literal:Closing.CLOSED|app/svc.py': 1,
+    });
+  });
+
+  it('handles f-strings, triple-quoted f-strings and nested expressions', () => {
     put('app/vocab.py', 'from enum import StrEnum\nclass S(StrEnum):\n    A = "active"\n');
     config(['app/vocab.py']);
-    put('app/svc.py', 'g = """active"""\n');
-    assert.equal(g(['check']).status, 0);
+    put(
+      'app/svc.py',
+      [
+        'plain = f"""active"""',
+        'msg = f"""status {\'active\'}"""',
+        "label = f\"{labels['}'] + 'active'}\"",
+        'text = f"{x} active"',
+        'braces = f"{{active}}"',
+        '',
+      ].join('\n'),
+    );
+    assert.deepEqual(recordedCounts(), { 'vocab-literal:S.A|app/svc.py': 3 });
+  });
+
+  it('fails the gate on a Python file it cannot parse, instead of skipping literals', () => {
+    put('app/vocab.py', 'from enum import StrEnum\nclass S(StrEnum):\n    A = "active"\n');
+    config(['app/vocab.py']);
+    put('app/svc.py', 'note = """unclosed\ny = "active"\n');
+    const r = g(['check']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /python3 could not read/);
+  });
+
+  it('flags literals in nested templates, not the fixed text of a template', () => {
+    put('src/vocab.ts', 'export const Status = { Active: "active" } as const;\n');
+    config(['src/vocab.ts']);
+    put(
+      'src/svc.ts',
+      [
+        'export const a = `x${y ? `${"active"}` : 1}`;',
+        'export const b = `active${y}`;',
+        'export const c = `active`;',
+        '',
+      ].join('\n'),
+    );
+    assert.deepEqual(recordedCounts(), { 'vocab-literal:Status.Active|src/svc.ts': 2 });
   });
 });
 
-describe('vocab-literal, Python', () => {
+describe('vocab-literal, Python', { skip: NO_PY || NO_TS }, () => {
   beforeEach(() => {
     put('src/a.ts', '');
     config(['app/vocab.py']);
@@ -251,7 +331,7 @@ describe('vocab-literal, Python', () => {
     put('app/test_svc.py', 'a = "active"\n');
     put('tests/helpers.py', 'a = "active"\n');
     assert.deepEqual(recordedCounts(), {
-      'vocab-literal:Status.ACTIVE|app/svc.py': 1,
+      'vocab-literal:Status.ACTIVE|app/svc.py': 2,
       'vocab-literal:Role.ADMIN|app/svc.py': 1,
       'vocab-literal:Status.CLOSED|app/svc.py': 2,
     });
@@ -280,28 +360,32 @@ describe('migration from the v3 no-vocab-literal rule', () => {
     assert.ok(existsSync(join(REPO, 'templates/packs/core/vocab/vocab.json')));
   });
 
-  it('removing the old rule and writing the config swaps the baseline keys', () => {
-    // A v3 repo: the old rule found the literal, and the baseline recorded it.
-    put('sgconfig.yml', 'ruleDirs:\n  - rules\n');
-    put('rules/no-vocab-literal.yml', 'id: no-vocab-literal\n');
-    put('src/vocab.ts', 'export const Status = { Active: "active" } as const;\n');
-    put('src/svc.ts', "export const a = 'active';\n");
-    fake('ast-grep', {
-      stdout: `${JSON.stringify({ ruleId: 'no-vocab-literal', file: 'src/svc.ts', message: 'm', range: { start: { line: 0 } } })}\n`,
-      status: 1,
-    });
-    assert.deepEqual(recordedCounts(), { 'ast-grep:no-vocab-literal|src/svc.ts': 1 });
+  it(
+    'removing the old rule and writing the config swaps the baseline keys',
+    { skip: NO_TS },
+    () => {
+      // A v3 repo: the old rule found the literal, and the baseline recorded it.
+      put('sgconfig.yml', 'ruleDirs:\n  - rules\n');
+      put('rules/no-vocab-literal.yml', 'id: no-vocab-literal\n');
+      put('src/vocab.ts', 'export const Status = { Active: "active" } as const;\n');
+      put('src/svc.ts', "export const a = 'active';\n");
+      fake('ast-grep', {
+        stdout: `${JSON.stringify({ ruleId: 'no-vocab-literal', file: 'src/svc.ts', message: 'm', range: { start: { line: 0 } } })}\n`,
+        status: 1,
+      });
+      assert.deepEqual(recordedCounts(), { 'ast-grep:no-vocab-literal|src/svc.ts': 1 });
 
-    // The migration the skills describe: delete the old rule, write the config.
-    g(['check']);
-    fake('ast-grep', { stdout: '' });
-    config(['src/vocab.ts']);
-    const stale = g(['check', '--strict-baseline']);
-    assert.equal(stale.status, 1, 'the same literal is now a new finding under a new key');
-    assert.match(stale.out, /vocab-literal Status\.Active/);
+      // The migration the skills describe: delete the old rule, write the config.
+      g(['check']);
+      fake('ast-grep', { stdout: '' });
+      config(['src/vocab.ts']);
+      const stale = g(['check', '--strict-baseline']);
+      assert.equal(stale.status, 1, 'the same literal is now a new finding under a new key');
+      assert.match(stale.out, /vocab-literal Status\.Active/);
 
-    // The debt moved, it did not grow: a human reviews it and resets the baseline.
-    assert.equal(g(['baseline', '--reset']).status, 0, 'reset');
-    assert.equal(g(['check', '--strict-baseline']).status, 0);
-  });
+      // The debt moved, it did not grow: a human reviews it and resets the baseline.
+      assert.equal(g(['baseline', '--reset']).status, 0, 'reset');
+      assert.equal(g(['check', '--strict-baseline']).status, 0);
+    },
+  );
 });

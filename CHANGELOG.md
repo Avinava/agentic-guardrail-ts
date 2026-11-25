@@ -13,7 +13,7 @@ A security pack, a generated vocabulary check and an opt-in token drift rule. Se
 
 ### Added
 - `security` pack, opt-in per tool: osv-scanner on lockfiles (`osv-scanner.toml`, pre-push and CI), semgrep with the pack's own MIT rules and metrics off (`.semgrep/rules.yml`, pre-push and CI), zizmor on `.github/workflows` (`.github/zizmor.yml`, pre-commit and up). Semgrep registry rules are not vendored: their licence is not open source.
-- `vocab-literal` tool in the core pack (`guardrails/vocab.json`): flags raw strings equal to a member of a TypeScript `as const` object or `enum`, or a Python `StrEnum`, outside the vocab module and tests.
+- `vocab-literal` tool in the core pack (`guardrails/vocab.json`): flags raw strings equal to a member of a TypeScript `as const` object or `enum`, or a Python `StrEnum`, outside the vocab module and tests. It reads source with the `typescript` package and Python's `ast`, not a hand-written scanner.
 - Token drift: opt-in ast-grep rules (`no-color-literal.yml`, `no-color-literal-tsx.yml`) that ban hex, `rgb()`, `hsl()` and `oklch()` literals outside the tokens file. CSS is not covered: the gate has no stylelint tool.
 - `scripts/packs-security-test.mjs` and `scripts/packs-vocab-test.mjs`, with real-binary runs for osv-scanner, semgrep, zizmor and ast-grep that skip when the tool is missing.
 

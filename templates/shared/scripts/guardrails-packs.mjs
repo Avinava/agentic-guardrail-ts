@@ -18,6 +18,9 @@
 //   scan(ctx) replaces run+parse for checks done in JS
 //   metric + measure(ctx)  a number ratchet instead of findings: { name, direction, unit, advice }
 
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+
 const TS_EXT = /\.[cm]?[jt]sx?$/;
 const MD_EXT = /\.mdx?$/;
 const PY_EXT = /\.py$/;
@@ -212,256 +215,245 @@ const globRegExp = (glob) =>
       .replaceAll('\u0001', '.*')}$`,
   );
 
-// Index of the `}` that closes the `{` at `open`, skipping quoted strings. Comments are already
-// blanked (see blankComments).
-const closingBrace = (text, open) => {
-  let depth = 0;
-  for (let i = open; i < text.length; i++) {
-    const c = text[i];
-    if (c === '"' || c === "'" || c === '`') {
-      i = text.indexOf(c, i + 1);
-      if (i < 0) return -1;
-    } else if (c === '{') depth++;
-    else if (c === '}' && --depth === 0) return i;
+// The project's own TypeScript package parses TS and JS files. Missing means a broken install.
+function loadTypescript(h) {
+  try {
+    return createRequire(join(h.ROOT, 'package.json'))('typescript');
+  } catch (e) {
+    throw new Error(
+      `${VOCAB_CONFIG}: the typescript package is needed to read TypeScript vocab and sources. Install devDependencies first.`,
+      { cause: e },
+    );
   }
-  return -1;
+}
+
+// `as const` and `satisfies` wrappers around the expression.
+const unwrap = (tsApi, node) =>
+  tsApi.isAsExpression(node) ||
+  tsApi.isSatisfiesExpression(node) ||
+  tsApi.isParenthesizedExpression(node)
+    ? unwrap(tsApi, node.expression)
+    : node;
+
+const isConstAssertion = (tsApi, node) =>
+  (tsApi.isAsExpression(node) &&
+    tsApi.isTypeReferenceNode(node.type) &&
+    node.type.typeName.text === 'const') ||
+  ((tsApi.isSatisfiesExpression(node) || tsApi.isParenthesizedExpression(node)) &&
+    isConstAssertion(tsApi, node.expression));
+
+const isStringNode = (tsApi, node) =>
+  tsApi.isStringLiteral(node) || tsApi.isNoSubstitutionTemplateLiteral(node);
+
+const propertyName = (tsApi, name) =>
+  tsApi.isIdentifier(name) || tsApi.isStringLiteral(name) || tsApi.isNumericLiteral(name)
+    ? name.text
+    : null;
+
+// Members of an object literal, nested objects included (`Outer.Inner.KEY`).
+function tsObjectMembers(tsApi, object, prefix) {
+  const found = [];
+  for (const p of object.properties) {
+    const key = tsApi.isPropertyAssignment(p) ? propertyName(tsApi, p.name) : null;
+    if (key === null) continue;
+    const value = unwrap(tsApi, p.initializer);
+    if (isStringNode(tsApi, value)) found.push([`${prefix}.${key}`, value.text]);
+    else if (tsApi.isObjectLiteralExpression(value)) {
+      found.push(...tsObjectMembers(tsApi, value, `${prefix}.${key}`));
+    }
+  }
+  return found;
+}
+
+const tsKind = (tsApi, file) => {
+  if (file.endsWith('.tsx')) return tsApi.ScriptKind.TSX;
+  if (/\.[cm]?ts$/.test(file)) return tsApi.ScriptKind.TS;
+  return file.endsWith('.jsx') ? tsApi.ScriptKind.JSX : tsApi.ScriptKind.JS;
 };
 
-// `Name = 'value'` pairs inside an enum body.
-const enumMembers = (body) =>
-  [...body.matchAll(/(?:^|[,{\s])(\w+|'[^']*'|"[^"]*")\s*=\s*(['"`])([^'"`\\\n]*)\2/g)].map((m) => [
-    m[1].replace(/^['"]|['"]$/g, ''),
-    m[3],
-  ]);
-
-// `key: 'value'` pairs of an object body, nested objects included (`Outer.Inner.KEY`).
-function objectMembers(body, prefix) {
-  const found = [];
-  const re = /(?:^|[,{\s])(\w+|'[^']*'|"[^"]*")\s*:\s*/g;
-  for (let m = re.exec(body); m; m = re.exec(body)) {
-    const name = `${prefix}.${m[1].replace(/^['"]|['"]$/g, '')}`;
-    const at = m.index + m[0].length;
-    if (body[at] === '{') {
-      const close = closingBrace(body, at);
-      if (close < 0) break;
-      found.push(...objectMembers(body.slice(at + 1, close), name));
-      re.lastIndex = close + 1;
-    } else {
-      const s = /^(['"`])([^'"`\\\n]*)\1/.exec(body.slice(at, at + 200));
-      if (s) found.push([name, s[2]]);
-    }
-  }
-  return found;
-}
+const tsParse = (tsApi, file, text) =>
+  tsApi.createSourceFile(file, text, tsApi.ScriptTarget.Latest, true, tsKind(tsApi, file));
 
 // TypeScript: `export const X = { A: 'a' } as const` and `enum X { A = 'a' }`.
-function vocabTs(source) {
-  const text = blankComments(source);
+function tsVocab(tsApi, file, text) {
   const found = [];
-  for (const m of text.matchAll(/\b(?:const|enum)\s+(\w+)\s*(?::[^=\n{]+)?(=\s*)?\{/g)) {
-    const open = m.index + m[0].length - 1;
-    const close = closingBrace(text, open);
-    if (close < 0) continue;
-    const body = text.slice(open + 1, close);
-    if (m[0].startsWith('enum')) {
-      found.push(...enumMembers(body).map(([key, value]) => [`${m[1]}.${key}`, value]));
-    } else if (/^\s*as\s+const\b/.test(text.slice(close + 1))) {
-      found.push(...objectMembers(body, m[1]));
+  const visit = (node) => {
+    if (tsApi.isEnumDeclaration(node)) {
+      for (const m of node.members) {
+        const key = propertyName(tsApi, m.name);
+        if (key !== null && m.initializer && isStringNode(tsApi, m.initializer)) {
+          found.push([`${node.name.text}.${key}`, m.initializer.text]);
+        }
+      }
+    } else if (
+      tsApi.isVariableDeclaration(node) &&
+      tsApi.isIdentifier(node.name) &&
+      node.initializer &&
+      isConstAssertion(tsApi, node.initializer)
+    ) {
+      const value = unwrap(tsApi, node.initializer);
+      if (tsApi.isObjectLiteralExpression(value)) {
+        found.push(...tsObjectMembers(tsApi, value, node.name.text));
+      }
     }
-  }
+    tsApi.forEachChild(node, visit);
+  };
+  visit(tsParse(tsApi, file, text));
   return found;
 }
 
-// Python: `class X(StrEnum)` and `class X(str, Enum)`. Only assignments directly in the class
-// body are members: a method's locals sit deeper and are ignored.
-function vocabPy(text) {
+// A string that names a module (imports, re-exports, require(), import(), `declare module`).
+function isModuleName(tsApi, node) {
+  const p = node.parent;
+  return (
+    tsApi.isImportDeclaration(p) ||
+    tsApi.isExportDeclaration(p) ||
+    tsApi.isExternalModuleReference(p) ||
+    tsApi.isModuleDeclaration(p) ||
+    (tsApi.isLiteralTypeNode(p) && tsApi.isImportTypeNode(p.parent)) ||
+    (tsApi.isCallExpression(p) &&
+      (p.expression.kind === tsApi.SyntaxKind.ImportKeyword ||
+        (tsApi.isIdentifier(p.expression) && p.expression.text === 'require')))
+  );
+}
+
+// Plain string literals of a TS or JS file. A template contributes only the literals inside its
+// substitutions (its own text is not a plain string unless it has none).
+function tsLiterals(tsApi, file, text) {
+  const sf = tsParse(tsApi, file, text);
   const found = [];
-  let owner = null;
-  let indent = 0;
-  let body = null;
-  for (const line of text.split('\n')) {
-    if (line.trim() === '') continue;
-    const depth = line.length - line.trimStart().length;
-    if (owner !== null && depth <= indent) owner = null;
-    const head = /^(\s*)class\s+(\w+)\s*\(([^)]*)\)\s*:/.exec(line);
-    if (head && owner === null) {
-      const bases = head[3];
-      const isEnum = /\bStrEnum\b/.test(bases) || (/\bstr\b/.test(bases) && /\bEnum\b/.test(bases));
-      owner = isEnum ? head[2] : null;
-      indent = head[1].length;
-      body = null;
-      continue;
+  const visit = (node) => {
+    if (isStringNode(tsApi, node) && !isModuleName(tsApi, node)) {
+      found.push({
+        value: node.text,
+        line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1,
+      });
     }
-    if (owner === null) continue;
-    body ??= depth;
-    const member = /^\s+(\w+)\s*(?::[^=]+)?=\s*(['"])([^'"\\]*)\2\s*(?:#.*)?$/.exec(line);
-    if (depth === body && member) found.push([`${owner}.${member[1]}`, member[3]]);
-  }
+    tsApi.forEachChild(node, visit);
+  };
+  visit(sf);
   return found;
 }
 
-// The scanner state for literals(): the text, the position, and the current line.
-// Moves the position to `to`, counting the lines it passes.
-function advance(s, to) {
-  for (; s.i < to; s.i++) {
-    if (s.text[s.i] === '\n') {
-      s.line++;
-      s.lineStart = s.i + 1;
+// Python is read by its own `ast` module. A member is an assignment directly in the body of a
+// StrEnum (or str + Enum) class; a literal is any str constant except a bare-string statement
+// (a docstring) and the fixed text of an f-string, whose substitutions are walked.
+const PY_READER = `
+import ast, json, sys
+req = json.load(sys.stdin)
+
+def base_names(cls):
+    return {b.id if isinstance(b, ast.Name) else getattr(b, "attr", None) for b in cls.bases}
+
+def is_enum(cls):
+    names = base_names(cls)
+    return "StrEnum" in names or ("str" in names and "Enum" in names)
+
+def is_str(node):
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+def members(tree):
+    out = []
+    for cls in ast.walk(tree):
+        if not (isinstance(cls, ast.ClassDef) and is_enum(cls)):
+            continue
+        for stmt in cls.body:
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                target, value = stmt.targets[0], stmt.value
+            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                target, value = stmt.target, stmt.value
+            else:
+                continue
+            if isinstance(target, ast.Name) and is_str(value):
+                out.append([cls.name + "." + target.id, value.value])
+    return out
+
+class Literals(ast.NodeVisitor):
+    def __init__(self):
+        self.out = []
+
+    def visit_Expr(self, node):
+        if not is_str(node.value):
+            self.generic_visit(node)
+
+    def visit_Constant(self, node):
+        if isinstance(node.value, str):
+            self.out.append([node.value, node.lineno])
+
+    def visit_JoinedStr(self, node):
+        fields = [v for v in node.values if isinstance(v, ast.FormattedValue)]
+        if not fields:
+            self.out.append(["".join(v.value for v in node.values), node.lineno])
+        for field in fields:
+            self.visit(field.value)
+            spec = field.format_spec
+            for inner in (spec.values if spec else []):
+                if isinstance(inner, ast.FormattedValue):
+                    self.visit(inner.value)
+
+result = {"vocab": {}, "scan": {}}
+for path in req["vocab"]:
+    result["vocab"][path] = members(ast.parse(open(path, encoding="utf-8").read(), path))
+for path in req["scan"]:
+    visitor = Literals()
+    visitor.visit(ast.parse(open(path, encoding="utf-8").read(), path))
+    result["scan"][path] = visitor.out
+json.dump(result, sys.stdout)
+`;
+
+function readPython(h, vocab, scan) {
+  if (vocab.length === 0) return { vocab: {}, scan: {} };
+  const r = h.run('python3', ['-I', '-c', PY_READER], {
+    input: JSON.stringify({ vocab, scan }),
+  });
+  if (r.status !== 0) {
+    throw new Error(
+      `${VOCAB_CONFIG}: python3 could not read the Python files (exit ${r.status}):\n${tail(r.stderr || String(r.error ?? ''))}`,
+    );
+  }
+  return json('python3', r.stdout);
+}
+
+function vocabConfig(h) {
+  let config;
+  try {
+    config = JSON.parse(h.read(VOCAB_CONFIG));
+  } catch (e) {
+    throw new Error(`${VOCAB_CONFIG} is not valid JSON: ${e.message}`, { cause: e });
+  }
+  const modules = config.modules;
+  if (
+    !Array.isArray(modules) ||
+    modules.length === 0 ||
+    !modules.every((m) => typeof m === 'string')
+  ) {
+    throw new Error(`${VOCAB_CONFIG} needs "modules": ["path/to/vocab.ts", ...]`);
+  }
+  for (const mod of modules) {
+    if (!h.exists(mod)) throw new Error(`${VOCAB_CONFIG}: vocab module ${mod} does not exist`);
+  }
+  return { modules, ignore: (config.ignore ?? []).map(globRegExp) };
+}
+
+// value -> member name, per language, from every vocab module.
+function vocabTables(h, modules, tsApi, pyVocab) {
+  const tables = { ts: new Map(), py: new Map() };
+  for (const mod of modules) {
+    const py = PY_EXT.test(mod);
+    const parsed = py ? pyVocab[mod] : tsVocab(tsApi, mod, h.read(mod));
+    if (parsed.length === 0) {
+      throw new Error(
+        `${VOCAB_CONFIG}: no string members found in ${mod} (expected an "as const" object, an enum or a StrEnum)`,
+      );
+    }
+    for (const [name, value] of parsed) {
+      if (value !== '' && !tables[py ? 'py' : 'ts'].has(value)) {
+        tables[py ? 'py' : 'ts'].set(value, name);
+      }
     }
   }
+  return tables;
 }
-
-// Each skipper returns the index after what it consumed, or null when it does not start here.
-function skipComment(s, c) {
-  const { text, py, i } = s;
-  if (py ? c === '#' : c === '/' && text[i + 1] === '/') {
-    const end = text.indexOf('\n', i);
-    return end < 0 ? text.length : end;
-  }
-  if (!py && c === '/' && text[i + 1] === '*') {
-    const end = text.indexOf('*/', i + 2);
-    return end < 0 ? text.length : end + 2;
-  }
-  return null;
-}
-
-// A regex literal is skipped so a quote inside it does not start a string.
-function skipRegex(s, c) {
-  const { text, i } = s;
-  if (s.py || c !== '/' || !/[(,=:[!&|?{};]$/.test(text.slice(s.lineStart, i).trimEnd())) {
-    return null;
-  }
-  let inClass = false;
-  let j = i + 1;
-  for (; j < text.length && text[j] !== '\n'; j++) {
-    if (text[j] === '\\') j++;
-    else if (text[j] === '[') inClass = true;
-    else if (text[j] === ']') inClass = false;
-    else if (text[j] === '/' && !inClass) break;
-  }
-  return j + 1;
-}
-
-// Where a quoted string that opens at `start` ends: at its quote, or at a newline, so an unmatched
-// apostrophe cannot swallow the rest of the file.
-function stringEnd(text, start, quote) {
-  let j = start + 1;
-  for (; j < text.length && text[j] !== quote && text[j] !== '\n'; j++) {
-    if (text[j] === '\\') j++;
-  }
-  return j;
-}
-
-// Index of the `}` that closes a `${` expression whose body starts at `from`.
-function exprEnd(text, from) {
-  let depth = 0;
-  for (let j = from; j < text.length; j++) {
-    const ch = text[j];
-    if (ch === '"' || ch === "'") j = stringEnd(text, j, ch);
-    else if (ch === '`') j = templateEnd(text, j).end;
-    else if (ch === '{') depth++;
-    else if (ch === '}' && depth-- === 0) return j;
-  }
-  return text.length;
-}
-
-// A template literal: where it ends, and the [from, to) ranges of its `${...}` expressions.
-function templateEnd(text, start) {
-  const exprs = [];
-  let j = start + 1;
-  for (; j < text.length && text[j] !== '`'; j++) {
-    if (text[j] === '\\') j++;
-    else if (text[j] === '$' && text[j + 1] === '{') {
-      const close = exprEnd(text, j + 2);
-      exprs.push([j + 2, close]);
-      j = close;
-    }
-  }
-  return { end: j, exprs };
-}
-
-// The [from, to) ranges of the `{expr}` parts of an f-string body (`{{` is a literal brace).
-function fStringExprs(body) {
-  const exprs = [];
-  for (let j = 0; j < body.length; j++) {
-    if (body.startsWith('{{', j)) j++;
-    else if (body[j] === '{') {
-      const close = body.indexOf('}', j);
-      if (close < 0) break;
-      exprs.push([j + 1, close]);
-      j = close;
-    }
-  }
-  return exprs;
-}
-
-// An apostrophe right after a word character is text ("Don't" in JSX), not a string start.
-const isApostrophe = (s, c) => !s.py && c === "'" && /[\w$]/.test(s.text[s.i - 1] ?? '');
-
-// The literals inside the expressions of a template or f-string, with their real line numbers.
-function nestedLiterals(s, exprs) {
-  for (const [from, to] of exprs) {
-    const line = s.line + (s.text.slice(s.i, from).match(/\n/g)?.length ?? 0);
-    s.out.push(...literals(s.text.slice(from, to), s.py, line));
-  }
-}
-
-// Records a plain string literal (not bytes, a triple-quoted string, or a template or f-string
-// with a substitution: those are scanned for the literals inside `${...}` instead).
-function readString(s, c) {
-  const { text, py, i } = s;
-  if (c !== '"' && c !== "'" && (py || c !== '`')) return null;
-  if (isApostrophe(s, c)) return null;
-  if (py && text.startsWith(c.repeat(3), i)) {
-    const end = text.indexOf(c.repeat(3), i + 3);
-    return end < 0 ? text.length : end + 3;
-  }
-  const before = text.slice(s.lineStart, i);
-  const prefix = py ? (/[A-Za-z]{1,2}$/.exec(before)?.[0].toLowerCase() ?? '') : '';
-  const tpl = c === '`' ? templateEnd(text, i) : null;
-  const end = tpl ? tpl.end : stringEnd(text, i, c);
-  const value = text.slice(i + 1, end);
-  const closed = text[end] === c;
-  const exprs =
-    tpl?.exprs ??
-    (/f/.test(prefix) ? fStringExprs(value).map(([a, b]) => [a + i + 1, b + i + 1]) : []);
-  if (!closed || /b/.test(prefix)) return closed ? end + 1 : end;
-  if (exprs.length > 0) nestedLiterals(s, exprs);
-  else if (!value.includes('\\')) s.out.push({ value, line: s.line, before });
-  return end + 1;
-}
-
-// Plain string literals with their line and the text before them on that line. Skips comments,
-// triple-quoted strings and bytes; a template or f-string contributes the literals inside its
-// substitutions, not its own text.
-function literals(text, py, line = 1) {
-  const s = { text, py, i: 0, line, lineStart: 0, out: [] };
-  while (s.i < text.length) {
-    const c = text[s.i];
-    const next = skipComment(s, c) ?? skipRegex(s, c) ?? readString(s, c);
-    advance(s, next ?? s.i + 1);
-  }
-  return s.out;
-}
-
-// The source with every comment replaced by spaces (newlines kept), so a commented-out
-// declaration or a stray brace in a comment cannot change what is read as code.
-function blankComments(text) {
-  const s = { text, py: false, i: 0, line: 1, lineStart: 0, out: [] };
-  let out = '';
-  while (s.i < text.length) {
-    const from = s.i;
-    const c = text[from];
-    const comment = skipComment(s, c);
-    const next = comment ?? skipRegex(s, c) ?? readString(s, c) ?? from + 1;
-    out +=
-      comment === null ? text.slice(from, next) : text.slice(from, next).replace(/[^\n]/g, ' ');
-    advance(s, next);
-  }
-  return out;
-}
-
-const IMPORT_BEFORE = /(?:\bfrom|\bimport|\brequire\(|\bimport\()\s*$/;
 
 const vocabLiteral = {
   // Replaces the v3 `no-vocab-literal` ast-grep rule, whose regex was filled in by hand.
@@ -470,46 +462,30 @@ const vocabLiteral = {
   exts: VOCAB_EXT,
   stages: ['edit', 'commit', 'push'],
   scan: ({ files, h }) => {
-    let config;
-    try {
-      config = JSON.parse(h.read(VOCAB_CONFIG));
-    } catch (e) {
-      throw new Error(`${VOCAB_CONFIG} is not valid JSON: ${e.message}`, { cause: e });
-    }
-    const modules = config.modules;
-    if (
-      !Array.isArray(modules) ||
-      modules.length === 0 ||
-      !modules.every((m) => typeof m === 'string')
-    ) {
-      throw new Error(`${VOCAB_CONFIG} needs "modules": ["path/to/vocab.ts", ...]`);
-    }
-    const ignore = (config.ignore ?? []).map(globRegExp);
-    const tables = { ts: new Map(), py: new Map() };
-    for (const mod of modules) {
-      if (!h.exists(mod)) throw new Error(`${VOCAB_CONFIG}: vocab module ${mod} does not exist`);
-      const py = PY_EXT.test(mod);
-      const parsed = (py ? vocabPy : vocabTs)(h.read(mod));
-      if (parsed.length === 0) {
-        throw new Error(
-          `${VOCAB_CONFIG}: no string members found in ${mod} (expected an "as const" object, an enum or a StrEnum)`,
-        );
-      }
-      for (const [name, value] of parsed) {
-        if (value !== '' && !tables[py ? 'py' : 'ts'].has(value))
-          tables[py ? 'py' : 'ts'].set(value, name);
-      }
-    }
+    const { modules, ignore } = vocabConfig(h);
     const skip = new Set(modules.map((m) => h.rel(m)));
+    const candidates = (files ?? h.projectFiles(VOCAB_EXT)).filter(
+      (f) => !skip.has(f) && !TEST_FILE.test(f) && !ignore.some((re) => re.test(f)),
+    );
+    const pyModules = modules.filter((m) => PY_EXT.test(m));
+    const tsApi = pyModules.length < modules.length ? loadTypescript(h) : null;
+    const py = readPython(
+      h,
+      pyModules,
+      candidates.filter((f) => PY_EXT.test(f)),
+    );
+    const tables = vocabTables(h, modules, tsApi, py.vocab);
     const found = [];
-    for (const file of files ?? h.projectFiles(VOCAB_EXT)) {
-      if (skip.has(file) || TEST_FILE.test(file) || ignore.some((re) => re.test(file))) continue;
-      const py = PY_EXT.test(file);
-      const table = tables[py ? 'py' : 'ts'];
+    for (const file of candidates) {
+      const isPy = PY_EXT.test(file);
+      const table = tables[isPy ? 'py' : 'ts'];
       if (table.size === 0) continue;
-      for (const { value, line, before } of literals(h.read(file), py)) {
+      const read = isPy
+        ? py.scan[file].map(([value, line]) => ({ value, line }))
+        : tsLiterals(tsApi, file, h.read(file));
+      for (const { value, line } of read) {
         const name = table.get(value);
-        if (name === undefined || (!py && IMPORT_BEFORE.test(before))) continue;
+        if (name === undefined) continue;
         found.push({
           rule: name,
           file,
