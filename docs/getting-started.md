@@ -58,7 +58,7 @@ The commit itself goes through the new hooks. That is the first real test.
 
 ## Other stacks
 
-The gate is not TypeScript-only. Python, Mule, Salesforce, shell, Docker, SQL, Rust, Dart and C++ are opt-in [packs](./packs.md), and cspell, jscpd, ast-grep, ls-lint, markdownlint, lychee, editorconfig-checker and actionlint are opt-in core tools. Ask the agent to enable the ones you want; `node scripts/guardrails.mjs packs` shows what a repo has and what is on.
+The gate is not TypeScript-only. Python, Mule, Salesforce, shell, Docker, SQL, Rust, Dart, C++ and security checks are opt-in [packs](./packs.md), and cspell, jscpd, ast-grep, ls-lint, markdownlint, lychee, editorconfig-checker and actionlint are opt-in core tools. Ask the agent to enable the ones you want; `node scripts/guardrails.mjs packs` shows what a repo has and what is on.
 
 ## Daily commands
 

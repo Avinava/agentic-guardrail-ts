@@ -8,7 +8,7 @@ Everything beyond the original TypeScript stack is **opt-in**. A tool switches o
 
 | Pack | Detect rule | Tools | Default |
 | --- | --- | --- | --- |
-| `core` | every repo | cspell, jscpd, ast-grep, ls-lint, markdownlint-cli2, lychee, editorconfig-checker, actionlint (gitleaks, lefthook, commitlint are installed by the base setup) | opt-in per tool |
+| `core` | every repo | cspell, jscpd, ast-grep, vocab-literal, ls-lint, markdownlint-cli2, lychee, editorconfig-checker, actionlint (gitleaks, lefthook, commitlint are installed by the base setup) | opt-in per tool |
 | `ts` | `package.json`, `tsconfig*.json` | Oxlint, dependency-cruiser, Knip, disable check, Prettier, Vitest floors | on in every v3 install (see [ts](#ts)) |
 | `python` | `pyproject.toml`, `uv.lock` | ruff (lint, format), pyright, tach, deptry, vulture, pytest coverage floor | opt-in |
 | `mule` | `mule-artifact.json`, `src/main/mule/*.xml` | mule-lint, Mule XML format check, properties secrets, MUnit through Maven | opt-in |
@@ -19,10 +19,21 @@ Everything beyond the original TypeScript stack is **opt-in**. A tool switches o
 | `rust` | `Cargo.toml` | cargo fmt, clippy, cargo-deny, cargo-machete | opt-in |
 | `dart` | `pubspec.yaml`, `*.dart` | dart format, dart or flutter analyze, Flutter coverage floor | opt-in, **experimental** |
 | `cpp` | `platformio.ini`, `.clang-format`, `*.cpp` | clang-format, pio check | opt-in, **experimental** |
+| `security` | lockfiles, `.github/workflows/*.yml`, `.semgrep/` | osv-scanner, semgrep (own rules), zizmor | opt-in |
 
 **Experimental** means no tool of the pack has been run against its real binary: only fake-output unit tests cover it (see [Verified against real tools](#verified-against-real-tools)). The setup skill does not offer experimental packs unless the user asks for them, and they may change without a major version.
 
 More packs are added below as they ship.
+
+## Upgrading from 3.x to 4.0.0 (breaking)
+
+The hand-filled ast-grep rule `rules/no-vocab-literal.yml` is gone, replaced by the `vocab-literal` tool, which reads the vocab module itself. A repo that has the old rule keeps running it (ast-grep runs every file in `rules/`), but it is no longer maintained or shipped. Migrate:
+
+1. Write `guardrails/vocab.json` with the path of the vocab module (see [core](#core)).
+2. Delete `rules/no-vocab-literal.yml`. Keep `sgconfig.yml` if other rules remain.
+3. Run `node scripts/guardrails.mjs check`. The same literals now fail as `vocab-literal:<Name.Member>|file` and the old `ast-grep:no-vocab-literal|file` keys are stale. Review the list, then run `baseline --reset`. The new tool also checks Python `StrEnum` members and nested members, so the count can be higher.
+
+The `setup-guardrails` and `guardrails-doctor` skills do these steps. Nothing else changes, and the `security` pack is opt-in.
 
 ## Upgrading from 3.0.0
 
@@ -113,6 +124,7 @@ Language-agnostic tools. Templates: `templates/packs/core/`. Each switches on wi
 | Tool | Config (switch) | Findings | Stages |
 | --- | --- | --- | --- |
 | ast-grep | `sgconfig.yml`, `rules/*.yml` | `ast-grep:<rule-id>\|file` | edit, commit, push |
+| vocab-literal | `guardrails/vocab.json` | `vocab-literal:<Name.Member>\|file` | edit, commit, push |
 | ls-lint | `.ls-lint.yml` | `ls-lint:<ext>-<rule>\|path` | edit, commit, push |
 | cspell | `cspell.json` | `cspell:unknown-word\|file`, `cspell:forbidden-word\|file` | edit, commit, push |
 | jscpd | `.jscpd.json` | metric `duplication` (down) | push |
@@ -121,7 +133,13 @@ Language-agnostic tools. Templates: `templates/packs/core/`. Each switches on wi
 | editorconfig-checker | `.ecrc` | `editorconfig-checker:<problem>\|file` | commit, push |
 | actionlint | `.github/actionlint.yaml` | `actionlint:<rule-kind>\|file` | commit, push |
 
-**ast-grep** (npm `@ast-grep/cli`, run as `ast-grep scan --json=stream`; `sg` is a deprecated alias used only as a fallback). Custom structural rules only; Oxlint keeps every rule it has natively. The templates ship `no-vocab-literal` (bans a string equal to a member of the vocab or enum module outside a `vocab/` directory, tests and imports; a literal in type position counts too) and `no-banned-identifier` (an example list of vague names). ast-grep rules are static, so the setup skill fills the regex from the module's values; a new vocab value needs a new entry.
+**ast-grep** (npm `@ast-grep/cli`, run as `ast-grep scan --json=stream`; `sg` is a deprecated alias used only as a fallback). Custom structural rules only; Oxlint keeps every rule it has natively. The templates ship `no-banned-identifier` (an example list of vague names) and, under `optional/`, token drift (below). Token drift is opt-in: copy `no-color-literal.yml` and `no-color-literal-tsx.yml` (ast-grep takes one language per rule) into `rules/`. They ban hex, `rgb()`/`rgba()`, `hsl()`/`hsla()` and `oklch()` colour literals in TypeScript outside the files listed under `ignores` (default: `tokens/`, `tokens.ts`, tests). Only TS and TSX are covered: there is no CSS check, because the gate has no stylelint tool; add one as a pack tool before banning colours in CSS.
+
+**vocab-literal** (built in, no install). Reads the vocab module(s) listed in `guardrails/vocab.json` and flags a plain string literal equal to a member, anywhere outside that module, tests (`*.test.*`, `*.spec.*`, `test_*.py`, `tests/`, `__tests__/`) and the `ignore` globs. A TypeScript module is an `as const` object (nested objects included) or an `enum`; a Python module is a `StrEnum` or `class X(str, Enum)`. TypeScript values flag TS and JS files, Python values flag `.py` files. Imports, comments, docstrings, f-strings, bytes and templates with `${}` are not literals. A type-position literal (`'a' | 'b'`) counts. The rule is the member name (`Status.Active`), so a rename re-keys the baseline. A missing or empty module, or a config that is not valid JSON, fails the gate.
+
+```json
+{ "modules": ["src/vocab.ts", "app/vocab.py"], "ignore": ["**/generated/**"] }
+```
 
 **ls-lint** (npm `@ls-lint/ls-lint`). Owns folder names, banned extensions (`.spec.ts: exists:0`) and the case of non-code files. It sets no case for `.ts`, `.tsx`, `.js` or `.mjs`: Oxlint `unicorn/filename-case` owns those (see [the split](./known-conflicts.md#ls-lint-and-unicornfilename-case)). It scans the whole tree. A banned extension is reported on its directory, so it is caught on pre-push and CI rather than in the edit hook.
 
@@ -265,6 +283,22 @@ Templates: `templates/packs/cpp/`, for C and C++ including PlatformIO firmware.
 
 clang-format runs `clang-format --dry-run --Werror`; each misformatted line is one finding. pio-check runs `pio check --skip-packages --json-output` with cppcheck or clang-tidy (`check_tool`). It downloads toolchains, so it is pre-push and CI only.
 
+## security
+
+Templates: `templates/packs/security/`. Each tool is switched on by its own file, so a repo can take one without the others. No tool is installed by npm: install them on PATH and in CI (`ci.yml` has the steps for the base `verify` job; no separate job is needed because nothing here is ci-stage).
+
+| Tool | Config (switch) | Findings | Stages |
+| --- | --- | --- | --- |
+| osv-scanner | `osv-scanner.toml` | `osv-scanner:<advisory id>\|lockfile` | push |
+| semgrep | `.semgrep/rules.yml` | `semgrep:<rule-id>\|file` | push |
+| zizmor | `.github/zizmor.yml` (or `zizmor.yml`) | `zizmor:<audit>\|workflow` | commit, push |
+
+**osv-scanner** (`brew install osv-scanner`, or `go install github.com/google/osv-scanner/v2/cmd/osv-scanner@latest`). Runs `osv-scanner scan source --format json --config osv-scanner.toml -L <lockfile>...` on every lockfile it finds (`package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `uv.lock`, `poetry.lock`, `Cargo.lock`, `go.mod`, `composer.lock`, `Gemfile.lock`). One finding per advisory per lockfile. It needs network access to the OSV database, so it is pre-push and CI only, and an advisory published tomorrow can fail a push that changed nothing: accept one with `[[IgnoredVulns]]`, a reason and an `ignoreUntil` date in `osv-scanner.toml`. Exit 1 is findings; 127 (for example no network) fails the gate.
+
+**semgrep** (`uv tool install semgrep` or `pipx install semgrep`). Runs only the rules in `.semgrep/`, with `--metrics=off --disable-version-check --quiet --json --error`. It never loads a registry ruleset: the registry rules are under the Semgrep Rules License, which is not an open source licence, so they are not vendored. The shipped `rules.yml` holds ten rules written for this repo (MIT): `eval`, shell-spawning `exec`, HTML sinks, disabled TLS verification and weak hashes for JavaScript and TypeScript; `eval`, `shell=True`, unsafe deserialisation, disabled TLS verification and weak hashes for Python. Add your own rules as more files in `.semgrep/`. It scans the whole repo, so it is pre-push and CI only; CI runs the same full check.
+
+**zizmor** (`brew install zizmor` or `pipx install zizmor`). Audits `.github/workflows/*.yml` offline (`--offline --format json-v1`), so no GitHub token is needed and the online audits are skipped. Exit 10 to 14 means findings (by severity), 0 is clean, 1 is a failure. Findings an ignore rule in the config already accepts are dropped. Overlap with actionlint is intended: actionlint checks syntax and types, zizmor checks for security problems.
+
 ## Verified against real tools
 
 Each tool was run through `guardrails.mjs` with the shipped template config where it was installed. Everything else is covered only by the fake-output unit tests in `scripts/packs-*-test.mjs`, which use output copied from real runs where we had it, and from the tool's documentation otherwise.
@@ -272,6 +306,8 @@ Each tool was run through `guardrails.mjs` with the shipped template config wher
 | Tool | Status |
 | --- | --- |
 | ast-grep 0.51.0, ls-lint 2.3.2, cspell 10.4.0, jscpd 5.4.2, markdownlint-cli2 0.24.0, lychee 0.24.2, editorconfig-checker 6.2.0 | run for real |
+| osv-scanner 2.7.1 (npm lockfile; needs network), semgrep 1.187.0 (the shipped rules on TypeScript and Python), zizmor 1.33.1 (with the template config) | run for real (`scripts/packs-security-test.mjs`, which skips a tool that is not installed) |
+| vocab-literal, token drift (ast-grep 0.51.3) | run for real (`scripts/packs-vocab-test.mjs`, `scripts/packs-core-test.mjs`) |
 | actionlint | not run against the real tool (not installed); fake output from the documented JSON template |
 | ruff 0.16.9, pyright 1.1.414, tach 0.35.3, deptry 0.25.1, vulture 2.16, pytest-cov through uv 0.12.21 | run for real (ruff format output changed in 0.16, which the parser handles) |
 | mule-lint 2.3.0 (lint and `format --check`), the properties secret check | run for real |

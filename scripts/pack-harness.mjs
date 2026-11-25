@@ -54,6 +54,9 @@ const PATH_BINS = [
   'flutter',
   'clang-format',
   'pio',
+  'osv-scanner',
+  'semgrep',
+  'zizmor',
 ];
 
 // A fake binary. Which canned spec answers a call:

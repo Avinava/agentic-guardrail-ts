@@ -1,0 +1,9 @@
+# Install at .github/zizmor.yml. It switches on zizmor for .github/workflows.
+# zizmor runs offline here, so audits that need the GitHub API are skipped. Accept a finding by
+# naming the workflow, with a reason in a comment:
+#
+# rules:
+#   excessive-permissions:
+#     ignore:
+#       - release.yml  # needs contents: write to publish, reviewed 2026-11
+rules: {}

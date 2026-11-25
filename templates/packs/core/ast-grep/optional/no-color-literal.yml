@@ -1,0 +1,22 @@
+# Token drift: bans hex, rgb()/rgba(), hsl()/hsla() and oklch() colour literals in TypeScript
+# outside the design tokens file. Opt-in: copy this file into rules/ (ast-grep reads every file
+# there). no-color-literal-tsx.yml is the same rule for .tsx files: ast-grep takes one language per rule.
+# Put the tokens file, and anything else allowed to hold raw colours, under `ignores`.
+id: no-color-literal
+language: TypeScript
+severity: error
+message: Use a design token, not a raw colour. New colours go in the tokens file.
+rule:
+  kind: string_fragment
+  any:
+    - regex: "(^|[\\s,(:])#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})($|[\\s,);])"
+    - regex: "(^|[^A-Za-z0-9_-])(rgba?|hsla?|oklch)\\("
+  inside:
+    any:
+      - kind: string
+      - kind: template_string
+    stopBy: end
+ignores:
+  - "**/tokens/**"
+  - "**/tokens.ts"
+  - "**/*.test.ts"

@@ -6,7 +6,7 @@ description: >
   Knip dead code, Vitest coverage floors, lefthook git hooks, gitleaks, commitlint, CI,
   and agent hooks that lint every edit. Existing debt is recorded in a ratchet baseline
   so only new problems block. Opt-in packs extend the same gate to other stacks (Python, Mule,
-  Salesforce, shell, Docker, SQL, Rust, Dart, C++) and to docs, spelling, naming and duplication.
+  Salesforce, shell, Docker, SQL, Rust, Dart, C++), to security scanning, and to docs, spelling, naming and duplication.
   Use for "set up guardrails", "add linting/hooks for agents", "harden this repo for AI coding",
   "add guardrails for Mule/Salesforce/Python", or upgrading a v2 guardrail setup.
 ---
@@ -101,7 +101,7 @@ Read; don't change anything yet. Record each answer for the gap report.
    `uv.lock` (python), `mule-artifact.json` or `src/main/mule/*.xml` (mule), `sfdx-project.json`
    (salesforce), `*.sh` (shell), `Dockerfile*` or `*compose*.yml` (docker), `*.sql` (sql),
    `Cargo.toml` (rust), `pubspec.yaml` (dart), `platformio.ini` or `.clang-format` (cpp),
-   `.github/workflows/` (actionlint). After Wave 1 installs the script, run `packs` on it
+   `.github/workflows/` (actionlint, zizmor), a lockfile (osv-scanner). After Wave 1 installs the script, run `packs` on it
    (`node scripts/guardrails.mjs packs`) to print the same detection and which tools are on. Packs beyond `ts` are opt-in: list the
    detected ones in the gap report and enable only the ones the user picks.
 7. **Mode.**
@@ -280,7 +280,8 @@ on when its config file exists, so enabling a pack is writing its files. For eac
 
 | Pack | Switch files | Fit to the target | Install |
 | --- | --- | --- | --- |
-| core: ast-grep | `sgconfig.yml`, `rules/` | Fill the `no-vocab-literal` regex from the values of the project's vocab module (an `as const` object or enum) and the banned-identifier list from its banned synonyms. Skip if there is no vocab module. | npm `@ast-grep/cli` |
+| core: ast-grep | `sgconfig.yml`, `rules/` | Fill the banned-identifier list from the project's banned synonyms. Token drift (opt-in): copy `optional/no-color-literal.yml` and `no-color-literal-tsx.yml` into `rules/` only if the project has a design tokens file, and list it under `ignores`. | npm `@ast-grep/cli` |
+| core: vocab-literal | `guardrails/vocab.json` | Set `modules` to the project's vocab module path(s): a TypeScript `as const` object or `enum`, or a Python `StrEnum`. Skip if there is no vocab module. Nothing to install: the check is part of `guardrails.mjs`. | none |
 | core: ls-lint | `.ls-lint.yml` (single or monorepo) | Match the real source folders. Set no case for `.ts`, `.tsx`, `.js`, `.mjs`: Oxlint owns those. | npm `@ls-lint/ls-lint` |
 | core: cspell | `cspell.json`, `.cspell/` | Seed the dictionary from the first run, reviewing words. Put banned synonyms in `flagWords`. | npm `cspell` |
 | core: jscpd | `.jscpd.json` (single or monorepo) | Point `path` at real source folders. Full checks only. | npm `jscpd` |
@@ -294,7 +295,13 @@ on when its config file exists, so enabling a pack is writing its files. For eac
 | sql (experimental) | `.sqlfluff` | Fake-output tests only. Offer only if the user asks. Set the dialect (and templater for dbt). | `sqlfluff` |
 | rust | `rustfmt.toml`, `clippy.toml`, `deny.toml` | Run `cargo deny init` for the full deny policy. Add the machete metadata table if wanted. | `cargo-deny`, `cargo-machete` |
 | dart (experimental) | `analysis_options.yaml` | Fake-output tests only. Offer only if the user asks. Use the project's lint package. | Dart or Flutter SDK |
+| security | `osv-scanner.toml`, `.semgrep/rules.yml`, `.github/zizmor.yml` | Offer each tool on its own: osv-scanner needs a lockfile and network, semgrep runs only the rules in `.semgrep/` (add the project's own), zizmor needs `.github/workflows`. Add the CI install step to the `verify` job; no separate job. | `osv-scanner`, `semgrep`, `zizmor` binaries |
 | cpp (experimental) | `.clang-format`, `check_tool` in `platformio.ini` | Fake-output tests only. Offer only if the user asks. Match the existing style. `pio check` downloads toolchains. | `clang-format`; PlatformIO |
+
+**Upgrading from 3.x (4.0.0, breaking).** If `rules/no-vocab-literal.yml` exists (the hand-filled ast-grep rule):
+1. Find the vocab module the old regex was built from, and write `guardrails/vocab.json` with its path (see the Templates, Core).
+2. Delete `rules/no-vocab-literal.yml`. If `rules/` is now empty and no other rule uses ast-grep, ask before removing `sgconfig.yml` too.
+3. Run `node scripts/guardrails.mjs check`. The same literals now appear as `vocab-literal:<Name.Member>|file` and the old `ast-grep:no-vocab-literal|file` keys are gone. Show the user the count: it should match the old rule's count or be higher (the new tool also checks Python and enum members). After approval run `baseline --reset`.
 
 A monorepo with several stacks gets several packs. mule-lint finds each Mule application by its
 `mule-artifact.json`; every other tool reads its config from the repo root, and the Python tools
@@ -1259,6 +1266,7 @@ try {
 
 const TS_EXT = /\.[cm]?[jt]sx?$/;
 const MD_EXT = /\.mdx?$/;
+const PY_EXT = /\.py$/;
 
 // Exit codes for tools whose JSON report is the authority (v3 ignored their exit status): any exit
 // is fine as long as the report parses, and an unparsable report throws.
@@ -1430,6 +1438,258 @@ const ts = {
   ],
 };
 
+// ── vocab-literal: raw strings that equal a member of the project's vocab module ──
+
+const VOCAB_CONFIG = 'guardrails/vocab.json';
+const VOCAB_EXT = /\.(?:[cm]?[jt]sx?|py)$/;
+const TEST_FILE =
+  /(?:^|\/)(?:__tests__|tests?|e2e)\/|\.(?:test|spec)\.[^/]+$|(?:^|\/)test_[^/]*\.py$|_test\.py$|(?:^|\/)conftest\.py$/;
+
+// A glob from vocab.json `ignore`: `**` crosses folders, `*` and `?` stay inside one.
+const globRegExp = (glob) =>
+  new RegExp(
+    `^${glob
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replaceAll('**/', '\u0000')
+      .replaceAll('**', '\u0001')
+      .replaceAll('*', '[^/]*')
+      .replaceAll('?', '[^/]')
+      .replaceAll('\u0000', '(?:.*/)?')
+      .replaceAll('\u0001', '.*')}$`,
+  );
+
+// Index of the `}` that closes the `{` at `open`, skipping quoted strings.
+const closingBrace = (text, open) => {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"' || c === "'" || c === '`') {
+      i = text.indexOf(c, i + 1);
+      if (i < 0) return -1;
+    } else if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) return i;
+  }
+  return -1;
+};
+
+// `Name = 'value'` pairs inside an enum body.
+const enumMembers = (body) =>
+  [...body.matchAll(/(?:^|[,{\s])(\w+|'[^']*'|"[^"]*")\s*=\s*(['"`])([^'"`\\\n]*)\2/g)].map((m) => [
+    m[1].replace(/^['"]|['"]$/g, ''),
+    m[3],
+  ]);
+
+// `key: 'value'` pairs of an object body, nested objects included (`Outer.Inner.KEY`).
+function objectMembers(body, prefix) {
+  const found = [];
+  const re = /(?:^|[,{\s])(\w+|'[^']*'|"[^"]*")\s*:\s*/g;
+  for (let m = re.exec(body); m; m = re.exec(body)) {
+    const name = `${prefix}.${m[1].replace(/^['"]|['"]$/g, '')}`;
+    const at = m.index + m[0].length;
+    if (body[at] === '{') {
+      const close = closingBrace(body, at);
+      if (close < 0) break;
+      found.push(...objectMembers(body.slice(at + 1, close), name));
+      re.lastIndex = close + 1;
+    } else {
+      const s = /^(['"`])([^'"`\\\n]*)\1/.exec(body.slice(at, at + 200));
+      if (s) found.push([name, s[2]]);
+    }
+  }
+  return found;
+}
+
+// TypeScript: `export const X = { A: 'a' } as const` and `enum X { A = 'a' }`.
+function vocabTs(text) {
+  const found = [];
+  for (const m of text.matchAll(/\b(?:const|enum)\s+(\w+)\s*(?::[^=\n{]+)?(=\s*)?\{/g)) {
+    const open = m.index + m[0].length - 1;
+    const close = closingBrace(text, open);
+    if (close < 0) continue;
+    const body = text.slice(open + 1, close);
+    if (m[0].startsWith('enum')) {
+      found.push(...enumMembers(body).map(([key, value]) => [`${m[1]}.${key}`, value]));
+    } else if (/^\s*as\s+const\b/.test(text.slice(close + 1))) {
+      found.push(...objectMembers(body, m[1]));
+    }
+  }
+  return found;
+}
+
+// Python: `class X(StrEnum)` and `class X(str, Enum)` with `A = 'a'` members.
+function vocabPy(text) {
+  const found = [];
+  let owner = null;
+  let indent = 0;
+  for (const line of text.split('\n')) {
+    const head = /^(\s*)class\s+(\w+)\s*\(([^)]*)\)\s*:/.exec(line);
+    if (head) {
+      const bases = head[3];
+      owner =
+        /\bStrEnum\b/.test(bases) || (/\bstr\b/.test(bases) && /\bEnum\b/.test(bases))
+          ? head[2]
+          : null;
+      indent = head[1].length;
+      continue;
+    }
+    if (owner === null || line.trim() === '') continue;
+    if (line.length - line.trimStart().length <= indent) {
+      owner = null;
+      continue;
+    }
+    const member = /^\s+(\w+)\s*(?::[^=]+)?=\s*(['"])([^'"\\]*)\2\s*(?:#.*)?$/.exec(line);
+    if (member) found.push([`${owner}.${member[1]}`, member[3]]);
+  }
+  return found;
+}
+
+// The scanner state for literals(): the text, the position, and the current line.
+// Moves the position to `to`, counting the lines it passes.
+function advance(s, to) {
+  for (; s.i < to; s.i++) {
+    if (s.text[s.i] === '\n') {
+      s.line++;
+      s.lineStart = s.i + 1;
+    }
+  }
+}
+
+// Each skipper returns the index after what it consumed, or null when it does not start here.
+function skipComment(s, c) {
+  const { text, py, i } = s;
+  if (py ? c === '#' : c === '/' && text[i + 1] === '/') {
+    const end = text.indexOf('\n', i);
+    return end < 0 ? text.length : end;
+  }
+  if (!py && c === '/' && text[i + 1] === '*') {
+    const end = text.indexOf('*/', i + 2);
+    return end < 0 ? text.length : end + 2;
+  }
+  return null;
+}
+
+// A regex literal is skipped so a quote inside it does not start a string.
+function skipRegex(s, c) {
+  const { text, i } = s;
+  if (s.py || c !== '/' || !/[(,=:[!&|?{};]$/.test(text.slice(s.lineStart, i).trimEnd())) {
+    return null;
+  }
+  let inClass = false;
+  let j = i + 1;
+  for (; j < text.length && text[j] !== '\n'; j++) {
+    if (text[j] === '\\') j++;
+    else if (text[j] === '[') inClass = true;
+    else if (text[j] === ']') inClass = false;
+    else if (text[j] === '/' && !inClass) break;
+  }
+  return j + 1;
+}
+
+// Where a string that opens at `start` ends. A quote ends it, and so does a newline (except in a
+// template), so an unmatched apostrophe cannot swallow the rest of the file.
+function stringEnd(text, start, quote) {
+  let interpolated = false;
+  let j = start + 1;
+  for (; j < text.length; j++) {
+    const ch = text[j];
+    if (ch === '\\') j++;
+    else if (ch === quote || (ch === '\n' && quote !== '`')) break;
+    else if (quote === '`' && ch === '$' && text[j + 1] === '{') interpolated = true;
+  }
+  return { end: j, interpolated };
+}
+
+// Records a plain string literal (not f-string, bytes, docstring or interpolated template).
+function readString(s, c) {
+  const { text, py, i } = s;
+  if (c !== '"' && c !== "'" && (py || c !== '`')) return null;
+  if (py && text.startsWith(c.repeat(3), i)) {
+    const end = text.indexOf(c.repeat(3), i + 3);
+    return end < 0 ? text.length : end + 3;
+  }
+  const before = text.slice(s.lineStart, i);
+  const prefix = py ? (/[A-Za-z]{1,2}$/.exec(before)?.[0].toLowerCase() ?? '') : '';
+  const { end, interpolated } = stringEnd(text, i, c);
+  const value = text.slice(i + 1, end);
+  if (!interpolated && text[end] === c && !value.includes('\\') && !/[fb]/.test(prefix)) {
+    s.out.push({ value, line: s.line, before });
+  }
+  return text[end] === c ? end + 1 : end;
+}
+
+// Plain string literals with their line and the text before them on that line. Skips comments,
+// docstrings, f-strings, bytes and templates with interpolation.
+function literals(text, py) {
+  const s = { text, py, i: 0, line: 1, lineStart: 0, out: [] };
+  while (s.i < text.length) {
+    const c = text[s.i];
+    const next = skipComment(s, c) ?? skipRegex(s, c) ?? readString(s, c);
+    advance(s, next ?? s.i + 1);
+  }
+  return s.out;
+}
+
+const IMPORT_BEFORE = /(?:\bfrom|\bimport|\brequire\(|\bimport\()\s*$/;
+
+const vocabLiteral = {
+  // Replaces the v3 `no-vocab-literal` ast-grep rule, whose regex was filled in by hand.
+  id: 'vocab-literal',
+  optIn: [VOCAB_CONFIG],
+  exts: VOCAB_EXT,
+  stages: ['edit', 'commit', 'push'],
+  scan: ({ files, h }) => {
+    let config;
+    try {
+      config = JSON.parse(h.read(VOCAB_CONFIG));
+    } catch (e) {
+      throw new Error(`${VOCAB_CONFIG} is not valid JSON: ${e.message}`, { cause: e });
+    }
+    const modules = config.modules;
+    if (
+      !Array.isArray(modules) ||
+      modules.length === 0 ||
+      !modules.every((m) => typeof m === 'string')
+    ) {
+      throw new Error(`${VOCAB_CONFIG} needs "modules": ["path/to/vocab.ts", ...]`);
+    }
+    const ignore = (config.ignore ?? []).map(globRegExp);
+    const tables = { ts: new Map(), py: new Map() };
+    for (const mod of modules) {
+      if (!h.exists(mod)) throw new Error(`${VOCAB_CONFIG}: vocab module ${mod} does not exist`);
+      const py = PY_EXT.test(mod);
+      const parsed = (py ? vocabPy : vocabTs)(h.read(mod));
+      if (parsed.length === 0) {
+        throw new Error(
+          `${VOCAB_CONFIG}: no string members found in ${mod} (expected an "as const" object, an enum or a StrEnum)`,
+        );
+      }
+      for (const [name, value] of parsed) {
+        if (value !== '' && !tables[py ? 'py' : 'ts'].has(value))
+          tables[py ? 'py' : 'ts'].set(value, name);
+      }
+    }
+    const skip = new Set(modules.map((m) => h.rel(m)));
+    const found = [];
+    for (const file of files ?? h.projectFiles(VOCAB_EXT)) {
+      if (skip.has(file) || TEST_FILE.test(file) || ignore.some((re) => re.test(file))) continue;
+      const py = PY_EXT.test(file);
+      const table = tables[py ? 'py' : 'ts'];
+      if (table.size === 0) continue;
+      for (const { value, line, before } of literals(h.read(file), py)) {
+        const name = table.get(value);
+        if (name === undefined || (!py && IMPORT_BEFORE.test(before))) continue;
+        found.push({
+          rule: name,
+          file,
+          line,
+          message: `use ${name}, not the raw string ${JSON.stringify(value)}. New values go in the vocab module.`,
+        });
+      }
+    }
+    return found;
+  },
+};
+
 // ── core: every repo ──
 
 // ls-lint reports { path: { ".ext": ["rule" | "exists:0 (found N)"] } }.
@@ -1477,6 +1737,7 @@ const core = {
             };
           }),
     },
+    vocabLiteral,
     {
       // Folder and extension naming. Tree rules, so it always runs whole. A banned extension
       // (`exists:0`) is reported on its directory with a count ("found 2"); it is expanded to one
@@ -1654,7 +1915,6 @@ const core = {
 
 // ── python: every tool runs through `uv run` ──
 
-const PY_EXT = /\.py$/;
 const uvRun = (...args) => ({ cmd: 'uv', args: ['run', ...args] });
 const inPyproject = (section) => ({
   file: 'pyproject.toml',
@@ -2495,7 +2755,143 @@ const cpp = {
   ],
 };
 
-export const PACKS = [core, ts, python, mule, salesforce, shell, docker, sql, rust, dart, cpp];
+// ── security: dependency advisories, own Semgrep rules, GitHub Actions audit ──
+
+// Lockfiles osv-scanner reads. It is given each one explicitly, so a lockfile it cannot parse fails.
+const LOCKFILE =
+  /(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|uv\.lock|poetry\.lock|Cargo\.lock|go\.mod|composer\.lock|Gemfile\.lock)$/;
+const WORKFLOW = /^\.github\/workflows\/.*\.ya?ml$/;
+const OSV_CONFIG = 'osv-scanner.toml';
+const SEMGREP_RULES = '.semgrep';
+const ZIZMOR_CONFIGS = ['.github/zizmor.yml', '.github/zizmor.yaml', 'zizmor.yml', 'zizmor.yaml'];
+
+// zizmor exits 10 to 14 by the highest severity it found, 0 when clean, 1 on a failure.
+const ZIZMOR_OK = [0, 10, 11, 12, 13, 14];
+
+const security = {
+  id: 'security',
+  detect: [LOCKFILE, WORKFLOW, /(^|\/)\.semgrep\//],
+  tools: [
+    {
+      // Known vulnerabilities in the lockfiles. Needs network access to the OSV database.
+      id: 'osv-scanner',
+      optIn: [OSV_CONFIG],
+      exts: LOCKFILE,
+      stages: ['push'],
+      run: ({ files, h }) => {
+        const locks = files ?? h.projectFiles(LOCKFILE);
+        return locks.length === 0
+          ? null
+          : {
+              cmd: 'osv-scanner',
+              args: [
+                'scan',
+                'source',
+                '--format',
+                'json',
+                '--config',
+                OSV_CONFIG,
+                ...locks.flatMap((f) => ['-L', f]),
+              ],
+            };
+      },
+      parse: (out) =>
+        (json('osv-scanner', out.stdout).results ?? []).flatMap((r) =>
+          (r.packages ?? []).flatMap((p) =>
+            (p.vulnerabilities ?? []).map((v) => ({
+              rule: v.id,
+              file: r.source.path,
+              message: `${p.package.name}@${p.package.version}: ${v.summary ?? v.details?.split('\n')[0] ?? v.id}`,
+            })),
+          ),
+        ),
+    },
+    {
+      // Only the rules in .semgrep/ run: nothing is fetched from the registry and no metrics are
+      // sent. A full-repo scan, so it is pre-push and CI only.
+      id: 'semgrep',
+      optIn: [`${SEMGREP_RULES}/rules.yml`, `${SEMGREP_RULES}/rules.yaml`],
+      exts: /\.(?:[cm]?[jt]sx?|py)$/,
+      stages: ['push'],
+      run: ({ files }) => ({
+        cmd: 'semgrep',
+        args: [
+          'scan',
+          '--metrics=off',
+          '--disable-version-check',
+          '--quiet',
+          '--json',
+          '--error',
+          '--config',
+          SEMGREP_RULES,
+          ...(files ?? ['.']),
+        ],
+      }),
+      // Exit 1 is "findings" (--error); 2 and up are failures. Rule ids carry the config folder
+      // as a prefix ("semgrep.js-eval"), so the rule is the part after the last dot.
+      parse: (out) =>
+        (json('semgrep', out.stdout).results ?? []).map((r) => ({
+          rule: r.check_id.split('.').at(-1),
+          file: r.path,
+          line: r.start?.line,
+          message: r.extra?.message ?? r.check_id,
+        })),
+    },
+    {
+      // Workflow audit (injection, excessive permissions, unpinned actions). Offline: no GitHub token needed.
+      id: 'zizmor',
+      optIn: ZIZMOR_CONFIGS,
+      exts: WORKFLOW,
+      stages: ['commit', 'push'],
+      ok: ZIZMOR_OK,
+      run: ({ files, h }) => {
+        const flows = files ?? h.projectFiles(WORKFLOW);
+        const config = ZIZMOR_CONFIGS.find((f) => h.exists(f));
+        return flows.length === 0
+          ? null
+          : {
+              cmd: 'zizmor',
+              args: [
+                '--offline',
+                '--format',
+                'json-v1',
+                '--no-progress',
+                '--config',
+                config,
+                ...flows,
+              ],
+            };
+      },
+      parse: (out) =>
+        json('zizmor', out.stdout)
+          .filter((f) => !f.ignored)
+          .map((f) => {
+            const at = f.locations.find((l) => l.symbolic.kind === 'Primary') ?? f.locations[0];
+            return {
+              rule: f.ident,
+              file: at.symbolic.key.Local.verbatim_path,
+              line: at.concrete.location.start_point.row + 1,
+              message: `${f.desc}: ${at.symbolic.annotation}`,
+            };
+          }),
+    },
+  ],
+};
+
+export const PACKS = [
+  core,
+  ts,
+  python,
+  mule,
+  salesforce,
+  shell,
+  docker,
+  sql,
+  rust,
+  dart,
+  cpp,
+  security,
+];
 ```
 <!-- /tmpl -->
 
@@ -3204,24 +3600,53 @@ rule:
 ```
 <!-- /tmpl -->
 
-<!-- tmpl:templates/packs/core/ast-grep/rules/no-vocab-literal.yml -->
+<!-- tmpl:templates/packs/core/ast-grep/optional/no-color-literal.yml -->
 ```yaml
-# Bans a raw string equal to a member of the vocab module, outside that module.
-# The setup skill fills the alternation from the values in the project's vocab module
-# (an `as const` object or an enum). Keep it in sync: a new vocab value means a new entry here.
-id: no-vocab-literal
+# Token drift: bans hex, rgb()/rgba(), hsl()/hsla() and oklch() colour literals in TypeScript
+# outside the design tokens file. Opt-in: copy this file into rules/ (ast-grep reads every file
+# there). no-color-literal-tsx.yml is the same rule for .tsx files: ast-grep takes one language per rule.
+# Put the tokens file, and anything else allowed to hold raw colours, under `ignores`.
+id: no-color-literal
 language: TypeScript
 severity: error
-message: Use the vocab member (for example Status.Active), not the raw string. New values go in the vocab module.
+message: Use a design token, not a raw colour. New colours go in the tokens file.
 rule:
-  kind: string
-  regex: "^['\"](active|closed|pending)['\"]$"
-  not:
-    inside:
-      kind: import_statement
+  kind: string_fragment
+  any:
+    - regex: "(^|[\\s,(:])#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})($|[\\s,);])"
+    - regex: "(^|[^A-Za-z0-9_-])(rgba?|hsla?|oklch)\\("
+  inside:
+    any:
+      - kind: string
+      - kind: template_string
+    stopBy: end
 ignores:
-  - "**/vocab/**"
+  - "**/tokens/**"
+  - "**/tokens.ts"
   - "**/*.test.ts"
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/core/ast-grep/optional/no-color-literal-tsx.yml -->
+```yaml
+# Token drift, .tsx variant of no-color-literal.yml: copy both files into rules/ to switch it on.
+id: no-color-literal-tsx
+language: Tsx
+severity: error
+message: Use a design token, not a raw colour. New colours go in the tokens file.
+rule:
+  kind: string_fragment
+  any:
+    - regex: "(^|[\\s,(:])#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})($|[\\s,);])"
+    - regex: "(^|[^A-Za-z0-9_-])(rgba?|hsla?|oklch)\\("
+  inside:
+    any:
+      - kind: string
+      - kind: template_string
+    stopBy: end
+ignores:
+  - "**/tokens/**"
+  - "**/tokens.ts"
   - "**/*.test.tsx"
 ```
 <!-- /tmpl -->
@@ -3371,6 +3796,17 @@ exclude = ['^https?://localhost', '^https?://127\.0\.0\.1', '^https?://example\.
   "minTokens": 70,
   "gitignore": true,
   "ignore": ["**/*.test.ts", "**/*.test.tsx", "**/*.d.ts", "**/dist/**", "**/node_modules/**"]
+}
+```
+<!-- /tmpl -->
+
+Install `vocab.json` at `guardrails/vocab.json`:
+
+<!-- tmpl:templates/packs/core/vocab/vocab.json -->
+```json
+{
+  "modules": ["src/vocab.ts"],
+  "ignore": ["**/generated/**"]
 }
 ```
 <!-- /tmpl -->
@@ -4111,6 +4547,164 @@ check_tool = cppcheck
 check_severity = medium, high
 check_flags =
   cppcheck: --std=c++17
+```
+<!-- /tmpl -->
+
+#### Security
+
+Install `zizmor.yml` at `.github/zizmor.yml`, `rules.yml` at `.semgrep/rules.yml`. Each file switches on its own tool.
+
+<!-- tmpl:templates/packs/security/osv-scanner.toml -->
+```toml
+# osv-scanner.toml: switches on the osv-scanner check of lockfiles (pre-push and CI).
+# It needs network access to the OSV database. Accept a finding only with a reason and an end date:
+#
+# [[IgnoredVulns]]
+# id = "GHSA-xxxx-xxxx-xxxx"
+# ignoreUntil = 2027-03-01
+# reason = "Not reachable: we never pass user input to the affected function."
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/security/zizmor.yml -->
+```yaml
+# Install at .github/zizmor.yml. It switches on zizmor for .github/workflows.
+# zizmor runs offline here, so audits that need the GitHub API are skipped. Accept a finding by
+# naming the workflow, with a reason in a comment:
+#
+# rules:
+#   excessive-permissions:
+#     ignore:
+#       - release.yml  # needs contents: write to publish, reviewed 2026-11
+rules: {}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/security/.semgrep/rules.yml -->
+```yaml
+# Semgrep rules written for this pack and licensed like this repo (MIT). Nothing here is copied
+# from the Semgrep registry: its rules are under the Semgrep Rules License, which is not an open
+# source licence, so never vendor them. Add your own rules as more files in this folder.
+# Rule ids contain no dots: the gate keys findings by the part after the last dot.
+rules:
+  - id: js-eval
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: eval() runs strings as code. Parse data with JSON.parse or call a real function.
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: new Function(...)
+
+  - id: js-child-process-shell
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: exec() and execSync() run a shell. Use execFile() or spawn() with an argument array.
+    patterns:
+      - pattern-either:
+          - pattern: $CP.exec(...)
+          - pattern: $CP.execSync(...)
+          - pattern: exec(...)
+          - pattern: execSync(...)
+      - pattern-not: $CP.exec("...", ...)
+      - pattern-not: $CP.execSync("...", ...)
+      - pattern-not: exec("...", ...)
+      - pattern-not: execSync("...", ...)
+      - metavariable-regex:
+          metavariable: $CP
+          regex: ^(child_process|cp|childProcess)$
+
+  - id: js-html-injection
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: Writing HTML from a string is an XSS sink. Use textContent or a sanitised template.
+    pattern-either:
+      - pattern: $EL.innerHTML = $X
+      - pattern: $EL.outerHTML = $X
+      - pattern: document.write(...)
+      - pattern: <$TAG dangerouslySetInnerHTML={...} />
+
+  - id: js-tls-verification-off
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: Do not turn TLS certificate verification off.
+    pattern-either:
+      - pattern: "{..., rejectUnauthorized: false, ...}"
+      - pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"
+
+  - id: js-weak-hash
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: MD5 and SHA-1 are broken for security use. Use SHA-256 or better, and argon2 or scrypt for passwords.
+    pattern-either:
+      - pattern: $C.createHash("md5")
+      - pattern: $C.createHash("sha1")
+
+  - id: py-eval-exec
+    languages: [python]
+    severity: ERROR
+    message: eval() and exec() run strings as code. Use ast.literal_eval for data.
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+
+  - id: py-shell-true
+    languages: [python]
+    severity: ERROR
+    message: shell=True runs a shell, so input can inject commands. Pass an argument list.
+    pattern-either:
+      - pattern: subprocess.$FN(..., shell=True, ...)
+      - pattern: os.system(...)
+
+  - id: py-unsafe-deserialize
+    languages: [python]
+    severity: ERROR
+    message: pickle and unsafe YAML loading can execute code from the input. Use json or yaml.safe_load.
+    pattern-either:
+      - pattern: pickle.load(...)
+      - pattern: pickle.loads(...)
+      - pattern: yaml.load(...)
+      - pattern: yaml.unsafe_load(...)
+
+  - id: py-weak-hash
+    languages: [python]
+    severity: ERROR
+    message: MD5 and SHA-1 are broken for security use. Use SHA-256 or better.
+    pattern-either:
+      - pattern: hashlib.md5(...)
+      - pattern: hashlib.sha1(...)
+
+  - id: py-tls-verification-off
+    languages: [python]
+    severity: ERROR
+    message: Do not turn TLS certificate verification off.
+    pattern: $FN(..., verify=False, ...)
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/security/lefthook.yml -->
+```yaml
+# lefthook additions for the security pack. Merge under pre-commit.jobs in lefthook.yml.
+# osv-scanner and semgrep are pre-push and CI only (they scan the whole repo).
+pre-commit:
+  jobs:
+    - name: security
+      glob: '.github/workflows/*.{yml,yaml}'
+      run: node scripts/guardrails.mjs check --files {staged_files}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/security/ci.yml -->
+```yaml
+# Step to add to the verify job in .github/workflows/ci.yml for the security pack.
+# osv-scanner, semgrep and zizmor are pre-push tools, so the base job runs them: no extra job.
+# GitHub-hosted Ubuntu runners include Go and pipx. Pin the versions you have tested.
+# osv-scanner needs network access to the OSV database.
+      - name: Install security tools
+        run: |
+          go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.7.1
+          pipx install semgrep==1.187.0
+          pipx install zizmor==1.33.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 ```
 <!-- /tmpl -->
 

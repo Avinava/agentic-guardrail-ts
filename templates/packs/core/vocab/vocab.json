@@ -1,0 +1,4 @@
+{
+  "modules": ["src/vocab.ts"],
+  "ignore": ["**/generated/**"]
+}

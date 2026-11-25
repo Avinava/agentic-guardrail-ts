@@ -1,0 +1,10 @@
+# Step to add to the verify job in .github/workflows/ci.yml for the security pack.
+# osv-scanner, semgrep and zizmor are pre-push tools, so the base job runs them: no extra job.
+# GitHub-hosted Ubuntu runners include Go and pipx. Pin the versions you have tested.
+# osv-scanner needs network access to the OSV database.
+      - name: Install security tools
+        run: |
+          go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.7.1
+          pipx install semgrep==1.187.0
+          pipx install zizmor==1.33.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"

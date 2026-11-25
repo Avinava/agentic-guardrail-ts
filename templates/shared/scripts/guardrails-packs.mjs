@@ -20,6 +20,7 @@
 
 const TS_EXT = /\.[cm]?[jt]sx?$/;
 const MD_EXT = /\.mdx?$/;
+const PY_EXT = /\.py$/;
 
 // Exit codes for tools whose JSON report is the authority (v3 ignored their exit status): any exit
 // is fine as long as the report parses, and an unparsable report throws.
@@ -191,6 +192,258 @@ const ts = {
   ],
 };
 
+// ── vocab-literal: raw strings that equal a member of the project's vocab module ──
+
+const VOCAB_CONFIG = 'guardrails/vocab.json';
+const VOCAB_EXT = /\.(?:[cm]?[jt]sx?|py)$/;
+const TEST_FILE =
+  /(?:^|\/)(?:__tests__|tests?|e2e)\/|\.(?:test|spec)\.[^/]+$|(?:^|\/)test_[^/]*\.py$|_test\.py$|(?:^|\/)conftest\.py$/;
+
+// A glob from vocab.json `ignore`: `**` crosses folders, `*` and `?` stay inside one.
+const globRegExp = (glob) =>
+  new RegExp(
+    `^${glob
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replaceAll('**/', '\u0000')
+      .replaceAll('**', '\u0001')
+      .replaceAll('*', '[^/]*')
+      .replaceAll('?', '[^/]')
+      .replaceAll('\u0000', '(?:.*/)?')
+      .replaceAll('\u0001', '.*')}$`,
+  );
+
+// Index of the `}` that closes the `{` at `open`, skipping quoted strings.
+const closingBrace = (text, open) => {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"' || c === "'" || c === '`') {
+      i = text.indexOf(c, i + 1);
+      if (i < 0) return -1;
+    } else if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) return i;
+  }
+  return -1;
+};
+
+// `Name = 'value'` pairs inside an enum body.
+const enumMembers = (body) =>
+  [...body.matchAll(/(?:^|[,{\s])(\w+|'[^']*'|"[^"]*")\s*=\s*(['"`])([^'"`\\\n]*)\2/g)].map((m) => [
+    m[1].replace(/^['"]|['"]$/g, ''),
+    m[3],
+  ]);
+
+// `key: 'value'` pairs of an object body, nested objects included (`Outer.Inner.KEY`).
+function objectMembers(body, prefix) {
+  const found = [];
+  const re = /(?:^|[,{\s])(\w+|'[^']*'|"[^"]*")\s*:\s*/g;
+  for (let m = re.exec(body); m; m = re.exec(body)) {
+    const name = `${prefix}.${m[1].replace(/^['"]|['"]$/g, '')}`;
+    const at = m.index + m[0].length;
+    if (body[at] === '{') {
+      const close = closingBrace(body, at);
+      if (close < 0) break;
+      found.push(...objectMembers(body.slice(at + 1, close), name));
+      re.lastIndex = close + 1;
+    } else {
+      const s = /^(['"`])([^'"`\\\n]*)\1/.exec(body.slice(at, at + 200));
+      if (s) found.push([name, s[2]]);
+    }
+  }
+  return found;
+}
+
+// TypeScript: `export const X = { A: 'a' } as const` and `enum X { A = 'a' }`.
+function vocabTs(text) {
+  const found = [];
+  for (const m of text.matchAll(/\b(?:const|enum)\s+(\w+)\s*(?::[^=\n{]+)?(=\s*)?\{/g)) {
+    const open = m.index + m[0].length - 1;
+    const close = closingBrace(text, open);
+    if (close < 0) continue;
+    const body = text.slice(open + 1, close);
+    if (m[0].startsWith('enum')) {
+      found.push(...enumMembers(body).map(([key, value]) => [`${m[1]}.${key}`, value]));
+    } else if (/^\s*as\s+const\b/.test(text.slice(close + 1))) {
+      found.push(...objectMembers(body, m[1]));
+    }
+  }
+  return found;
+}
+
+// Python: `class X(StrEnum)` and `class X(str, Enum)` with `A = 'a'` members.
+function vocabPy(text) {
+  const found = [];
+  let owner = null;
+  let indent = 0;
+  for (const line of text.split('\n')) {
+    const head = /^(\s*)class\s+(\w+)\s*\(([^)]*)\)\s*:/.exec(line);
+    if (head) {
+      const bases = head[3];
+      owner =
+        /\bStrEnum\b/.test(bases) || (/\bstr\b/.test(bases) && /\bEnum\b/.test(bases))
+          ? head[2]
+          : null;
+      indent = head[1].length;
+      continue;
+    }
+    if (owner === null || line.trim() === '') continue;
+    if (line.length - line.trimStart().length <= indent) {
+      owner = null;
+      continue;
+    }
+    const member = /^\s+(\w+)\s*(?::[^=]+)?=\s*(['"])([^'"\\]*)\2\s*(?:#.*)?$/.exec(line);
+    if (member) found.push([`${owner}.${member[1]}`, member[3]]);
+  }
+  return found;
+}
+
+// The scanner state for literals(): the text, the position, and the current line.
+// Moves the position to `to`, counting the lines it passes.
+function advance(s, to) {
+  for (; s.i < to; s.i++) {
+    if (s.text[s.i] === '\n') {
+      s.line++;
+      s.lineStart = s.i + 1;
+    }
+  }
+}
+
+// Each skipper returns the index after what it consumed, or null when it does not start here.
+function skipComment(s, c) {
+  const { text, py, i } = s;
+  if (py ? c === '#' : c === '/' && text[i + 1] === '/') {
+    const end = text.indexOf('\n', i);
+    return end < 0 ? text.length : end;
+  }
+  if (!py && c === '/' && text[i + 1] === '*') {
+    const end = text.indexOf('*/', i + 2);
+    return end < 0 ? text.length : end + 2;
+  }
+  return null;
+}
+
+// A regex literal is skipped so a quote inside it does not start a string.
+function skipRegex(s, c) {
+  const { text, i } = s;
+  if (s.py || c !== '/' || !/[(,=:[!&|?{};]$/.test(text.slice(s.lineStart, i).trimEnd())) {
+    return null;
+  }
+  let inClass = false;
+  let j = i + 1;
+  for (; j < text.length && text[j] !== '\n'; j++) {
+    if (text[j] === '\\') j++;
+    else if (text[j] === '[') inClass = true;
+    else if (text[j] === ']') inClass = false;
+    else if (text[j] === '/' && !inClass) break;
+  }
+  return j + 1;
+}
+
+// Where a string that opens at `start` ends. A quote ends it, and so does a newline (except in a
+// template), so an unmatched apostrophe cannot swallow the rest of the file.
+function stringEnd(text, start, quote) {
+  let interpolated = false;
+  let j = start + 1;
+  for (; j < text.length; j++) {
+    const ch = text[j];
+    if (ch === '\\') j++;
+    else if (ch === quote || (ch === '\n' && quote !== '`')) break;
+    else if (quote === '`' && ch === '$' && text[j + 1] === '{') interpolated = true;
+  }
+  return { end: j, interpolated };
+}
+
+// Records a plain string literal (not f-string, bytes, docstring or interpolated template).
+function readString(s, c) {
+  const { text, py, i } = s;
+  if (c !== '"' && c !== "'" && (py || c !== '`')) return null;
+  if (py && text.startsWith(c.repeat(3), i)) {
+    const end = text.indexOf(c.repeat(3), i + 3);
+    return end < 0 ? text.length : end + 3;
+  }
+  const before = text.slice(s.lineStart, i);
+  const prefix = py ? (/[A-Za-z]{1,2}$/.exec(before)?.[0].toLowerCase() ?? '') : '';
+  const { end, interpolated } = stringEnd(text, i, c);
+  const value = text.slice(i + 1, end);
+  if (!interpolated && text[end] === c && !value.includes('\\') && !/[fb]/.test(prefix)) {
+    s.out.push({ value, line: s.line, before });
+  }
+  return text[end] === c ? end + 1 : end;
+}
+
+// Plain string literals with their line and the text before them on that line. Skips comments,
+// docstrings, f-strings, bytes and templates with interpolation.
+function literals(text, py) {
+  const s = { text, py, i: 0, line: 1, lineStart: 0, out: [] };
+  while (s.i < text.length) {
+    const c = text[s.i];
+    const next = skipComment(s, c) ?? skipRegex(s, c) ?? readString(s, c);
+    advance(s, next ?? s.i + 1);
+  }
+  return s.out;
+}
+
+const IMPORT_BEFORE = /(?:\bfrom|\bimport|\brequire\(|\bimport\()\s*$/;
+
+const vocabLiteral = {
+  // Replaces the v3 `no-vocab-literal` ast-grep rule, whose regex was filled in by hand.
+  id: 'vocab-literal',
+  optIn: [VOCAB_CONFIG],
+  exts: VOCAB_EXT,
+  stages: ['edit', 'commit', 'push'],
+  scan: ({ files, h }) => {
+    let config;
+    try {
+      config = JSON.parse(h.read(VOCAB_CONFIG));
+    } catch (e) {
+      throw new Error(`${VOCAB_CONFIG} is not valid JSON: ${e.message}`, { cause: e });
+    }
+    const modules = config.modules;
+    if (
+      !Array.isArray(modules) ||
+      modules.length === 0 ||
+      !modules.every((m) => typeof m === 'string')
+    ) {
+      throw new Error(`${VOCAB_CONFIG} needs "modules": ["path/to/vocab.ts", ...]`);
+    }
+    const ignore = (config.ignore ?? []).map(globRegExp);
+    const tables = { ts: new Map(), py: new Map() };
+    for (const mod of modules) {
+      if (!h.exists(mod)) throw new Error(`${VOCAB_CONFIG}: vocab module ${mod} does not exist`);
+      const py = PY_EXT.test(mod);
+      const parsed = (py ? vocabPy : vocabTs)(h.read(mod));
+      if (parsed.length === 0) {
+        throw new Error(
+          `${VOCAB_CONFIG}: no string members found in ${mod} (expected an "as const" object, an enum or a StrEnum)`,
+        );
+      }
+      for (const [name, value] of parsed) {
+        if (value !== '' && !tables[py ? 'py' : 'ts'].has(value))
+          tables[py ? 'py' : 'ts'].set(value, name);
+      }
+    }
+    const skip = new Set(modules.map((m) => h.rel(m)));
+    const found = [];
+    for (const file of files ?? h.projectFiles(VOCAB_EXT)) {
+      if (skip.has(file) || TEST_FILE.test(file) || ignore.some((re) => re.test(file))) continue;
+      const py = PY_EXT.test(file);
+      const table = tables[py ? 'py' : 'ts'];
+      if (table.size === 0) continue;
+      for (const { value, line, before } of literals(h.read(file), py)) {
+        const name = table.get(value);
+        if (name === undefined || (!py && IMPORT_BEFORE.test(before))) continue;
+        found.push({
+          rule: name,
+          file,
+          line,
+          message: `use ${name}, not the raw string ${JSON.stringify(value)}. New values go in the vocab module.`,
+        });
+      }
+    }
+    return found;
+  },
+};
+
 // ── core: every repo ──
 
 // ls-lint reports { path: { ".ext": ["rule" | "exists:0 (found N)"] } }.
@@ -238,6 +491,7 @@ const core = {
             };
           }),
     },
+    vocabLiteral,
     {
       // Folder and extension naming. Tree rules, so it always runs whole. A banned extension
       // (`exists:0`) is reported on its directory with a count ("found 2"); it is expanded to one
@@ -415,7 +669,6 @@ const core = {
 
 // ── python: every tool runs through `uv run` ──
 
-const PY_EXT = /\.py$/;
 const uvRun = (...args) => ({ cmd: 'uv', args: ['run', ...args] });
 const inPyproject = (section) => ({
   file: 'pyproject.toml',
@@ -1256,4 +1509,140 @@ const cpp = {
   ],
 };
 
-export const PACKS = [core, ts, python, mule, salesforce, shell, docker, sql, rust, dart, cpp];
+// ── security: dependency advisories, own Semgrep rules, GitHub Actions audit ──
+
+// Lockfiles osv-scanner reads. It is given each one explicitly, so a lockfile it cannot parse fails.
+const LOCKFILE =
+  /(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|uv\.lock|poetry\.lock|Cargo\.lock|go\.mod|composer\.lock|Gemfile\.lock)$/;
+const WORKFLOW = /^\.github\/workflows\/.*\.ya?ml$/;
+const OSV_CONFIG = 'osv-scanner.toml';
+const SEMGREP_RULES = '.semgrep';
+const ZIZMOR_CONFIGS = ['.github/zizmor.yml', '.github/zizmor.yaml', 'zizmor.yml', 'zizmor.yaml'];
+
+// zizmor exits 10 to 14 by the highest severity it found, 0 when clean, 1 on a failure.
+const ZIZMOR_OK = [0, 10, 11, 12, 13, 14];
+
+const security = {
+  id: 'security',
+  detect: [LOCKFILE, WORKFLOW, /(^|\/)\.semgrep\//],
+  tools: [
+    {
+      // Known vulnerabilities in the lockfiles. Needs network access to the OSV database.
+      id: 'osv-scanner',
+      optIn: [OSV_CONFIG],
+      exts: LOCKFILE,
+      stages: ['push'],
+      run: ({ files, h }) => {
+        const locks = files ?? h.projectFiles(LOCKFILE);
+        return locks.length === 0
+          ? null
+          : {
+              cmd: 'osv-scanner',
+              args: [
+                'scan',
+                'source',
+                '--format',
+                'json',
+                '--config',
+                OSV_CONFIG,
+                ...locks.flatMap((f) => ['-L', f]),
+              ],
+            };
+      },
+      parse: (out) =>
+        (json('osv-scanner', out.stdout).results ?? []).flatMap((r) =>
+          (r.packages ?? []).flatMap((p) =>
+            (p.vulnerabilities ?? []).map((v) => ({
+              rule: v.id,
+              file: r.source.path,
+              message: `${p.package.name}@${p.package.version}: ${v.summary ?? v.details?.split('\n')[0] ?? v.id}`,
+            })),
+          ),
+        ),
+    },
+    {
+      // Only the rules in .semgrep/ run: nothing is fetched from the registry and no metrics are
+      // sent. A full-repo scan, so it is pre-push and CI only.
+      id: 'semgrep',
+      optIn: [`${SEMGREP_RULES}/rules.yml`, `${SEMGREP_RULES}/rules.yaml`],
+      exts: /\.(?:[cm]?[jt]sx?|py)$/,
+      stages: ['push'],
+      run: ({ files }) => ({
+        cmd: 'semgrep',
+        args: [
+          'scan',
+          '--metrics=off',
+          '--disable-version-check',
+          '--quiet',
+          '--json',
+          '--error',
+          '--config',
+          SEMGREP_RULES,
+          ...(files ?? ['.']),
+        ],
+      }),
+      // Exit 1 is "findings" (--error); 2 and up are failures. Rule ids carry the config folder
+      // as a prefix ("semgrep.js-eval"), so the rule is the part after the last dot.
+      parse: (out) =>
+        (json('semgrep', out.stdout).results ?? []).map((r) => ({
+          rule: r.check_id.split('.').at(-1),
+          file: r.path,
+          line: r.start?.line,
+          message: r.extra?.message ?? r.check_id,
+        })),
+    },
+    {
+      // Workflow audit (injection, excessive permissions, unpinned actions). Offline: no GitHub token needed.
+      id: 'zizmor',
+      optIn: ZIZMOR_CONFIGS,
+      exts: WORKFLOW,
+      stages: ['commit', 'push'],
+      ok: ZIZMOR_OK,
+      run: ({ files, h }) => {
+        const flows = files ?? h.projectFiles(WORKFLOW);
+        const config = ZIZMOR_CONFIGS.find((f) => h.exists(f));
+        return flows.length === 0
+          ? null
+          : {
+              cmd: 'zizmor',
+              args: [
+                '--offline',
+                '--format',
+                'json-v1',
+                '--no-progress',
+                '--config',
+                config,
+                ...flows,
+              ],
+            };
+      },
+      parse: (out) =>
+        json('zizmor', out.stdout)
+          .filter((f) => !f.ignored)
+          .map((f) => {
+            const at = f.locations.find((l) => l.symbolic.kind === 'Primary') ?? f.locations[0];
+            return {
+              rule: f.ident,
+              file: at.symbolic.key.Local.verbatim_path,
+              line: at.concrete.location.start_point.row + 1,
+              message: `${f.desc}: ${at.symbolic.annotation}`,
+            };
+          }),
+    },
+  ],
+};
+
+export const PACKS = [
+  core,
+  ts,
+  python,
+  mule,
+  salesforce,
+  shell,
+  docker,
+  sql,
+  rust,
+  dart,
+  cpp,
+  security,
+];

@@ -1,0 +1,96 @@
+# Semgrep rules written for this pack and licensed like this repo (MIT). Nothing here is copied
+# from the Semgrep registry: its rules are under the Semgrep Rules License, which is not an open
+# source licence, so never vendor them. Add your own rules as more files in this folder.
+# Rule ids contain no dots: the gate keys findings by the part after the last dot.
+rules:
+  - id: js-eval
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: eval() runs strings as code. Parse data with JSON.parse or call a real function.
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: new Function(...)
+
+  - id: js-child-process-shell
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: exec() and execSync() run a shell. Use execFile() or spawn() with an argument array.
+    patterns:
+      - pattern-either:
+          - pattern: $CP.exec(...)
+          - pattern: $CP.execSync(...)
+          - pattern: exec(...)
+          - pattern: execSync(...)
+      - pattern-not: $CP.exec("...", ...)
+      - pattern-not: $CP.execSync("...", ...)
+      - pattern-not: exec("...", ...)
+      - pattern-not: execSync("...", ...)
+      - metavariable-regex:
+          metavariable: $CP
+          regex: ^(child_process|cp|childProcess)$
+
+  - id: js-html-injection
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: Writing HTML from a string is an XSS sink. Use textContent or a sanitised template.
+    pattern-either:
+      - pattern: $EL.innerHTML = $X
+      - pattern: $EL.outerHTML = $X
+      - pattern: document.write(...)
+      - pattern: <$TAG dangerouslySetInnerHTML={...} />
+
+  - id: js-tls-verification-off
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: Do not turn TLS certificate verification off.
+    pattern-either:
+      - pattern: "{..., rejectUnauthorized: false, ...}"
+      - pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"
+
+  - id: js-weak-hash
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: MD5 and SHA-1 are broken for security use. Use SHA-256 or better, and argon2 or scrypt for passwords.
+    pattern-either:
+      - pattern: $C.createHash("md5")
+      - pattern: $C.createHash("sha1")
+
+  - id: py-eval-exec
+    languages: [python]
+    severity: ERROR
+    message: eval() and exec() run strings as code. Use ast.literal_eval for data.
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+
+  - id: py-shell-true
+    languages: [python]
+    severity: ERROR
+    message: shell=True runs a shell, so input can inject commands. Pass an argument list.
+    pattern-either:
+      - pattern: subprocess.$FN(..., shell=True, ...)
+      - pattern: os.system(...)
+
+  - id: py-unsafe-deserialize
+    languages: [python]
+    severity: ERROR
+    message: pickle and unsafe YAML loading can execute code from the input. Use json or yaml.safe_load.
+    pattern-either:
+      - pattern: pickle.load(...)
+      - pattern: pickle.loads(...)
+      - pattern: yaml.load(...)
+      - pattern: yaml.unsafe_load(...)
+
+  - id: py-weak-hash
+    languages: [python]
+    severity: ERROR
+    message: MD5 and SHA-1 are broken for security use. Use SHA-256 or better.
+    pattern-either:
+      - pattern: hashlib.md5(...)
+      - pattern: hashlib.sha1(...)
+
+  - id: py-tls-verification-off
+    languages: [python]
+    severity: ERROR
+    message: Do not turn TLS certificate verification off.
+    pattern: $FN(..., verify=False, ...)

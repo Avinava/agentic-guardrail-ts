@@ -389,3 +389,19 @@ Tool interactions that surprise people, and what to do about them.
 **Why:** every job that runs `check` runs every configured pack unless told otherwise.
 
 **Resolution:** set `GUARDRAILS_CI_PACKS: none` on the base job and `GUARDRAILS_PACKS: <pack>` on each pack job. The base job then needs the toolchains of every enabled pack. See [CI jobs](./packs.md#ci-jobs-cheap-checks-everywhere-expensive-checks-once). Nothing checks that a pack job exists; `check` prints `deferred:` or `ci-stage tools left to other jobs` when their tools do not run.
+
+## zizmor and actionlint
+
+**Symptom:** a workflow is reported by both actionlint and zizmor.
+
+**Why:** they overlap only on a few expression problems. actionlint checks syntax, types and embedded shell. zizmor checks security (injection, permissions, unpinned actions).
+
+**Resolution:** run both. Accept a zizmor finding in `.github/zizmor.yml` with a reason, and keep actionlint's config for runner labels only.
+
+## osv-scanner and Dependabot or Renovate
+
+**Symptom:** the push fails on an advisory nobody has touched.
+
+**Why:** osv-scanner reads the live OSV database, so new advisories fail old lockfiles.
+
+**Resolution:** update the dependency, or accept the advisory with a reason and an `ignoreUntil` date in `osv-scanner.toml`. A dependency bot opens the update PR; the gate only reports.

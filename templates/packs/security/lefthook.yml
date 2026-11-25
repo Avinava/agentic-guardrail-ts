@@ -1,0 +1,7 @@
+# lefthook additions for the security pack. Merge under pre-commit.jobs in lefthook.yml.
+# osv-scanner and semgrep are pre-push and CI only (they scan the whole repo).
+pre-commit:
+  jobs:
+    - name: security
+      glob: '.github/workflows/*.{yml,yaml}'
+      run: node scripts/guardrails.mjs check --files {staged_files}
