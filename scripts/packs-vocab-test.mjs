@@ -108,6 +108,104 @@ describe('vocab-literal, TypeScript', () => {
   });
 });
 
+describe('vocab-literal, review regressions', () => {
+  beforeEach(() => put('src/a.ts', ''));
+
+  it('ignores commented-out declarations and braces inside comments', () => {
+    put(
+      'src/vocab.ts',
+      [
+        '// export const Legacy = { Old: "retired" } as const;',
+        'export const Status = {',
+        '  // }',
+        '  Active: "active",',
+        '  // Closed: "closed",',
+        '  /* Hidden: "hidden" } */',
+        '} as const;',
+        'export enum Role {',
+        '  // Admin = "admin",',
+        '  Guest = "guest",',
+        '}',
+        'export const Other = { Foo: "foo" } as const;',
+        '',
+      ].join('\n'),
+    );
+    config(['src/vocab.ts']);
+    put(
+      'src/svc.ts',
+      "export const a = ['retired', 'active', 'closed', 'hidden', 'admin', 'guest', 'foo'];\n",
+    );
+    assert.deepEqual(recordedCounts(), {
+      'vocab-literal:Status.Active|src/svc.ts': 1,
+      'vocab-literal:Role.Guest|src/svc.ts': 1,
+      'vocab-literal:Other.Foo|src/svc.ts': 1,
+    });
+  });
+
+  it('flags literals inside template substitutions and f-string expressions', () => {
+    put('src/vocab.ts', 'export const Status = { Active: "active" } as const;\n');
+    put('app/vocab.py', 'from enum import StrEnum\nclass S(StrEnum):\n    ACTIVE = "active"\n');
+    config(['src/vocab.ts', 'app/vocab.py']);
+    put(
+      'src/svc.ts',
+      [
+        'export const a = `Status: ${"active"}`;',
+        'export const b = `x${y ? `${"active"}` : 1}`;',
+        'export const c = `just active`;',
+        'export const d = `plain ${"other"}`;',
+        '',
+      ].join('\n'),
+    );
+    put('app/svc.py', 'a = f"status {\'active\'}"\nb = f"{{active}} {x}"\n');
+    const r = g(['check']);
+    assert.match(r.out, /src\/svc\.ts:1 {2}vocab-literal Status\.Active/);
+    assert.match(r.out, /src\/svc\.ts:2 {2}vocab-literal Status\.Active/);
+    assert.match(r.out, /app\/svc\.py:1 {2}vocab-literal S\.ACTIVE/);
+    assert.deepEqual(recordedCounts(), {
+      'vocab-literal:Status.Active|src/svc.ts': 2,
+      'vocab-literal:S.ACTIVE|app/svc.py': 1,
+    });
+  });
+
+  it('finds a literal after an apostrophe on the same line', () => {
+    put('src/vocab.ts', 'export const Status = { Active: "active" } as const;\n');
+    config(['src/vocab.ts']);
+    put('src/v.tsx', "export const V = () => <p>Don't use 'active', it's old</p>;\n");
+    assert.deepEqual(recordedCounts(), { 'vocab-literal:Status.Active|src/v.tsx': 1 });
+  });
+
+  it('ignores locals in Python methods and keeps class-level members', () => {
+    put(
+      'app/vocab.py',
+      [
+        'from enum import StrEnum',
+        'class Status(StrEnum):',
+        '    ACTIVE = "active"',
+        '',
+        '    def parse(self, raw: str) -> "Status":',
+        '        fallback = "unknown"',
+        '        return self.ACTIVE',
+        '',
+        '    CLOSED = "closed"',
+        '',
+      ].join('\n'),
+    );
+    config(['app/vocab.py']);
+    put('app/svc.py', 'a = "unknown"\nb = "active"\nc = "closed"\n');
+    assert.deepEqual(recordedCounts(), {
+      'vocab-literal:Status.ACTIVE|app/svc.py': 1,
+      'vocab-literal:Status.CLOSED|app/svc.py': 1,
+    });
+  });
+
+  it('skips triple-quoted strings, docstrings or not', () => {
+    put('app/vocab.py', 'from enum import StrEnum\nclass S(StrEnum):\n    A = "active"\n');
+    config(['app/vocab.py']);
+    put('app/svc.py', 'g = """active"""\n');
+    assert.equal(g(['check']).status, 0);
+  });
+});
+
 describe('vocab-literal, Python', () => {
   beforeEach(() => {
     put('src/a.ts', '');
@@ -155,7 +253,7 @@ describe('vocab-literal, Python', () => {
     assert.deepEqual(recordedCounts(), {
       'vocab-literal:Status.ACTIVE|app/svc.py': 1,
       'vocab-literal:Role.ADMIN|app/svc.py': 1,
-      'vocab-literal:Status.CLOSED|app/svc.py': 1,
+      'vocab-literal:Status.CLOSED|app/svc.py': 2,
     });
   });
 

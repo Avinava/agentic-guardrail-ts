@@ -15,19 +15,54 @@ rules:
     languages: [javascript, typescript]
     severity: ERROR
     message: exec() and execSync() run a shell. Use execFile() or spawn() with an argument array.
-    patterns:
-      - pattern-either:
-          - pattern: $CP.exec(...)
-          - pattern: $CP.execSync(...)
-          - pattern: exec(...)
-          - pattern: execSync(...)
-      - pattern-not: $CP.exec("...", ...)
-      - pattern-not: $CP.execSync("...", ...)
-      - pattern-not: exec("...", ...)
-      - pattern-not: execSync("...", ...)
-      - metavariable-regex:
-          metavariable: $CP
-          regex: ^(child_process|cp|childProcess)$
+    pattern-either:
+      # child_process.exec(cmd), cp.exec(cmd), where the receiver is the module
+      - patterns:
+          - pattern-either:
+              - pattern: $CP.exec(...)
+              - pattern: $CP.execSync(...)
+          - pattern-not: $CP.exec("...", ...)
+          - pattern-not: $CP.execSync("...", ...)
+          - metavariable-regex:
+              metavariable: $CP
+              regex: ^(child_process|cp|childProcess)$
+      # require("child_process").exec(cmd)
+      - patterns:
+          - pattern-either:
+              - pattern: require("child_process").exec(...)
+              - pattern: require("child_process").execSync(...)
+              - pattern: require("node:child_process").exec(...)
+              - pattern: require("node:child_process").execSync(...)
+          - pattern-not: require("child_process").exec("...", ...)
+          - pattern-not: require("child_process").execSync("...", ...)
+          - pattern-not: require("node:child_process").exec("...", ...)
+          - pattern-not: require("node:child_process").execSync("...", ...)
+      # import { exec } from "child_process"; exec(cmd)
+      - patterns:
+          - pattern-either:
+              - pattern: exec(...)
+              - pattern: execSync(...)
+          - pattern-not: exec("...", ...)
+          - pattern-not: execSync("...", ...)
+          - pattern-either:
+              - pattern-inside: |
+                  import {..., exec, ...} from "child_process";
+                  ...
+              - pattern-inside: |
+                  import {..., execSync, ...} from "child_process";
+                  ...
+              - pattern-inside: |
+                  import {..., exec, ...} from "node:child_process";
+                  ...
+              - pattern-inside: |
+                  import {..., execSync, ...} from "node:child_process";
+                  ...
+              - pattern-inside: |
+                  const {..., exec, ...} = require("child_process");
+                  ...
+              - pattern-inside: |
+                  const {..., execSync, ...} = require("child_process");
+                  ...
 
   - id: js-html-injection
     languages: [javascript, typescript]
@@ -70,6 +105,22 @@ rules:
     pattern-either:
       - pattern: subprocess.$FN(..., shell=True, ...)
       - pattern: os.system(...)
+      # from subprocess import run; run(cmd, shell=True). The call must use an imported name.
+      - patterns:
+          - pattern: $FN(..., shell=True, ...)
+          - pattern-either:
+              - pattern-inside: |
+                  from subprocess import $FN
+                  ...
+              - pattern-inside: |
+                  from subprocess import $FN, $B
+                  ...
+              - pattern-inside: |
+                  from subprocess import $A, $FN
+                  ...
+              - pattern-inside: |
+                  from subprocess import $A, $FN, $B
+                  ...
 
   - id: py-unsafe-deserialize
     languages: [python]
@@ -78,8 +129,17 @@ rules:
     pattern-either:
       - pattern: pickle.load(...)
       - pattern: pickle.loads(...)
-      - pattern: yaml.load(...)
       - pattern: yaml.unsafe_load(...)
+      - patterns:
+          - pattern: yaml.load(...)
+          - pattern-not: yaml.load(..., Loader=yaml.SafeLoader, ...)
+          - pattern-not: yaml.load(..., Loader=yaml.CSafeLoader, ...)
+          - pattern-not: yaml.load(..., Loader=SafeLoader, ...)
+          - pattern-not: yaml.load(..., Loader=CSafeLoader, ...)
+          - pattern-not: yaml.load($X, yaml.SafeLoader)
+          - pattern-not: yaml.load($X, yaml.CSafeLoader)
+          - pattern-not: yaml.load($X, SafeLoader)
+          - pattern-not: yaml.load($X, CSafeLoader)
 
   - id: py-weak-hash
     languages: [python]

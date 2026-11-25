@@ -604,6 +604,9 @@ describe('token drift rule (real ast-grep)', () => {
         put(`rules/${f}`, readFileSync(join(optional, f), 'utf8'));
       }
       put('src/a.ts', 'export const ok = 1;\n');
+      put('src/Button.spec.tsx', 'export const V = () => <i style={{ color: "#fff" }} />;\n');
+      put('src/tokens.tsx', 'export const V = () => <i style={{ color: "#fff" }} />;\n');
+      put('src/x.spec.ts', "export const a = '#fff';\n");
       put('src/tokens/colors.ts', "export const brand = '#123456';\n");
       assert.equal(g(['check']).status, 0);
       put(

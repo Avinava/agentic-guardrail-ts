@@ -3,5 +3,5 @@
 pre-commit:
   jobs:
     - name: security
-      glob: '.github/workflows/*.{yml,yaml}'
+      glob: '.github/workflows/**/*.{yml,yaml}'
       run: node scripts/guardrails.mjs check --files {staged_files}

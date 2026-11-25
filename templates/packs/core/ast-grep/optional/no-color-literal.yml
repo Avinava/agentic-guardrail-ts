@@ -19,4 +19,6 @@ rule:
 ignores:
   - "**/tokens/**"
   - "**/tokens.ts"
+  - "**/tokens.tsx"
   - "**/*.test.ts"
+  - "**/*.spec.ts"

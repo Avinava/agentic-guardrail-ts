@@ -301,7 +301,7 @@ on when its config file exists, so enabling a pack is writing its files. For eac
 **Upgrading from 3.x (4.0.0, breaking).** If `rules/no-vocab-literal.yml` exists (the hand-filled ast-grep rule):
 1. Find the vocab module the old regex was built from, and write `guardrails/vocab.json` with its path (see the Templates, Core).
 2. Delete `rules/no-vocab-literal.yml`. If `rules/` is now empty and no other rule uses ast-grep, ask before removing `sgconfig.yml` too.
-3. Run `node scripts/guardrails.mjs check`. The same literals now appear as `vocab-literal:<Name.Member>|file` and the old `ast-grep:no-vocab-literal|file` keys are gone. Show the user the count: it should match the old rule's count or be higher (the new tool also checks Python and enum members). After approval run `baseline --reset`.
+3. Run `node scripts/guardrails.mjs check`. The same literals now appear as `vocab-literal:<Name.Member>|file` and the old `ast-grep:no-vocab-literal|file` keys are gone. Show the user both lists and the counts: the new count can be lower (the vocab module itself is no longer flagged) or higher (Python `StrEnum`, enum members and nested members are also checked). Review the difference before running `baseline --reset`.
 
 A monorepo with several stacks gets several packs. mule-lint finds each Mule application by its
 `mule-artifact.json`; every other tool reads its config from the repo root, and the Python tools
@@ -1458,7 +1458,8 @@ const globRegExp = (glob) =>
       .replaceAll('\u0001', '.*')}$`,
   );
 
-// Index of the `}` that closes the `{` at `open`, skipping quoted strings.
+// Index of the `}` that closes the `{` at `open`, skipping quoted strings. Comments are already
+// blanked (see blankComments).
 const closingBrace = (text, open) => {
   let depth = 0;
   for (let i = open; i < text.length; i++) {
@@ -1500,7 +1501,8 @@ function objectMembers(body, prefix) {
 }
 
 // TypeScript: `export const X = { A: 'a' } as const` and `enum X { A = 'a' }`.
-function vocabTs(text) {
+function vocabTs(source) {
+  const text = blankComments(source);
   const found = [];
   for (const m of text.matchAll(/\b(?:const|enum)\s+(\w+)\s*(?::[^=\n{]+)?(=\s*)?\{/g)) {
     const open = m.index + m[0].length - 1;
@@ -1516,29 +1518,30 @@ function vocabTs(text) {
   return found;
 }
 
-// Python: `class X(StrEnum)` and `class X(str, Enum)` with `A = 'a'` members.
+// Python: `class X(StrEnum)` and `class X(str, Enum)`. Only assignments directly in the class
+// body are members: a method's locals sit deeper and are ignored.
 function vocabPy(text) {
   const found = [];
   let owner = null;
   let indent = 0;
+  let body = null;
   for (const line of text.split('\n')) {
+    if (line.trim() === '') continue;
+    const depth = line.length - line.trimStart().length;
+    if (owner !== null && depth <= indent) owner = null;
     const head = /^(\s*)class\s+(\w+)\s*\(([^)]*)\)\s*:/.exec(line);
-    if (head) {
+    if (head && owner === null) {
       const bases = head[3];
-      owner =
-        /\bStrEnum\b/.test(bases) || (/\bstr\b/.test(bases) && /\bEnum\b/.test(bases))
-          ? head[2]
-          : null;
+      const isEnum = /\bStrEnum\b/.test(bases) || (/\bstr\b/.test(bases) && /\bEnum\b/.test(bases));
+      owner = isEnum ? head[2] : null;
       indent = head[1].length;
+      body = null;
       continue;
     }
-    if (owner === null || line.trim() === '') continue;
-    if (line.length - line.trimStart().length <= indent) {
-      owner = null;
-      continue;
-    }
+    if (owner === null) continue;
+    body ??= depth;
     const member = /^\s+(\w+)\s*(?::[^=]+)?=\s*(['"])([^'"\\]*)\2\s*(?:#.*)?$/.exec(line);
-    if (member) found.push([`${owner}.${member[1]}`, member[3]]);
+    if (depth === body && member) found.push([`${owner}.${member[1]}`, member[3]]);
   }
   return found;
 }
@@ -1585,48 +1588,123 @@ function skipRegex(s, c) {
   return j + 1;
 }
 
-// Where a string that opens at `start` ends. A quote ends it, and so does a newline (except in a
-// template), so an unmatched apostrophe cannot swallow the rest of the file.
+// Where a quoted string that opens at `start` ends: at its quote, or at a newline, so an unmatched
+// apostrophe cannot swallow the rest of the file.
 function stringEnd(text, start, quote) {
-  let interpolated = false;
   let j = start + 1;
-  for (; j < text.length; j++) {
-    const ch = text[j];
-    if (ch === '\\') j++;
-    else if (ch === quote || (ch === '\n' && quote !== '`')) break;
-    else if (quote === '`' && ch === '$' && text[j + 1] === '{') interpolated = true;
+  for (; j < text.length && text[j] !== quote && text[j] !== '\n'; j++) {
+    if (text[j] === '\\') j++;
   }
-  return { end: j, interpolated };
+  return j;
 }
 
-// Records a plain string literal (not f-string, bytes, docstring or interpolated template).
+// Index of the `}` that closes a `${` expression whose body starts at `from`.
+function exprEnd(text, from) {
+  let depth = 0;
+  for (let j = from; j < text.length; j++) {
+    const ch = text[j];
+    if (ch === '"' || ch === "'") j = stringEnd(text, j, ch);
+    else if (ch === '`') j = templateEnd(text, j).end;
+    else if (ch === '{') depth++;
+    else if (ch === '}' && depth-- === 0) return j;
+  }
+  return text.length;
+}
+
+// A template literal: where it ends, and the [from, to) ranges of its `${...}` expressions.
+function templateEnd(text, start) {
+  const exprs = [];
+  let j = start + 1;
+  for (; j < text.length && text[j] !== '`'; j++) {
+    if (text[j] === '\\') j++;
+    else if (text[j] === '$' && text[j + 1] === '{') {
+      const close = exprEnd(text, j + 2);
+      exprs.push([j + 2, close]);
+      j = close;
+    }
+  }
+  return { end: j, exprs };
+}
+
+// The [from, to) ranges of the `{expr}` parts of an f-string body (`{{` is a literal brace).
+function fStringExprs(body) {
+  const exprs = [];
+  for (let j = 0; j < body.length; j++) {
+    if (body.startsWith('{{', j)) j++;
+    else if (body[j] === '{') {
+      const close = body.indexOf('}', j);
+      if (close < 0) break;
+      exprs.push([j + 1, close]);
+      j = close;
+    }
+  }
+  return exprs;
+}
+
+// An apostrophe right after a word character is text ("Don't" in JSX), not a string start.
+const isApostrophe = (s, c) => !s.py && c === "'" && /[\w$]/.test(s.text[s.i - 1] ?? '');
+
+// The literals inside the expressions of a template or f-string, with their real line numbers.
+function nestedLiterals(s, exprs) {
+  for (const [from, to] of exprs) {
+    const line = s.line + (s.text.slice(s.i, from).match(/\n/g)?.length ?? 0);
+    s.out.push(...literals(s.text.slice(from, to), s.py, line));
+  }
+}
+
+// Records a plain string literal (not bytes, a triple-quoted string, or a template or f-string
+// with a substitution: those are scanned for the literals inside `${...}` instead).
 function readString(s, c) {
   const { text, py, i } = s;
   if (c !== '"' && c !== "'" && (py || c !== '`')) return null;
+  if (isApostrophe(s, c)) return null;
   if (py && text.startsWith(c.repeat(3), i)) {
     const end = text.indexOf(c.repeat(3), i + 3);
     return end < 0 ? text.length : end + 3;
   }
   const before = text.slice(s.lineStart, i);
   const prefix = py ? (/[A-Za-z]{1,2}$/.exec(before)?.[0].toLowerCase() ?? '') : '';
-  const { end, interpolated } = stringEnd(text, i, c);
+  const tpl = c === '`' ? templateEnd(text, i) : null;
+  const end = tpl ? tpl.end : stringEnd(text, i, c);
   const value = text.slice(i + 1, end);
-  if (!interpolated && text[end] === c && !value.includes('\\') && !/[fb]/.test(prefix)) {
-    s.out.push({ value, line: s.line, before });
-  }
-  return text[end] === c ? end + 1 : end;
+  const closed = text[end] === c;
+  const exprs =
+    tpl?.exprs ??
+    (/f/.test(prefix) ? fStringExprs(value).map(([a, b]) => [a + i + 1, b + i + 1]) : []);
+  if (!closed || /b/.test(prefix)) return closed ? end + 1 : end;
+  if (exprs.length > 0) nestedLiterals(s, exprs);
+  else if (!value.includes('\\')) s.out.push({ value, line: s.line, before });
+  return end + 1;
 }
 
 // Plain string literals with their line and the text before them on that line. Skips comments,
-// docstrings, f-strings, bytes and templates with interpolation.
-function literals(text, py) {
-  const s = { text, py, i: 0, line: 1, lineStart: 0, out: [] };
+// triple-quoted strings and bytes; a template or f-string contributes the literals inside its
+// substitutions, not its own text.
+function literals(text, py, line = 1) {
+  const s = { text, py, i: 0, line, lineStart: 0, out: [] };
   while (s.i < text.length) {
     const c = text[s.i];
     const next = skipComment(s, c) ?? skipRegex(s, c) ?? readString(s, c);
     advance(s, next ?? s.i + 1);
   }
   return s.out;
+}
+
+// The source with every comment replaced by spaces (newlines kept), so a commented-out
+// declaration or a stray brace in a comment cannot change what is read as code.
+function blankComments(text) {
+  const s = { text, py: false, i: 0, line: 1, lineStart: 0, out: [] };
+  let out = '';
+  while (s.i < text.length) {
+    const from = s.i;
+    const c = text[from];
+    const comment = skipComment(s, c);
+    const next = comment ?? skipRegex(s, c) ?? readString(s, c) ?? from + 1;
+    out +=
+      comment === null ? text.slice(from, next) : text.slice(from, next).replace(/[^\n]/g, ' ');
+    advance(s, next);
+  }
+  return out;
 }
 
 const IMPORT_BEFORE = /(?:\bfrom|\bimport|\brequire\(|\bimport\()\s*$/;
@@ -3623,7 +3701,9 @@ rule:
 ignores:
   - "**/tokens/**"
   - "**/tokens.ts"
+  - "**/tokens.tsx"
   - "**/*.test.ts"
+  - "**/*.spec.ts"
 ```
 <!-- /tmpl -->
 
@@ -3647,7 +3727,9 @@ rule:
 ignores:
   - "**/tokens/**"
   - "**/tokens.ts"
+  - "**/tokens.tsx"
   - "**/*.test.tsx"
+  - "**/*.spec.tsx"
 ```
 <!-- /tmpl -->
 
@@ -4599,19 +4681,54 @@ rules:
     languages: [javascript, typescript]
     severity: ERROR
     message: exec() and execSync() run a shell. Use execFile() or spawn() with an argument array.
-    patterns:
-      - pattern-either:
-          - pattern: $CP.exec(...)
-          - pattern: $CP.execSync(...)
-          - pattern: exec(...)
-          - pattern: execSync(...)
-      - pattern-not: $CP.exec("...", ...)
-      - pattern-not: $CP.execSync("...", ...)
-      - pattern-not: exec("...", ...)
-      - pattern-not: execSync("...", ...)
-      - metavariable-regex:
-          metavariable: $CP
-          regex: ^(child_process|cp|childProcess)$
+    pattern-either:
+      # child_process.exec(cmd), cp.exec(cmd), where the receiver is the module
+      - patterns:
+          - pattern-either:
+              - pattern: $CP.exec(...)
+              - pattern: $CP.execSync(...)
+          - pattern-not: $CP.exec("...", ...)
+          - pattern-not: $CP.execSync("...", ...)
+          - metavariable-regex:
+              metavariable: $CP
+              regex: ^(child_process|cp|childProcess)$
+      # require("child_process").exec(cmd)
+      - patterns:
+          - pattern-either:
+              - pattern: require("child_process").exec(...)
+              - pattern: require("child_process").execSync(...)
+              - pattern: require("node:child_process").exec(...)
+              - pattern: require("node:child_process").execSync(...)
+          - pattern-not: require("child_process").exec("...", ...)
+          - pattern-not: require("child_process").execSync("...", ...)
+          - pattern-not: require("node:child_process").exec("...", ...)
+          - pattern-not: require("node:child_process").execSync("...", ...)
+      # import { exec } from "child_process"; exec(cmd)
+      - patterns:
+          - pattern-either:
+              - pattern: exec(...)
+              - pattern: execSync(...)
+          - pattern-not: exec("...", ...)
+          - pattern-not: execSync("...", ...)
+          - pattern-either:
+              - pattern-inside: |
+                  import {..., exec, ...} from "child_process";
+                  ...
+              - pattern-inside: |
+                  import {..., execSync, ...} from "child_process";
+                  ...
+              - pattern-inside: |
+                  import {..., exec, ...} from "node:child_process";
+                  ...
+              - pattern-inside: |
+                  import {..., execSync, ...} from "node:child_process";
+                  ...
+              - pattern-inside: |
+                  const {..., exec, ...} = require("child_process");
+                  ...
+              - pattern-inside: |
+                  const {..., execSync, ...} = require("child_process");
+                  ...
 
   - id: js-html-injection
     languages: [javascript, typescript]
@@ -4654,6 +4771,22 @@ rules:
     pattern-either:
       - pattern: subprocess.$FN(..., shell=True, ...)
       - pattern: os.system(...)
+      # from subprocess import run; run(cmd, shell=True). The call must use an imported name.
+      - patterns:
+          - pattern: $FN(..., shell=True, ...)
+          - pattern-either:
+              - pattern-inside: |
+                  from subprocess import $FN
+                  ...
+              - pattern-inside: |
+                  from subprocess import $FN, $B
+                  ...
+              - pattern-inside: |
+                  from subprocess import $A, $FN
+                  ...
+              - pattern-inside: |
+                  from subprocess import $A, $FN, $B
+                  ...
 
   - id: py-unsafe-deserialize
     languages: [python]
@@ -4662,8 +4795,17 @@ rules:
     pattern-either:
       - pattern: pickle.load(...)
       - pattern: pickle.loads(...)
-      - pattern: yaml.load(...)
       - pattern: yaml.unsafe_load(...)
+      - patterns:
+          - pattern: yaml.load(...)
+          - pattern-not: yaml.load(..., Loader=yaml.SafeLoader, ...)
+          - pattern-not: yaml.load(..., Loader=yaml.CSafeLoader, ...)
+          - pattern-not: yaml.load(..., Loader=SafeLoader, ...)
+          - pattern-not: yaml.load(..., Loader=CSafeLoader, ...)
+          - pattern-not: yaml.load($X, yaml.SafeLoader)
+          - pattern-not: yaml.load($X, yaml.CSafeLoader)
+          - pattern-not: yaml.load($X, SafeLoader)
+          - pattern-not: yaml.load($X, CSafeLoader)
 
   - id: py-weak-hash
     languages: [python]
@@ -4688,7 +4830,7 @@ rules:
 pre-commit:
   jobs:
     - name: security
-      glob: '.github/workflows/*.{yml,yaml}'
+      glob: '.github/workflows/**/*.{yml,yaml}'
       run: node scripts/guardrails.mjs check --files {staged_files}
 ```
 <!-- /tmpl -->
