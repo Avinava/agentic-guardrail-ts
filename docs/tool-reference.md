@@ -15,12 +15,15 @@ What each tool does, where it is configured, and when it runs. Why these tools: 
 | commitlint | | | message | PR range (CI) |
 | syncpack (monorepo) | | | | via `lint` script |
 | ast-grep (opt-in) | edited file | changed files | staged files | all |
+| vocab-literal (opt-in) | edited file | changed files | staged files | all |
 | ls-lint (opt-in) | edited file | changed files | staged files | all |
 | cspell (opt-in) | edited file | changed files | staged files | all |
 | jscpd (opt-in) | | | | full check only |
 | markdownlint-cli2, lychee (opt-in) | | changed docs | staged docs | all (lychee online in CI) |
 | ruff (Python pack) | edited file | changed files | staged files | all |
 | tach, deptry, vulture (Python pack) | | | | full check only |
+| zizmor (security pack, opt-in) | | changed workflows | staged workflows | all |
+| osv-scanner, semgrep (security pack, opt-in) | | | | full check only |
 
 ## guardrails.mjs
 
@@ -122,4 +125,4 @@ See [Agent loop](./agent-loop.md).
 
 ## Packs
 
-Everything above is the `ts` pack. Other stacks (Python, Mule, Salesforce, shell, Docker, SQL, GitHub Actions, Rust, Dart, C++) and the language-agnostic core tools (cspell, jscpd, ast-grep, ls-lint, markdownlint, lychee, editorconfig-checker) are packs: see [Packs](./packs.md) for the contract, the detect rules, what is default-on and what is opt-in.
+Everything above is the `ts` pack. Other stacks (Python, Mule, Salesforce, shell, Docker, SQL, GitHub Actions, Rust, Dart, C++, security) and the language-agnostic core tools (cspell, jscpd, ast-grep, vocab-literal, ls-lint, markdownlint, lychee, editorconfig-checker) are packs: see [Packs](./packs.md) for the contract, the detect rules, what is default-on and what is opt-in.

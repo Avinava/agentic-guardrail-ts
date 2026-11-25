@@ -18,8 +18,12 @@
 //   scan(ctx) replaces run+parse for checks done in JS
 //   metric + measure(ctx)  a number ratchet instead of findings: { name, direction, unit, advice }
 
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+
 const TS_EXT = /\.[cm]?[jt]sx?$/;
 const MD_EXT = /\.mdx?$/;
+const PY_EXT = /\.py$/;
 
 // Exit codes for tools whose JSON report is the authority (v3 ignored their exit status): any exit
 // is fine as long as the report parses, and an unparsable report throws.
@@ -191,6 +195,388 @@ const ts = {
   ],
 };
 
+// ── vocab-literal: raw strings that equal a member of the project's vocab module ──
+
+const VOCAB_CONFIG = 'guardrails/vocab.json';
+const VOCAB_EXT = /\.(?:[cm]?[jt]sx?|py)$/;
+const TEST_FILE =
+  /(?:^|\/)(?:__tests__|tests?|e2e)\/|\.(?:test|spec)\.[^/]+$|(?:^|\/)test_[^/]*\.py$|_test\.py$|(?:^|\/)conftest\.py$/;
+
+// A glob from vocab.json `ignore`: `**` crosses folders, `*` and `?` stay inside one.
+const globRegExp = (glob) =>
+  new RegExp(
+    `^${glob
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replaceAll('**/', '\u0000')
+      .replaceAll('**', '\u0001')
+      .replaceAll('*', '[^/]*')
+      .replaceAll('?', '[^/]')
+      .replaceAll('\u0000', '(?:.*/)?')
+      .replaceAll('\u0001', '.*')}$`,
+  );
+
+// The project's own TypeScript package parses TS and JS files. Missing means a broken install.
+function loadTypescript(h) {
+  try {
+    return createRequire(join(h.ROOT, 'package.json'))('typescript');
+  } catch (e) {
+    throw new Error(
+      `${VOCAB_CONFIG}: the typescript package is needed to read TypeScript vocab and sources. Install devDependencies first.`,
+      { cause: e },
+    );
+  }
+}
+
+// `as const` and `satisfies` wrappers around the expression.
+const unwrap = (tsApi, node) =>
+  tsApi.isAsExpression(node) ||
+  tsApi.isSatisfiesExpression(node) ||
+  tsApi.isParenthesizedExpression(node)
+    ? unwrap(tsApi, node.expression)
+    : node;
+
+const isConstAssertion = (tsApi, node) =>
+  (tsApi.isAsExpression(node) &&
+    tsApi.isTypeReferenceNode(node.type) &&
+    node.type.typeName.text === 'const') ||
+  ((tsApi.isSatisfiesExpression(node) || tsApi.isParenthesizedExpression(node)) &&
+    isConstAssertion(tsApi, node.expression));
+
+const isStringNode = (tsApi, node) =>
+  tsApi.isStringLiteral(node) || tsApi.isNoSubstitutionTemplateLiteral(node);
+
+const propertyName = (tsApi, name) =>
+  tsApi.isIdentifier(name) || tsApi.isStringLiteral(name) || tsApi.isNumericLiteral(name)
+    ? name.text
+    : null;
+
+// Members of an object literal, nested objects included (`Outer.Inner.KEY`).
+function tsObjectMembers(tsApi, object, prefix) {
+  const found = [];
+  for (const p of object.properties) {
+    const key = tsApi.isPropertyAssignment(p) ? propertyName(tsApi, p.name) : null;
+    if (key === null) continue;
+    const value = unwrap(tsApi, p.initializer);
+    if (isStringNode(tsApi, value)) found.push([`${prefix}.${key}`, value.text]);
+    else if (tsApi.isObjectLiteralExpression(value)) {
+      found.push(...tsObjectMembers(tsApi, value, `${prefix}.${key}`));
+    }
+  }
+  return found;
+}
+
+const tsKind = (tsApi, file) => {
+  if (file.endsWith('.tsx')) return tsApi.ScriptKind.TSX;
+  if (/\.[cm]?ts$/.test(file)) return tsApi.ScriptKind.TS;
+  return file.endsWith('.jsx') ? tsApi.ScriptKind.JSX : tsApi.ScriptKind.JS;
+};
+
+const tsParse = (tsApi, file, text) =>
+  tsApi.createSourceFile(file, text, tsApi.ScriptTarget.Latest, true, tsKind(tsApi, file));
+
+// The names a module exports without a modifier: `export { A, B as C }` and `export default A`.
+function tsExportedNames(tsApi, sf) {
+  const names = new Map();
+  for (const st of sf.statements) {
+    if (tsApi.isExportDeclaration(st) && !st.moduleSpecifier && st.exportClause) {
+      for (const el of tsApi.isNamedExports(st.exportClause) ? st.exportClause.elements : []) {
+        names.set((el.propertyName ?? el.name).text, el.name.text);
+      }
+    } else if (tsApi.isExportAssignment(st) && tsApi.isIdentifier(st.expression)) {
+      names.set(st.expression.text, st.expression.text);
+    }
+  }
+  return names;
+}
+
+const hasExportModifier = (tsApi, node) =>
+  (tsApi.canHaveModifiers(node) ? (tsApi.getModifiers(node) ?? []) : []).some(
+    (m) => m.kind === tsApi.SyntaxKind.ExportKeyword,
+  );
+
+// TypeScript: `export const X = { A: 'a' } as const` and `enum X { A = 'a' }`, at module scope or
+// inside an exported namespace, named the way a caller writes them (`Domain.Status.Active`).
+// Declarations inside functions or blocks, and names that are not exported, are not members.
+function tsVocab(tsApi, file, text) {
+  const sf = tsParse(tsApi, file, text);
+  const renamed = tsExportedNames(tsApi, sf);
+  const found = [];
+  // The name a caller writes for a declaration, or null when it is not reachable. `top` is true at
+  // module scope, false in a namespace (members need `export`), 'inner' for `namespace A.B`.
+  const exportedAs = (node, name, top) => {
+    if (top === 'inner' || hasExportModifier(tsApi, node)) return name;
+    return top === true ? (renamed.get(name) ?? null) : null;
+  };
+  const collectModule = (mod, prefix, top) => {
+    const name = tsApi.isIdentifier(mod.name) ? exportedAs(mod, mod.name.text, top) : null;
+    if (name === null || !mod.body) return;
+    if (tsApi.isModuleBlock(mod.body)) collect(mod.body.statements, `${prefix}${name}.`, false);
+    else if (tsApi.isModuleDeclaration(mod.body))
+      collectModule(mod.body, `${prefix}${name}.`, 'inner');
+  };
+  const collectStatement = (st, prefix, top) => {
+    if (tsApi.isEnumDeclaration(st)) {
+      const name = exportedAs(st, st.name.text, top);
+      if (name !== null) found.push(...tsEnumMembers(tsApi, st, `${prefix}${name}`));
+    } else if (tsApi.isVariableStatement(st)) {
+      for (const d of st.declarationList.declarations) {
+        const name = tsApi.isIdentifier(d.name) ? exportedAs(st, d.name.text, top) : null;
+        if (name !== null) found.push(...tsConstObjectMembers(tsApi, d, `${prefix}${name}`));
+      }
+    } else if (tsApi.isModuleDeclaration(st)) {
+      collectModule(st, prefix, top);
+    }
+  };
+  const collect = (statements, prefix, top) => {
+    for (const st of statements) collectStatement(st, prefix, top);
+  };
+  collect(sf.statements, '', true);
+  return found;
+}
+
+// `Name.Key` and value of each string member of an enum.
+function tsEnumMembers(tsApi, node, name) {
+  const found = [];
+  for (const m of node.members) {
+    const key = propertyName(tsApi, m.name);
+    const value = m.initializer && unwrap(tsApi, m.initializer);
+    if (key !== null && value && isStringNode(tsApi, value))
+      found.push([`${name}.${key}`, value.text]);
+  }
+  return found;
+}
+
+// Members of `const X = { ... } as const`; nothing for any other declaration.
+function tsConstObjectMembers(tsApi, decl, name) {
+  if (!decl.initializer || !isConstAssertion(tsApi, decl.initializer)) return [];
+  const value = unwrap(tsApi, decl.initializer);
+  return tsApi.isObjectLiteralExpression(value) ? tsObjectMembers(tsApi, value, name) : [];
+}
+
+// A string that names a module (imports, re-exports, require(), import(), `declare module`).
+function isModuleName(tsApi, node) {
+  const p = node.parent;
+  return (
+    tsApi.isImportDeclaration(p) ||
+    tsApi.isExportDeclaration(p) ||
+    tsApi.isExternalModuleReference(p) ||
+    tsApi.isModuleDeclaration(p) ||
+    (tsApi.isLiteralTypeNode(p) && tsApi.isImportTypeNode(p.parent)) ||
+    (tsApi.isCallExpression(p) &&
+      (p.expression.kind === tsApi.SyntaxKind.ImportKeyword ||
+        (tsApi.isIdentifier(p.expression) && p.expression.text === 'require')))
+  );
+}
+
+// Plain string literals of a TS or JS file. A template contributes only the literals inside its
+// substitutions (its own text is not a plain string unless it has none).
+function tsLiterals(tsApi, file, text) {
+  const sf = tsParse(tsApi, file, text);
+  const found = [];
+  const visit = (node) => {
+    if (isStringNode(tsApi, node) && !isModuleName(tsApi, node)) {
+      found.push({
+        value: node.text,
+        line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1,
+      });
+    }
+    tsApi.forEachChild(node, visit);
+  };
+  visit(sf);
+  return found;
+}
+
+// Python is read by its own `ast` module. A member is an assignment directly in the body of a
+// StrEnum (or str + Enum) class; a literal is any str constant except a bare-string statement
+// (a docstring) and the fixed text of an f-string, whose substitutions are walked.
+const PY_READER = `
+import ast, json, sys
+req = json.load(sys.stdin)
+
+def enum_aliases(tree):
+    names = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "enum":
+            for alias in node.names:
+                names[alias.asname or alias.name] = alias.name
+    return names
+
+def is_str(node):
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+def exported_names(tree):
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__all__" for t in stmt.targets):
+            if isinstance(stmt.value, (ast.List, ast.Tuple)) and all(is_str(e) for e in stmt.value.elts):
+                return {e.value for e in stmt.value.elts}
+    return None
+
+def members(tree):
+    aliases = enum_aliases(tree)
+    public = exported_names(tree)
+    out = []
+
+    def is_enum(cls):
+        names = set()
+        for b in cls.bases:
+            if isinstance(b, ast.Name):
+                names.add(aliases.get(b.id, b.id))
+            elif isinstance(b, ast.Attribute):
+                names.add(b.attr)
+        return "StrEnum" in names or ("str" in names and "Enum" in names)
+
+    def walk(body, prefix, top):
+        for cls in body:
+            if not isinstance(cls, ast.ClassDef) or cls.name.startswith("_"):
+                continue
+            if top and public is not None and cls.name not in public:
+                continue
+            name = prefix + cls.name
+            if is_enum(cls):
+                for stmt in cls.body:
+                    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                        target, value = stmt.targets[0], stmt.value
+                    elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                        target, value = stmt.target, stmt.value
+                    else:
+                        continue
+                    if isinstance(target, ast.Name) and is_str(value):
+                        out.append([name + "." + target.id, value.value])
+            walk(cls.body, name + ".", False)
+
+    walk(tree.body, "", True)
+    return out
+
+class Literals(ast.NodeVisitor):
+    def __init__(self):
+        self.out = []
+
+    def visit_Expr(self, node):
+        if not is_str(node.value):
+            self.generic_visit(node)
+
+    def visit_Constant(self, node):
+        if isinstance(node.value, str):
+            self.out.append([node.value, node.lineno])
+
+    def visit_JoinedStr(self, node):
+        fields = [v for v in node.values if isinstance(v, ast.FormattedValue)]
+        if not fields:
+            self.out.append(["".join(v.value for v in node.values), node.lineno])
+        for field in fields:
+            self.visit(field.value)
+            spec = field.format_spec
+            for inner in (spec.values if spec else []):
+                if isinstance(inner, ast.FormattedValue):
+                    self.visit(inner.value)
+
+result = {"vocab": {}, "scan": {}}
+for path in req["vocab"]:
+    result["vocab"][path] = members(ast.parse(open(path, encoding="utf-8").read(), path))
+for path in req["scan"]:
+    visitor = Literals()
+    visitor.visit(ast.parse(open(path, encoding="utf-8").read(), path))
+    result["scan"][path] = visitor.out
+json.dump(result, sys.stdout)
+`;
+
+function readPython(h, vocab, scan) {
+  if (vocab.length === 0) return { vocab: {}, scan: {} };
+  const r = h.run('python3', ['-I', '-c', PY_READER], {
+    input: JSON.stringify({ vocab, scan }),
+  });
+  if (r.status !== 0) {
+    throw new Error(
+      `${VOCAB_CONFIG}: python3 could not read the Python files (exit ${r.status}):\n${tail(r.stderr || String(r.error ?? ''))}`,
+    );
+  }
+  return json('python3', r.stdout);
+}
+
+function vocabConfig(h) {
+  let config;
+  try {
+    config = JSON.parse(h.read(VOCAB_CONFIG));
+  } catch (e) {
+    throw new Error(`${VOCAB_CONFIG} is not valid JSON: ${e.message}`, { cause: e });
+  }
+  const modules = config.modules;
+  if (
+    !Array.isArray(modules) ||
+    modules.length === 0 ||
+    !modules.every((m) => typeof m === 'string')
+  ) {
+    throw new Error(`${VOCAB_CONFIG} needs "modules": ["path/to/vocab.ts", ...]`);
+  }
+  for (const mod of modules) {
+    if (!h.exists(mod)) throw new Error(`${VOCAB_CONFIG}: vocab module ${mod} does not exist`);
+  }
+  return { modules, ignore: (config.ignore ?? []).map(globRegExp) };
+}
+
+// value -> member name, per language, from every vocab module.
+function vocabTables(h, modules, tsApi, pyVocab) {
+  const tables = { ts: new Map(), py: new Map() };
+  for (const mod of modules) {
+    const py = PY_EXT.test(mod);
+    const parsed = py ? pyVocab[mod] : tsVocab(tsApi, mod, h.read(mod));
+    if (parsed.length === 0) {
+      throw new Error(
+        `${VOCAB_CONFIG}: no string members found in ${mod} (expected an "as const" object, an enum or a StrEnum)`,
+      );
+    }
+    for (const [name, value] of parsed) {
+      if (value !== '' && !tables[py ? 'py' : 'ts'].has(value)) {
+        tables[py ? 'py' : 'ts'].set(value, name);
+      }
+    }
+  }
+  return tables;
+}
+
+const vocabLiteral = {
+  // Replaces the v3 `no-vocab-literal` ast-grep rule, whose regex was filled in by hand.
+  id: 'vocab-literal',
+  optIn: [VOCAB_CONFIG],
+  exts: VOCAB_EXT,
+  stages: ['edit', 'commit', 'push'],
+  scan: ({ files, h }) => {
+    const { modules, ignore } = vocabConfig(h);
+    const skip = new Set(modules.map((m) => h.rel(m)));
+    const candidates = (files ?? h.projectFiles(VOCAB_EXT)).filter(
+      (f) => !skip.has(f) && !TEST_FILE.test(f) && !ignore.some((re) => re.test(f)),
+    );
+    const pyModules = modules.filter((m) => PY_EXT.test(m));
+    const tsApi = pyModules.length < modules.length ? loadTypescript(h) : null;
+    const py = readPython(
+      h,
+      pyModules,
+      candidates.filter((f) => PY_EXT.test(f)),
+    );
+    const tables = vocabTables(h, modules, tsApi, py.vocab);
+    const found = [];
+    for (const file of candidates) {
+      const isPy = PY_EXT.test(file);
+      const table = tables[isPy ? 'py' : 'ts'];
+      if (table.size === 0) continue;
+      const read = isPy
+        ? py.scan[file].map(([value, line]) => ({ value, line }))
+        : tsLiterals(tsApi, file, h.read(file));
+      for (const { value, line } of read) {
+        const name = table.get(value);
+        if (name === undefined) continue;
+        found.push({
+          rule: name,
+          file,
+          line,
+          message: `use ${name}, not the raw string ${JSON.stringify(value)}. New values go in the vocab module.`,
+        });
+      }
+    }
+    return found;
+  },
+};
+
 // ── core: every repo ──
 
 // ls-lint reports { path: { ".ext": ["rule" | "exists:0 (found N)"] } }.
@@ -238,6 +624,7 @@ const core = {
             };
           }),
     },
+    vocabLiteral,
     {
       // Folder and extension naming. Tree rules, so it always runs whole. A banned extension
       // (`exists:0`) is reported on its directory with a count ("found 2"); it is expanded to one
@@ -415,7 +802,6 @@ const core = {
 
 // ── python: every tool runs through `uv run` ──
 
-const PY_EXT = /\.py$/;
 const uvRun = (...args) => ({ cmd: 'uv', args: ['run', ...args] });
 const inPyproject = (section) => ({
   file: 'pyproject.toml',
@@ -1256,4 +1642,140 @@ const cpp = {
   ],
 };
 
-export const PACKS = [core, ts, python, mule, salesforce, shell, docker, sql, rust, dart, cpp];
+// ── security: dependency advisories, own Semgrep rules, GitHub Actions audit ──
+
+// Lockfiles osv-scanner reads. It is given each one explicitly, so a lockfile it cannot parse fails.
+const LOCKFILE =
+  /(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|uv\.lock|poetry\.lock|Cargo\.lock|go\.mod|composer\.lock|Gemfile\.lock)$/;
+const WORKFLOW = /^\.github\/workflows\/.*\.ya?ml$/;
+const OSV_CONFIG = 'osv-scanner.toml';
+const SEMGREP_RULES = '.semgrep';
+const ZIZMOR_CONFIGS = ['.github/zizmor.yml', '.github/zizmor.yaml', 'zizmor.yml', 'zizmor.yaml'];
+
+// zizmor exits 10 to 14 by the highest severity it found, 0 when clean, 1 on a failure.
+const ZIZMOR_OK = [0, 10, 11, 12, 13, 14];
+
+const security = {
+  id: 'security',
+  detect: [LOCKFILE, WORKFLOW, /(^|\/)\.semgrep\//],
+  tools: [
+    {
+      // Known vulnerabilities in the lockfiles. Needs network access to the OSV database.
+      id: 'osv-scanner',
+      optIn: [OSV_CONFIG],
+      exts: LOCKFILE,
+      stages: ['push'],
+      run: ({ files, h }) => {
+        const locks = files ?? h.projectFiles(LOCKFILE);
+        return locks.length === 0
+          ? null
+          : {
+              cmd: 'osv-scanner',
+              args: [
+                'scan',
+                'source',
+                '--format',
+                'json',
+                '--config',
+                OSV_CONFIG,
+                ...locks.flatMap((f) => ['-L', f]),
+              ],
+            };
+      },
+      parse: (out) =>
+        (json('osv-scanner', out.stdout).results ?? []).flatMap((r) =>
+          (r.packages ?? []).flatMap((p) =>
+            (p.vulnerabilities ?? []).map((v) => ({
+              rule: v.id,
+              file: r.source.path,
+              message: `${p.package.name}@${p.package.version}: ${v.summary ?? v.details?.split('\n')[0] ?? v.id}`,
+            })),
+          ),
+        ),
+    },
+    {
+      // Only the rules in .semgrep/ run: nothing is fetched from the registry and no metrics are
+      // sent. A full-repo scan, so it is pre-push and CI only.
+      id: 'semgrep',
+      optIn: [`${SEMGREP_RULES}/rules.yml`, `${SEMGREP_RULES}/rules.yaml`],
+      exts: /\.(?:[cm]?[jt]sx?|py)$/,
+      stages: ['push'],
+      run: ({ files }) => ({
+        cmd: 'semgrep',
+        args: [
+          'scan',
+          '--metrics=off',
+          '--disable-version-check',
+          '--quiet',
+          '--json',
+          '--error',
+          '--config',
+          SEMGREP_RULES,
+          ...(files ?? ['.']),
+        ],
+      }),
+      // Exit 1 is "findings" (--error); 2 and up are failures. Rule ids carry the config folder
+      // as a prefix ("semgrep.js-eval"), so the rule is the part after the last dot.
+      parse: (out) =>
+        (json('semgrep', out.stdout).results ?? []).map((r) => ({
+          rule: r.check_id.split('.').at(-1),
+          file: r.path,
+          line: r.start?.line,
+          message: r.extra?.message ?? r.check_id,
+        })),
+    },
+    {
+      // Workflow audit (injection, excessive permissions, unpinned actions). Offline: no GitHub token needed.
+      id: 'zizmor',
+      optIn: ZIZMOR_CONFIGS,
+      exts: WORKFLOW,
+      stages: ['commit', 'push'],
+      ok: ZIZMOR_OK,
+      run: ({ files, h }) => {
+        const flows = files ?? h.projectFiles(WORKFLOW);
+        const config = ZIZMOR_CONFIGS.find((f) => h.exists(f));
+        return flows.length === 0
+          ? null
+          : {
+              cmd: 'zizmor',
+              args: [
+                '--offline',
+                '--format',
+                'json-v1',
+                '--no-progress',
+                '--config',
+                config,
+                ...flows,
+              ],
+            };
+      },
+      parse: (out) =>
+        json('zizmor', out.stdout)
+          .filter((f) => !f.ignored)
+          .map((f) => {
+            const at = f.locations.find((l) => l.symbolic.kind === 'Primary') ?? f.locations[0];
+            return {
+              rule: f.ident,
+              file: at.symbolic.key.Local.verbatim_path,
+              line: at.concrete.location.start_point.row + 1,
+              message: `${f.desc}: ${at.symbolic.annotation}`,
+            };
+          }),
+    },
+  ],
+};
+
+export const PACKS = [
+  core,
+  ts,
+  python,
+  mule,
+  salesforce,
+  shell,
+  docker,
+  sql,
+  rust,
+  dart,
+  cpp,
+  security,
+];

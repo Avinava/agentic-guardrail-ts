@@ -1,0 +1,7 @@
+# osv-scanner.toml: switches on the osv-scanner check of lockfiles (pre-push and CI).
+# It needs network access to the OSV database. Accept a finding only with a reason and an end date:
+#
+# [[IgnoredVulns]]
+# id = "GHSA-xxxx-xxxx-xxxx"
+# ignoreUntil = 2027-03-01
+# reason = "Not reachable: we never pass user input to the affected function."

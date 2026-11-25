@@ -4,7 +4,8 @@
 //   node --test scripts/packs-core-test.mjs
 
 import assert from 'node:assert/strict';
-import { readFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import {
@@ -92,7 +93,7 @@ describe('ast-grep', () => {
   beforeEach(() => {
     put('sgconfig.yml', 'ruleDirs:\n  - rules\n');
     fake('ast-grep', {
-      stdout: `${diag('no-vocab-literal', 0)}\n${diag('no-banned-identifier', 1)}\n`,
+      stdout: `${diag('no-color-literal', 0)}\n${diag('no-banned-identifier', 1)}\n`,
       stderr: 'Error: 2 error(s) found in code.\n',
       status: 1,
     });
@@ -101,11 +102,11 @@ describe('ast-grep', () => {
   it('keys findings ast-grep:<rule-id>|file and reports 1-based lines', () => {
     const r = g(['check']);
     assert.equal(r.status, 1);
-    assert.match(r.out, /src\/a\.ts:1 {2}ast-grep no-vocab-literal/);
+    assert.match(r.out, /src\/a\.ts:1 {2}ast-grep no-color-literal/);
     assert.match(r.out, /src\/a\.ts:2 {2}ast-grep no-banned-identifier/);
     assert.deepEqual(recordedCounts(), {
       'ast-grep:no-banned-identifier|src/a.ts': 1,
-      'ast-grep:no-vocab-literal|src/a.ts': 1,
+      'ast-grep:no-color-literal|src/a.ts': 1,
     });
     assert.equal(g(['check']).status, 0);
   });
@@ -115,7 +116,7 @@ describe('ast-grep', () => {
     assert.deepEqual(calls('ast-grep').at(-1), ['scan', '--json=stream', 'src/a.ts']);
     const r = postEdit('src/a.ts');
     assert.equal(r.status, 2);
-    assert.match(r.stderr, /ast-grep no-vocab-literal/);
+    assert.match(r.stderr, /ast-grep no-color-literal/);
   });
 
   it('fails loudly when the tool crashes', () => {
@@ -516,10 +517,7 @@ describe('a configured tool whose binary is missing fails, never skips', () => {
     rmSync(join(state.dir, 'node_modules/.bin/knip'));
     const r = g(['check']);
     assert.equal(r.status, 1);
-    assert.match(
-      r.out,
-      /knip is not installed\. Install devDependencies first/,
-    );
+    assert.match(r.out, /knip is not installed\. Install devDependencies first/);
   });
 
   for (const [file, text] of [
@@ -580,4 +578,55 @@ describe('markdownlint template', () => {
       assert.doesNotMatch(text, new RegExp(`"${formatting}"`));
     }
   });
+});
+
+describe('token drift rule (real ast-grep)', () => {
+  const real = spawnSync('which', ['ast-grep'], { encoding: 'utf8' }).stdout.trim();
+  const optional = join(
+    import.meta.dirname,
+    '..',
+    'templates',
+    'packs',
+    'core',
+    'ast-grep',
+    'optional',
+  );
+
+  it(
+    'bans colour literals outside the tokens file',
+    { skip: !real && 'ast-grep is not installed' },
+    () => {
+      const bin = join(state.dir, 'node_modules', '.bin', 'ast-grep');
+      rmSync(bin);
+      symlinkSync(real, bin);
+      put('sgconfig.yml', 'ruleDirs:\n  - rules\n');
+      for (const f of ['no-color-literal.yml', 'no-color-literal-tsx.yml']) {
+        put(`rules/${f}`, readFileSync(join(optional, f), 'utf8'));
+      }
+      put('src/a.ts', 'export const ok = 1;\n');
+      put('src/Button.spec.tsx', 'export const V = () => <i style={{ color: "#fff" }} />;\n');
+      put('src/tokens.tsx', 'export const V = () => <i style={{ color: "#fff" }} />;\n');
+      put('src/x.spec.ts', "export const a = '#fff';\n");
+      put('src/tokens/colors.ts', "export const brand = '#123456';\n");
+      assert.equal(g(['check']).status, 0);
+      put(
+        'src/colors.ts',
+        [
+          "export const a = '#fff';",
+          "export const b = 'border: 1px solid #A1B2C3';",
+          'export const c = `rgb(1, 2, 3)`;',
+          'export const d = "oklch(0.5 0.1 200)";',
+          "export const e = 'rgba(0,0,0,.5)';",
+          "export const ok1 = '#add-item';",
+          "export const ok2 = '#section';",
+          '',
+        ].join('\n'),
+      );
+      put('src/v.tsx', 'export const V = () => <i style={{ color: "#ff0000" }} />;\n');
+      assert.deepEqual(recordedCounts(), {
+        'ast-grep:no-color-literal|src/colors.ts': 5,
+        'ast-grep:no-color-literal-tsx|src/v.tsx': 1,
+      });
+    },
+  );
 });

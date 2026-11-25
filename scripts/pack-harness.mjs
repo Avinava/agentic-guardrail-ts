@@ -14,8 +14,10 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -54,6 +56,9 @@ const PATH_BINS = [
   'flutter',
   'clang-format',
   'pio',
+  'osv-scanner',
+  'semgrep',
+  'zizmor',
 ];
 
 // A fake binary. Which canned spec answers a call:
@@ -87,6 +92,16 @@ process.stdout.write(canned.stdout ?? '');
 process.stderr.write(canned.stderr ?? '');
 process.exitCode = canned.status ?? 0;
 `;
+
+// The TypeScript package the vocab-literal tool needs to read TS files (null when this checkout has
+// none installed: the TS tests then skip).
+export const TYPESCRIPT = (() => {
+  try {
+    return dirname(createRequire(import.meta.url).resolve('typescript/package.json'));
+  } catch {
+    return null;
+  }
+})();
 
 export const state = { dir: '', fakeDir: '' };
 
@@ -143,6 +158,7 @@ export function setup() {
     cpSync(join(SCRIPTS, f), join(state.dir, 'scripts', f));
   }
   installFakes(join(state.dir, 'node_modules', '.bin'), NODE_BINS);
+  if (TYPESCRIPT) symlinkSync(TYPESCRIPT, join(state.dir, 'node_modules', 'typescript'));
   installFakes(join(state.dir, '.path'), PATH_BINS);
   fake('oxlint', { stdout: '{"diagnostics":[]}' });
   git('add', '-A');

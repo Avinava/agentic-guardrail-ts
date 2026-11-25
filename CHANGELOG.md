@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [4.0.0] - 2026-11-25
+
+A security pack, a generated vocabulary check and an opt-in token drift rule. See [docs/packs.md](docs/packs.md) and [decision 0003](docs/decisions/0003-security-pack-and-vocab-literal.md).
+
+### Breaking
+- The `no-vocab-literal` ast-grep rule (`rules/no-vocab-literal.yml`) is removed, with no shim. Its regex had to be filled in by hand and drifted from the vocab module. The `vocab-literal` tool replaces it and reads the module itself. To migrate, write `guardrails/vocab.json` (`{"modules": ["src/vocab.ts"]}`), delete the old rule, run `check`, review, then `baseline --reset`: findings move from `ast-grep:no-vocab-literal|file` to `vocab-literal:<Name.Member>|file`. `setup-guardrails` and `guardrails-doctor` do this. See [Upgrading from 3.x](docs/packs.md#upgrading-from-3x-to-400-breaking).
+
+### Added
+- `security` pack, opt-in per tool: osv-scanner on lockfiles (`osv-scanner.toml`, pre-push and CI), semgrep with the pack's own MIT rules and metrics off (`.semgrep/rules.yml`, pre-push and CI), zizmor on `.github/workflows` (`.github/zizmor.yml`, pre-commit and up). Semgrep registry rules are not vendored: their licence is not open source.
+- `vocab-literal` tool in the core pack (`guardrails/vocab.json`): flags raw strings equal to a member of a TypeScript `as const` object or `enum`, or a Python `StrEnum`, outside the vocab module and tests. It reads source with the `typescript` package and Python's `ast`, not a hand-written scanner.
+- Token drift: opt-in ast-grep rules (`no-color-literal.yml`, `no-color-literal-tsx.yml`) that ban hex, `rgb()`, `hsl()` and `oklch()` literals outside the tokens file. CSS is not covered: the gate has no stylelint tool.
+- `scripts/packs-security-test.mjs` and `scripts/packs-vocab-test.mjs`, with real-binary runs for osv-scanner, semgrep, zizmor and ast-grep that skip when the tool is missing.
+
 ## [3.1.0] - 2026-10-30
 
 A language-agnostic engine with opt-in packs. Nothing is on by default and existing installs behave as before. See [docs/packs.md](docs/packs.md) and [decision 0002](docs/decisions/0002-packs.md).

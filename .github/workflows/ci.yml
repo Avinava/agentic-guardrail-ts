@@ -34,6 +34,8 @@ jobs:
           done
       - name: Scripts parse
         run: for f in scripts/*.mjs templates/shared/scripts/*.mjs; do node --check "$f" || exit 1; done
+      - name: TypeScript parser for the vocab-literal tests
+        run: npm install --no-save --no-package-lock "typescript@npm:@typescript/typescript6@^6.0.2"
       - name: Opt-in tool wiring (fake tool output, no network)
         run: node --test scripts/packs-*-test.mjs
 

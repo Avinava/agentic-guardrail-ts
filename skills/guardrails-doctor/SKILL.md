@@ -52,6 +52,13 @@ you to apply the suggested wave.
 - **Packs.** Run `node scripts/guardrails.mjs packs`. Report stacks that are detected but have no
   tool on (for example `mule: detected` with every tool `off`) as an offer, not a defect: packs
   are opt-in. Report a tool that is `on` but whose binary is missing.
+- **Old vocab rule (4.0.0 migration).** If `rules/no-vocab-literal.yml` exists, the repo still has
+  the v3 hand-filled ast-grep rule, which 4.0.0 replaced with the `vocab-literal` tool. Offer the
+  migration and apply it only with approval: write `guardrails/vocab.json` with the vocab module's
+  path (the module the old regex was built from), delete the old rule (keep `sgconfig.yml` if other
+  rules remain), run `node scripts/guardrails.mjs check`, show the new
+  `vocab-literal:<Name.Member>|file` findings next to the old `ast-grep:no-vocab-literal|file` keys,
+  and after approval run `baseline --reset`. Steps: `setup-guardrails` Wave 8, "Upgrading from 3.x".
 - **CI jobs.** There is no tool for this; read the workflow files. Every enabled pack with ci-stage
   tools (python coverage, MUnit, Apex coverage, Flutter coverage, `pio check`) needs one job that
   runs it (`GUARDRAILS_PACKS=<pack>`), and the base job should set `GUARDRAILS_CI_PACKS: none`.
