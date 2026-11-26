@@ -305,7 +305,7 @@ on when its config file exists, so enabling a pack is writing its files. For eac
 | rust | `rustfmt.toml`, `clippy.toml`, `deny.toml` | Run `cargo deny init` for the full deny policy. Add the machete metadata table if wanted. | `cargo-deny`, `cargo-machete` |
 | dart (experimental) | `analysis_options.yaml` | Fake-output tests only. Offer only if the user asks. Use the project's lint package. | Dart or Flutter SDK |
 | security | `osv-scanner.toml`, `.semgrep/rules.yml`, `.github/zizmor.yml` | Offer each tool on its own: osv-scanner needs a lockfile and network, semgrep runs only the rules in `.semgrep/` (add the project's own), zizmor needs `.github/workflows`. Add the CI install step to the `verify` job; no separate job. | `osv-scanner`, `semgrep`, `zizmor` binaries |
-| playwright | `guardrails/playwright.json` | Files under `e2e/` and files that import `@playwright/test` (also through relative imports; not for browser launchers such as `chromium` alone) are checked. Add Playwright's `testDir` to `include` if its specs import through a path alias or workspace package. On a retrofit, record the debt with the baseline; do not rewrite the suite. Tell the user a skip must be `test.skip(condition, 'reason')`: a static `test.skip` or `test.fixme` fails even with a `@quarantine-YYYY-MM-DD` tag (a quarantined test still runs, in a quarantine job). The base hooks and `verify` already run it. | npm `@ast-grep/cli` |
+| playwright | `guardrails/playwright.json` | Files under `e2e/` and files that import `@playwright/test` (also through relative imports; not scripts that only use browser launchers such as `chromium`) are checked. Add Playwright's `testDir` to `include` if its specs import through a path alias or workspace package. On a retrofit, record the debt with the baseline; do not rewrite the suite. Tell the user a skip must be `test.skip(condition, 'reason')`: a static `test.skip` or `test.fixme` fails even with a `@quarantine-YYYY-MM-DD` tag (a quarantined test still runs, in a quarantine job). The base hooks and `verify` already run it. | npm `@ast-grep/cli` |
 | cpp (experimental) | `.clang-format`, `check_tool` in `platformio.ini` | Fake-output tests only. Offer only if the user asks. Match the existing style. `pio check` downloads toolchains. | `clang-format`; PlatformIO |
 
 **Upgrading from 3.x (4.0.0, breaking).** If `rules/no-vocab-literal.yml` exists (the hand-filled ast-grep rule):
@@ -714,6 +714,8 @@ const notDue = () => configuredTools().filter((t) => !dueFull(t));
 const isNotDueKey = (key) => notDue().some((t) => key.startsWith(`${t.id}:`));
 
 const FULL_ONLY = 'full check only';
+// A plain full check defers these too: only the ci stage runs them.
+const CI_ONLY = 'deferred, CI only';
 const NO_INPUT = 'no input';
 
 // Runs the due tools. An enabled tool that does not run is recorded in `skipped` (id -> why).
@@ -722,7 +724,7 @@ function collect(files, stage = 'commit', skipped = new Map()) {
   const found = [];
   for (const tool of activeTools()) {
     if (all ? tool.metric || !tool.stages.includes(stage) : tool.metric || !dueFull(tool)) {
-      if (all) skipped.set(tool.id, FULL_ONLY);
+      if (all) skipped.set(tool.id, needsCi(tool) ? CI_ONLY : FULL_ONLY);
       continue;
     }
     const own = all ? all.filter((f) => !tool.exts || tool.exts.test(f)) : null;
@@ -1735,13 +1737,21 @@ const PY_READER = `
 import ast, json, sys
 req = json.load(sys.stdin)
 
-def enum_aliases(tree):
+def imported_from(tree, modules):
     names = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "enum":
+        if isinstance(node, ast.ImportFrom) and node.module in modules:
             for alias in node.names:
                 names[alias.asname or alias.name] = alias.name
     return names
+
+# The names the enum module itself is bound to (\`import enum as e\`).
+def enum_modules(tree):
+    return {
+        alias.asname or alias.name
+        for node in ast.walk(tree) if isinstance(node, ast.Import)
+        for alias in node.names if alias.name == "enum"
+    }
 
 def is_str(node):
     return isinstance(node, ast.Constant) and isinstance(node.value, str)
@@ -1754,7 +1764,8 @@ def exported_names(tree):
     return None
 
 def members(tree):
-    aliases = enum_aliases(tree)
+    aliases = imported_from(tree, ("enum",))
+    modules = enum_modules(tree)
     public = exported_names(tree)
     out = []
 
@@ -1782,7 +1793,7 @@ def members(tree):
         f = node.func
         if isinstance(f, ast.Name):
             return aliases.get(f.id) == "auto"
-        return isinstance(f, ast.Attribute) and f.attr == "auto"
+        return isinstance(f, ast.Attribute) and f.attr == "auto" and getattr(f.value, "id", None) in modules
 
     def walk(body, prefix, top):
         for cls in body:
@@ -1811,8 +1822,10 @@ def members(tree):
     return out
 
 class Literals(ast.NodeVisitor):
-    def __init__(self):
+    def __init__(self, tree):
         self.out = []
+        names = imported_from(tree, ("typing", "typing_extensions"))
+        self.literal = {"Literal"} | {alias for alias, name in names.items() if name == "Literal"}
 
     def visit_Expr(self, node):
         if not is_str(node.value):
@@ -1832,7 +1845,7 @@ class Literals(ast.NodeVisitor):
     def visit_Subscript(self, node):
         self.visit(node.value)
         owner = getattr(node.value, "id", getattr(node.value, "attr", None))
-        if not is_str(node.slice) or owner == "Literal":
+        if not is_str(node.slice) or owner in self.literal:
             self.visit(node.slice)
 
     def visit_Call(self, node):
@@ -1858,8 +1871,9 @@ result = {"vocab": {}, "scan": {}}
 for path in req["vocab"]:
     result["vocab"][path] = members(ast.parse(open(path, encoding="utf-8").read(), path))
 for path in req["scan"]:
-    visitor = Literals()
-    visitor.visit(ast.parse(open(path, encoding="utf-8").read(), path))
+    tree = ast.parse(open(path, encoding="utf-8").read(), path)
+    visitor = Literals(tree)
+    visitor.visit(tree)
     result["scan"][path] = visitor.out
 json.dump(result, sys.stdout)
 `;
@@ -1924,6 +1938,12 @@ function vocabTables(h, { modules, excluded }, tsApi, pyVocab) {
     const table = tables[m.py ? 'py' : 'ts'];
     if (m.value === '' || table.has(m.value) || excluded.some((re) => re.test(m.name))) continue;
     table.set(m.value, m);
+  }
+  // Excluding every member of a language would switch its check off and still pass.
+  if (all.some((m) => m.value !== '' && tables[m.py ? 'py' : 'ts'].size === 0)) {
+    throw new Error(
+      `${VOCAB_CONFIG}: "excludeMembers" removes every member of ${tables.ts.size === 0 && all.some((m) => !m.py) ? 'the TypeScript' : 'the Python'} vocab modules, so nothing would be checked. Narrow the globs.`,
+    );
   }
   return tables;
 }
@@ -3611,15 +3631,35 @@ function pwSilences(comment) {
     .some((id) => id === '' || Object.hasOwn(PW_MESSAGES, id));
 }
 
-// `import { chromium } from ...` and its re-export or require forms: braces that name only browser
-// launchers, with no default or namespace binding beside them.
-function pwLauncherOnly(statement) {
-  const named = /^\s*(?:import|export|const|let|var)(?:\s+type)?\s*\{([^}]*)\}/.exec(statement);
-  const names = (named?.[1] ?? '')
+// The names an import, re-export or require takes from its module, from `{ a, b as c }` or from a
+// default binding; null when it takes the whole module.
+function pwImported(statement) {
+  const head = /^\s*(?:import|export|const|let|var)(?:\s+type\b)?\s*(?:\{([^}]*)\}|([\w$]+))/.exec(
+    statement,
+  );
+  if (!head) return null;
+  return (head[1] ?? head[2])
     .split(',')
     .map((s) => s.trim().split(/\s*:\s*|\s+as\s+/)[0])
     .filter(Boolean);
-  return names.length > 0 && names.every((name) => PW_LAUNCHERS.has(name));
+}
+
+// A call of `test(...)` or `test.x(...)`, not a method such as `pattern.test(...)`.
+const PW_TEST_CALL = /(?<![.\w$])test(?:\.\w+)*\s*\(/;
+const PW_TEST_NAMES = new Set(['test', 'expect']);
+
+// Whether `import { chromium } from ...` is all that makes a file Playwright's: braces that name
+// only browser launchers, in a file that neither imports `test` or `expect` from anywhere (a path
+// alias included) nor calls `test(...)`. Such a file is a script.
+function pwScriptImports(text, imports) {
+  const isTest =
+    PW_TEST_CALL.test(text) ||
+    imports.some((m) => pwImported(m[0])?.some((name) => PW_TEST_NAMES.has(name)));
+  return (m) => {
+    if (isTest || !PW_PACKAGES.has(m[1]) || !/^[^'"]*\{/.test(m[0])) return false;
+    const names = pwImported(m[0]);
+    return names !== null && names.length > 0 && names.every((name) => PW_LAUNCHERS.has(name));
+  };
 }
 
 // Whether a file is, or reaches through relative imports, a module that imports Playwright's tests
@@ -3629,11 +3669,12 @@ function pwImportsPlaywright(h) {
   const none = new Set();
   const read = (file) => {
     if (!specifiers.has(file)) {
+      const text = h.read(file);
+      const imports = [...text.matchAll(PW_IMPORT)];
+      const script = pwScriptImports(text, imports);
       specifiers.set(
         file,
-        [...h.read(file).matchAll(PW_IMPORT)]
-          .filter((m) => !(PW_PACKAGES.has(m[1]) && pwLauncherOnly(m[0])))
-          .map((m) => m[1]),
+        imports.filter((m) => !script(m)).map((m) => m[1]),
       );
     }
     return specifiers.get(file);

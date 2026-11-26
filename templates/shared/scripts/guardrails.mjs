@@ -350,6 +350,8 @@ const notDue = () => configuredTools().filter((t) => !dueFull(t));
 const isNotDueKey = (key) => notDue().some((t) => key.startsWith(`${t.id}:`));
 
 const FULL_ONLY = 'full check only';
+// A plain full check defers these too: only the ci stage runs them.
+const CI_ONLY = 'deferred, CI only';
 const NO_INPUT = 'no input';
 
 // Runs the due tools. An enabled tool that does not run is recorded in `skipped` (id -> why).
@@ -358,7 +360,7 @@ function collect(files, stage = 'commit', skipped = new Map()) {
   const found = [];
   for (const tool of activeTools()) {
     if (all ? tool.metric || !tool.stages.includes(stage) : tool.metric || !dueFull(tool)) {
-      if (all) skipped.set(tool.id, FULL_ONLY);
+      if (all) skipped.set(tool.id, needsCi(tool) ? CI_ONLY : FULL_ONLY);
       continue;
     }
     const own = all ? all.filter((f) => !tool.exts || tool.exts.test(f)) : null;

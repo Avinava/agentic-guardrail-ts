@@ -135,6 +135,14 @@ describe('tools a run did not execute are named', () => {
     }
   });
 
+  it('a scoped clean line calls ci-stage tools deferred, as a full check does', () => {
+    put('pom.xml', '<artifactId>munit-maven-plugin</artifactId>\n');
+    const scoped = g(['check', '--files', 'src/a.ts']);
+    assert.match(scoped.out, /jscpd, knip, semgrep \(full check only\)/);
+    assert.match(scoped.out, /munit \(deferred, CI only\)/);
+    assert.match(g(['check']).out, /deferred: munit/);
+  });
+
   it('a full run says which enabled tool had no input', () => {
     const r = g(['check']);
     assert.equal(r.status, 0, r.out);

@@ -20,7 +20,7 @@ The `prepare` script runs `lefthook install` on every install.
 
 ## Check is clean but a tool never ran
 
-A scoped run (`--changed`, `--files`) looks only at those files, and `--changed` means uncommitted files. Its clean line names the enabled tools it did not run, as `full check only` (Knip, semgrep, osv-scanner, metrics) or `no input` (no file of theirs in scope). A full `check` prints `not run: <tools> (no input)` for an enabled tool that found nothing to read, for example zizmor with no workflow files.
+A scoped run (`--changed`, `--files`) looks only at those files, and `--changed` means uncommitted files. Its clean line names the enabled tools it did not run, as `full check only` (Knip, semgrep, osv-scanner, metrics), `deferred, CI only` (ci-stage tools such as test suites) or `no input` (no file of theirs in scope). A full `check` prints `not run: <tools> (no input)` for an enabled tool that found nothing to read, for example zizmor with no workflow files.
 
 Some steps are skipped without a message:
 

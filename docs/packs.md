@@ -88,7 +88,7 @@ A tool declares:
 | `scan(ctx)` | Replaces `run` and `parse` for checks done in JS (naming, metadata, tools run in a loop). A finding may set `always: true` for "this whole tool failed" (a test run, a policy, an invalid file): it is never counted in the baseline, so `baseline` refuses to run while one exists and a later failure of the same kind still fails. |
 | `metric`, `measure(ctx)` | A number ratchet instead of findings. |
 
-**Nothing is skipped silently.** An enabled tool can be left out of a run: it is not due at that stage, or it has nothing to read (`run` returns null). A scoped clean line names every such tool, for example `clean (1 file(s)); not run: knip, semgrep (full check only); zizmor (no input)`. A full run prints `not run: <tools> (no input)`; ci-stage and other jobs' tools are reported as described below.
+**Nothing is skipped silently.** An enabled tool can be left out of a run: it is not due at that stage, or it has nothing to read (`run` returns null). A scoped clean line names every such tool, for example `clean (1 file(s)); not run: knip, semgrep (full check only); zizmor (no input)`. ci-stage tools are listed as `(deferred, CI only)`: a plain full check does not run them either. A full run prints `not run: <tools> (no input)`; ci-stage and other jobs' tools are reported as described below.
 
 A file name that starts with `-` (for example `--config=x.md`) is passed to tools as `./--config=x.md`, so no tool can read it as an option. Tools that run their own commands (`scan` tools) wrap paths with `h.safe`, which does the same for directories such as a Mule app named `-legacy`.
 
@@ -161,7 +161,7 @@ Language-agnostic tools. Templates: `templates/packs/core/`. Each switches on wi
 }
 ```
 
-`excludeMembers` takes globs over member names, for display copy and generic words (`item`, `title`) that would flag unrelated strings. An excluded member is not in the table; another member with the same value still is.
+`excludeMembers` takes globs over member names, for display copy and generic words (`item`, `title`) that would flag unrelated strings. An excluded member is not in the table; another member with the same value still is. Globs that remove every member of a language (TypeScript or Python) fail the gate.
 
 **ls-lint** (npm `@ls-lint/ls-lint`). Owns folder names, banned extensions (`.spec.ts: exists:0`) and the case of non-code files. It sets no case for `.ts`, `.tsx`, `.js` or `.mjs`: Oxlint `unicorn/filename-case` owns those (see [the split](./known-conflicts.md#ls-lint-and-unicornfilename-case)). It scans the whole tree. A banned extension is reported on its directory, so it is caught on pre-push and CI rather than in the edit hook.
 
@@ -333,7 +333,7 @@ Templates: `templates/packs/playwright/`. Lint rules for Playwright suites, swit
 { "include": ["**/e2e/**"], "ignore": [] }
 ```
 
-Those are also the defaults when a key is left out. A file is checked when it is not ignored and either matches `include` or imports `@playwright/test` (or `playwright/test`), whatever its name. The import may be indirect: through relative imports, for example a local fixtures module. An import that names only browser launchers (`chromium`, `firefox`, `webkit`, `devices`, `_android`, `_electron`) marks a script, not a test, and does not count; a file under `include` is checked whatever it imports, so list scripts there under `ignore` (`"ignore": ["e2e/scripts/**"]`). So `tests/checkout.test.ts` is checked and a Vitest `*.spec.ts` is not. Imports are read as `import`, `export ... from`, `require()` and `import()` at the start of a line. Path aliases (`@/fixtures`) and workspace package names are not followed: add those suites to `include`. `testDir` in `playwright.config` is not read. Only JavaScript and TypeScript files (`.js`, `.jsx`, `.ts`, `.tsx` and their `.mjs`, `.cjs`, `.mts`, `.cts` forms) are read.
+Those are also the defaults when a key is left out. A file is checked when it is not ignored and either matches `include` or imports `@playwright/test` (or `playwright/test`), whatever its name. The import may be indirect: through relative imports, for example a local fixtures module. An import that names only browser launchers (`chromium`, `firefox`, `webkit`, `devices`, `_android`, `_electron`) marks a script and does not count, unless the same file imports `test` or `expect` from any module (a path alias included) or calls `test(...)`; a file under `include` is checked whatever it imports, so list scripts there under `ignore` (`"ignore": ["e2e/scripts/**"]`). So `tests/checkout.test.ts` is checked and a Vitest `*.spec.ts` is not. Imports are read as `import`, `export ... from`, `require()` and `import()` at the start of a line. Path aliases (`@/fixtures`) and workspace package names are not followed: add those suites to `include`. `testDir` in `playwright.config` is not read. Only JavaScript and TypeScript files (`.js`, `.jsx`, `.ts`, `.tsx` and their `.mjs`, `.cjs`, `.mts`, `.cts` forms) are read.
 
 | Rule | Fails on |
 | --- | --- |

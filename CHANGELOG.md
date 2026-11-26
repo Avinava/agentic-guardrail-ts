@@ -10,7 +10,7 @@ Fixes for defects found on real repositories. Copy the new scripts (and `.semgre
 
 ### Changed
 - playwright: a static `test.skip` or `test.fixme` is a finding even under a live `@quarantine` tag. Conditional skips are unchanged. Drop `.skip`, keep the tag and run the tagged tests in a quarantine job.
-- playwright: an import of browser launchers alone (`chromium`, ...) no longer puts a file outside `include` in scope; waits inside a `.route()` handler are accepted.
+- playwright: a script that imports only browser launchers (`chromium`, ...), with no `test` or `expect` import and no `test(...)` call, is no longer in scope outside `include`; waits inside a `.route()` handler are accepted.
 - vocab-literal: property names and keys are no longer flagged; `as const` string arrays and `StrEnum` `auto()` members are now read, so new findings can appear.
 
 ### Added

@@ -31,7 +31,7 @@ Oxlint 1.95.0 and 1.90.0 with `eslint-plugin-playwright` 2.12.2, on scratch spec
 5. Conditionals are limited to `if` and `switch` directly in a test or step body, without throw-only guards. Wider forms (ternaries, callbacks, hooks) were mostly legitimate.
 6. No "test without assertions" rule. Assertions live in page objects, helpers and implicit waits, and no syntax pattern separates those from an empty test.
 7. `ast-grep-ignore` cannot silence these rules. ast-grep has no flag to ignore suppression comments, so it scans temporary copies in which the comment is renamed (same length, so lines hold). A comment that tries is also a finding. Exceptions go through the reviewed baseline.
-8. A file is in scope when it matches `include` (default `**/e2e/**`) or imports `@playwright/test`, directly or through relative imports. Since 4.2.0 an import of browser launchers alone does not count: those files are scripts. A `*.spec.*` default pulled in Vitest and Jest files and missed Playwright `*.test.ts`. Reading `testDir` from `playwright.config` was dropped: the config is code.
+8. A file is in scope when it matches `include` (default `**/e2e/**`) or imports `@playwright/test`, directly or through relative imports. Since 4.2.0 an import of browser launchers alone does not count, unless the file also imports `test` or `expect` or calls `test(...)`: otherwise it is a script. A `*.spec.*` default pulled in Vitest and Jest files and missed Playwright `*.test.ts`. Reading `testDir` from `playwright.config` was dropped: the config is code.
 
 ## Consequences
 

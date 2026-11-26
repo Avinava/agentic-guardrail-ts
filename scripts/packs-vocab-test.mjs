@@ -551,6 +551,53 @@ describe('vocab-literal, lists, auto() and excluded members', { skip: NO_TS || N
     });
   });
 
+  it('Python: only enum auto() counts, not another auto()', () => {
+    put(
+      'app/vocab.py',
+      [
+        'from enum import StrEnum',
+        'from cache import auto',
+        'import cache',
+        'class S(StrEnum):',
+        '    Alpha = cache.auto()',
+        '    Beta = auto()',
+        '    C = "c"',
+        '',
+      ].join('\n'),
+    );
+    config(['app/vocab.py']);
+    put('app/svc.py', 'v = ["alpha", "beta"]\n');
+    assert.equal(g(['check']).status, 0);
+  });
+
+  it('Python: a subscript of an aliased Literal is a value', () => {
+    put('app/vocab.py', 'from enum import StrEnum\nclass S(StrEnum):\n    READY = "ready"\n');
+    config(['app/vocab.py']);
+    put('app/a.py', 'from typing import Literal as L\nx: L["ready"]\n');
+    put('app/b.py', 'from typing_extensions import Literal as Lit\nx: Lit["ready"]\n');
+    put('app/c.py', 'import typing as t\nx: t.Literal["ready"]\n');
+    put('app/d.py', 'from mylib import L\nx = L["ready"]\n');
+    assert.deepEqual(recordedCounts(), {
+      'vocab-literal:S.READY|app/a.py': 1,
+      'vocab-literal:S.READY|app/b.py': 1,
+      'vocab-literal:S.READY|app/c.py': 1,
+    });
+  });
+
+  it('fails when excludeMembers removes every member of a language', () => {
+    put('src/vocab.ts', 'export const Status = { Open: "open" } as const;\n');
+    put('app/vocab.py', 'from enum import StrEnum\nclass S(StrEnum):\n    READY = "ready"\n');
+    put('src/svc.ts', 'export const v = "open";\n');
+    config(['src/vocab.ts'], { excludeMembers: ['*'] });
+    let r = g(['check']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /removes every member of the TypeScript vocab modules/);
+    config(['src/vocab.ts', 'app/vocab.py'], { excludeMembers: ['S.*'] });
+    r = g(['check']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /removes every member of the Python vocab modules/);
+  });
+
   it('excludeMembers drops members by name, nested ones too', () => {
     put(
       'src/vocab.ts',

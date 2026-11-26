@@ -202,18 +202,39 @@ describe('scope (real ast-grep)', { skip }, () => {
   });
 
   it('leaves a script that imports only browser launchers alone, outside include', () => {
-    const using = (line) => `${line}\n${BAD}`;
+    const using = (line) => `${line}\nawait page.waitForTimeout(1);\n`;
     put('scripts/shots.mjs', using("import { chromium, devices } from '@playwright/test';"));
     put('scripts/cjs.js', using("const { chromium: browser } = require('@playwright/test');"));
+    put('scripts/dynamic.mjs', using("const { webkit } = await import('playwright/test');"));
+    // `.test(` on another object is not a test call.
     put(
-      'scripts/dynamic.mjs',
-      using("const { webkit } = await import('playwright/test');"),
+      'scripts/regex.mjs',
+      using("import { chromium } from '@playwright/test';\n/x/.test(name);"),
     );
     put('e2e/shots.ts', using("import { chromium } from '@playwright/test';"));
     put('tests/both.ts', using("import { chromium, test } from '@playwright/test';"));
     put('tests/page.ts', using("import type { Page } from '@playwright/test';"));
     put('tests/two.ts', using("import { chromium } from '@playwright/test';\nimport './page';"));
     assert.deepEqual(waits(), ['e2e/shots.ts', 'tests/both.ts', 'tests/page.ts', 'tests/two.ts']);
+  });
+
+  it('keeps a file that imports test or expect from anywhere, or calls test()', () => {
+    const using = (line) =>
+      `import { chromium } from '@playwright/test';\n${line}\nawait page.waitForTimeout(1);\n`;
+    put('tests/alias.ts', using("import { test, expect } from '@/e2e/fixtures';"));
+    put('tests/renamed.ts', using("import {\n  test as it,\n} from '@acme/fixtures';"));
+    put('tests/expect.ts', using("const { expect } = require('#fixtures');"));
+    put('tests/default.ts', using("import test from '~/fixtures';"));
+    put('tests/calls.ts', using("test('pays', async () => {});"));
+    put('tests/chain.ts', using("test.describe('group', () => {});"));
+    assert.deepEqual(waits(), [
+      'tests/alias.ts',
+      'tests/calls.ts',
+      'tests/chain.ts',
+      'tests/default.ts',
+      'tests/expect.ts',
+      'tests/renamed.ts',
+    ]);
   });
 
   it('ignore beats an import of Playwright', () => {
