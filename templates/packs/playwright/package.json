@@ -1,0 +1,5 @@
+{
+  "devDependencies": {
+    "@ast-grep/cli": "^0.51.0"
+  }
+}

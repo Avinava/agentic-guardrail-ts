@@ -6,7 +6,7 @@ description: >
   Knip dead code, Vitest coverage floors, lefthook git hooks, gitleaks, commitlint, CI,
   and agent hooks that lint every edit. Existing debt is recorded in a ratchet baseline
   so only new problems block. Opt-in packs extend the same gate to other stacks (Python, Mule,
-  Salesforce, shell, Docker, SQL, Rust, Dart, C++), to security scanning, and to docs, spelling, naming and duplication.
+  Salesforce, shell, Docker, SQL, Rust, Dart, C++), to security scanning, Playwright e2e suites, and to docs, spelling, naming and duplication.
   Use for "set up guardrails", "add linting/hooks for agents", "harden this repo for AI coding",
   "add guardrails for Mule/Salesforce/Python", or upgrading a v2 guardrail setup.
 ---
@@ -101,7 +101,8 @@ Read; don't change anything yet. Record each answer for the gap report.
    `uv.lock` (python), `mule-artifact.json` or `src/main/mule/*.xml` (mule), `sfdx-project.json`
    (salesforce), `*.sh` (shell), `Dockerfile*` or `*compose*.yml` (docker), `*.sql` (sql),
    `Cargo.toml` (rust), `pubspec.yaml` (dart), `platformio.ini` or `.clang-format` (cpp),
-   `.github/workflows/` (actionlint, zizmor), a lockfile (osv-scanner). After Wave 1 installs the script, run `packs` on it
+   `.github/workflows/` (actionlint, zizmor), a lockfile (osv-scanner),
+   `playwright.config.*` (playwright). After Wave 1 installs the script, run `packs` on it
    (`node scripts/guardrails.mjs packs`) to print the same detection and which tools are on. Packs beyond `ts` are opt-in: list the
    detected ones in the gap report and enable only the ones the user picks.
 7. **Mode.**
@@ -296,6 +297,7 @@ on when its config file exists, so enabling a pack is writing its files. For eac
 | rust | `rustfmt.toml`, `clippy.toml`, `deny.toml` | Run `cargo deny init` for the full deny policy. Add the machete metadata table if wanted. | `cargo-deny`, `cargo-machete` |
 | dart (experimental) | `analysis_options.yaml` | Fake-output tests only. Offer only if the user asks. Use the project's lint package. | Dart or Flutter SDK |
 | security | `osv-scanner.toml`, `.semgrep/rules.yml`, `.github/zizmor.yml` | Offer each tool on its own: osv-scanner needs a lockfile and network, semgrep runs only the rules in `.semgrep/` (add the project's own), zizmor needs `.github/workflows`. Add the CI install step to the `verify` job; no separate job. | `osv-scanner`, `semgrep`, `zizmor` binaries |
+| playwright | `guardrails/playwright.json` | Files under `e2e/` and files that import `@playwright/test` (also through relative imports) are checked. Add Playwright's `testDir` to `include` if its specs import through a path alias or workspace package. On a retrofit, record the debt with the baseline; do not rewrite the suite. Tell the user a skip now needs `@quarantine-YYYY-MM-DD` or `test.skip(condition, 'reason')`. The base hooks and `verify` already run it. | npm `@ast-grep/cli` |
 | cpp (experimental) | `.clang-format`, `check_tool` in `platformio.ini` | Fake-output tests only. Offer only if the user asks. Match the existing style. `pio check` downloads toolchains. | `clang-format`; PlatformIO |
 
 **Upgrading from 3.x (4.0.0, breaking).** If `rules/no-vocab-literal.yml` exists (the hand-filled ast-grep rule):
@@ -1264,8 +1266,9 @@ try {
 //   scan(ctx) replaces run+parse for checks done in JS
 //   metric + measure(ctx)  a number ratchet instead of findings: { name, direction, unit, advice }
 
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { basename, extname, join, posix } from 'node:path';
 
 const TS_EXT = /\.[cm]?[jt]sx?$/;
 const MD_EXT = /\.mdx?$/;
@@ -3011,6 +3014,495 @@ const security = {
   ],
 };
 
+// ── playwright: e2e hygiene (fixed waits, focus, skips and quarantine, conditionals) ──
+//
+// ast-grep finds the code shapes, with rules generated here; the date logic of the quarantine tag
+// is done in JS. See docs/decisions/0004-playwright-pack.md for why not eslint-plugin-playwright.
+
+const PW_CONFIG = 'guardrails/playwright.json';
+const PW_DEFAULTS = { include: ['**/e2e/**'], ignore: [] };
+const PW_BATCH = 200;
+// Rules that only feed the quarantine logic.
+const PW_HELPERS = ['scope', 'tag'];
+// A comment that would silence ast-grep is renamed (same length) in the copy that is scanned, so it
+// hides nothing and can still be reported.
+const PW_IGNORE = 'ast-grep-ignore';
+const PW_NEUTRAL = 'ast-grep~ignore';
+// A file outside "include" is an e2e file when it imports one of these, itself or through relative
+// imports (a fixtures module).
+const PW_PACKAGES = new Set(['@playwright/test', 'playwright/test']);
+// Static imports and re-exports, `require()` and `import()`, each starting its own line.
+const PW_IMPORT =
+  /^[ \t]*(?:(?:import|export)\b(?:[^'"`;]*?\bfrom)?[ \t]*|(?:(?:const|let|var)\b[^=;]*=[ \t]*)?(?:await[ \t]+)?(?:require|import)\([ \t]*)['"]([^'"\n]+)['"]/gm;
+const PW_RESOLVE = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
+
+// A call chain that starts at a Playwright test object: test, test.describe.serial, test.info(),
+// and fixture aliases named like one (authTest).
+const PW_TEST = '(test|it|setup|teardown|[A-Za-z0-9_]*Test)';
+const PW_CHAIN = `^(${PW_TEST}|describe|testInfo)(\\.[A-Za-z]+(\\(\\))?)*$`;
+
+const PW_TIMER = '^((window|globalThis|global)\\.)?setTimeout$';
+
+// The n-th named child, not counting comments: an argument or a statement.
+const pwNth = (position) => ({ position, ofRule: { not: { kind: 'comment' } } });
+const pwCallee = (rule) => ({ has: { field: 'function', ...rule } });
+const isGlobList = (v) => Array.isArray(v) && v.every((g) => typeof g === 'string' && g !== '');
+
+// One rule file per run: every rule once per ast-grep language, so each file is covered whichever
+// of the three parses it. The grammars differ only in how a parameter is spelled.
+function pwRules(language) {
+  const js = language === 'JavaScript';
+  const fn = { any: [{ kind: 'arrow_function' }, { kind: 'function_expression' }] };
+  const anyFn = {
+    any: [
+      'arrow_function',
+      'function_expression',
+      'function_declaration',
+      'generator_function',
+      'generator_function_declaration',
+      'method_definition',
+    ].map((kind) => ({ kind })),
+  };
+  const text = { any: [{ kind: 'string' }, { kind: 'template_string' }] };
+  const arg = (n, rule) => ({
+    has: { field: 'arguments', has: { all: [{ nthChild: pwNth(n) }, rule] } },
+  });
+  const chain = pwCallee({ regex: PW_CHAIN });
+  // `.only(...)` and friends on a test object, or on any alias called like a test: (title, fn).
+  const modifier = (names) => ({
+    all: [
+      { kind: 'call_expression' },
+      pwCallee({
+        kind: 'member_expression',
+        has: { field: 'property', regex: `^(${names})$` },
+      }),
+      {
+        any: [
+          pwCallee({ has: { field: 'object', regex: PW_CHAIN } }),
+          { all: [arg(1, text), { has: { field: 'arguments', has: fn } }] },
+        ],
+      },
+    ],
+  });
+  // `test.skip(condition, 'reason')`: the condition reads something at run time.
+  const runtimeValue = {
+    kind: 'identifier',
+    not: { regex: '^(undefined|NaN|Infinity)$' },
+  };
+  const readsName = { any: [runtimeValue, { has: { stopBy: 'end', ...runtimeValue } }] };
+  const conditionalSkip = {
+    all: [
+      arg(1, {
+        not: text,
+        // In a callback only the body counts: `(browserName) => true` reads nothing.
+        any: [
+          { all: [{ not: fn }, readsName] },
+          { all: [fn, { has: { field: 'body', ...readsName } }] },
+        ],
+      }),
+      arg(2, text),
+      { not: arg(3, { pattern: '$EXTRA' }) },
+    ],
+  };
+  // `$R` is the resolve parameter of `new Promise(...)`; a sleep hands it to setTimeout.
+  const name = { kind: 'identifier', pattern: '$R' };
+  const param = js ? name : { kind: 'required_parameter', has: { field: 'pattern', ...name } };
+  const sleep = {
+    all: [
+      { kind: 'new_expression' },
+      { has: { field: 'constructor', regex: '^Promise$' } },
+      arg(1, {
+        all: [
+          fn,
+          {
+            any: [
+              { has: { field: 'parameter', ...name } },
+              { has: { field: 'parameters', has: { all: [{ nthChild: 1 }, param] } } },
+            ],
+          },
+          {
+            has: {
+              stopBy: 'end',
+              all: [
+                { kind: 'call_expression' },
+                pwCallee({ regex: PW_TIMER }),
+                arg(1, {
+                  any: [
+                    name,
+                    {
+                      all: [
+                        fn,
+                        {
+                          has: {
+                            stopBy: 'end',
+                            kind: 'call_expression',
+                            has: { field: 'function', ...name },
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                }),
+              ],
+            },
+          },
+        ],
+      }),
+    ],
+  };
+  const promises = { regex: '^.(node:)?timers/promises.$' };
+  const required = {
+    kind: 'call_expression',
+    all: [pwCallee({ regex: '^require$' }), arg(1, promises)],
+  };
+  const ns = { kind: 'identifier', pattern: '$NS' };
+  // `timers.setTimeout()` where `timers` is the whole timers/promises module.
+  const moduleSleep = {
+    all: [
+      { kind: 'call_expression' },
+      pwCallee({
+        kind: 'member_expression',
+        all: [
+          { has: { field: 'object', pattern: '$NS' } },
+          { has: { field: 'property', regex: '^setTimeout$' } },
+        ],
+      }),
+      {
+        any: [
+          pwCallee({ has: { field: 'object', ...required } }),
+          {
+            inside: {
+              stopBy: 'end',
+              kind: 'program',
+              has: {
+                stopBy: 'end',
+                any: [
+                  {
+                    kind: 'import_clause',
+                    any: [{ has: ns }, { has: { kind: 'namespace_import', has: ns } }],
+                    inside: { kind: 'import_statement', has: { field: 'source', ...promises } },
+                  },
+                  {
+                    kind: 'variable_declarator',
+                    all: [
+                      { has: { field: 'name', ...ns } },
+                      { has: { field: 'value', ...required } },
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ],
+  };
+  const testCall = {
+    all: [
+      { kind: 'call_expression' },
+      pwCallee({
+        regex: `^(${PW_TEST}(\\.(only|skip|fixme|fail|slow))*|${PW_TEST}\\.step(\\.skip)?)$`,
+      }),
+      arg(1, { not: fn }),
+    ],
+  };
+  const testBody = { all: [fn, { inside: { kind: 'arguments', inside: testCall } }] };
+  // `if (!box) throw ...` narrows a type and fails the test; it does not branch it.
+  const onlyThrows = {
+    any: [
+      { kind: 'throw_statement' },
+      {
+        kind: 'statement_block',
+        has: { kind: 'throw_statement', nthChild: pwNth(1) },
+        not: { has: { nthChild: pwNth(2) } },
+      },
+    ],
+  };
+  const taggedCall = { all: [{ kind: 'call_expression' }, chain] };
+  const ofCall = { inside: { kind: 'arguments', inside: taggedCall } };
+  const tagPair = {
+    kind: 'pair',
+    has: { field: 'key', regex: '^["\']?tag["\']?$' },
+    inside: { kind: 'object', ...ofCall },
+  };
+  const rules = {
+    'fixed-wait': {
+      any: [
+        {
+          kind: 'call_expression',
+          ...pwCallee({
+            kind: 'member_expression',
+            has: { field: 'property', regex: '^waitForTimeout$' },
+          }),
+        },
+        sleep,
+        moduleSleep,
+        {
+          kind: 'import_specifier',
+          has: { field: 'name', regex: '^setTimeout$' },
+          inside: {
+            stopBy: 'end',
+            kind: 'import_statement',
+            has: { field: 'source', ...promises },
+          },
+        },
+        {
+          all: [
+            { kind: 'call_expression' },
+            pwCallee({ regex: '^(util\\.)?promisify$' }),
+            arg(1, { regex: PW_TIMER }),
+          ],
+        },
+      ],
+    },
+    suppression: { kind: 'comment', regex: `^/[/*][\\s]*${PW_NEUTRAL}` },
+    'focused-test': modifier('only'),
+    skip: { all: [modifier('skip|fixme'), { not: conditionalSkip }] },
+    'conditional-in-test': {
+      any: [{ kind: 'if_statement' }, { kind: 'switch_statement' }],
+      inside: { stopBy: anyFn, ...testBody },
+      not: {
+        kind: 'if_statement',
+        has: { field: 'consequence', ...onlyThrows },
+        not: { has: { field: 'alternative', pattern: '$ELSE' } },
+      },
+    },
+    // Helpers for the quarantine logic, never findings: each Playwright call, and each
+    // `@quarantine` string in the title or `tag` of one.
+    scope: taggedCall,
+    tag: {
+      all: [
+        text,
+        { regex: '@quarantine\\b' },
+        {
+          any: [
+            { all: [{ nthChild: pwNth(1) }, ofCall] },
+            { inside: tagPair },
+            { inside: { kind: 'array', inside: tagPair } },
+          ],
+        },
+      ],
+    },
+  };
+  return Object.entries(rules).map(([id, rule]) =>
+    // A project may not repeat a rule id, so each carries its language (stripped after the run).
+    JSON.stringify({ id: `${id}_${language}`, language, severity: 'error', message: id, rule }),
+  );
+}
+
+const PW_MESSAGES = {
+  'fixed-wait': 'wait for a condition (a web-first assertion, waitForURL, expect.poll), not a time',
+  'focused-test': '.only hides every other test; remove it',
+  skip: 'a skip needs a live @quarantine-YYYY-MM-DD tag, or the form test.skip(condition, "reason")',
+  'conditional-in-test':
+    'a test takes one path; split it, or choose by project, fixture or test.skip(condition, "reason")',
+  'stale-quarantine':
+    'quarantine has expired or has no valid date (@quarantine-YYYY-MM-DD): fix the test or renew it after review',
+  suppression: 'ast-grep-ignore cannot silence playwright rules; fix the code',
+};
+
+function pwConfig(h) {
+  let config;
+  try {
+    config = JSON.parse(h.read(PW_CONFIG));
+  } catch (e) {
+    throw new Error(`${PW_CONFIG} is not valid JSON: ${e.message}`, { cause: e });
+  }
+  const unknown = Object.keys(config ?? {}).filter((k) => !(k in PW_DEFAULTS));
+  const { include, ignore } = { ...PW_DEFAULTS, ...config };
+  const object = typeof config === 'object' && config !== null && !Array.isArray(config);
+  if (
+    !object ||
+    unknown.length > 0 ||
+    !isGlobList(include) ||
+    include.length === 0 ||
+    !isGlobList(ignore)
+  ) {
+    throw new Error(
+      `${PW_CONFIG} takes only "include" (a non-empty list of globs) and "ignore" (a list of globs)`,
+    );
+  }
+  return { include: include.map(globRegExp), ignore: ignore.map(globRegExp) };
+}
+
+// Copies each file with suppression comments neutralised. Read and written byte for byte, so lines,
+// offsets and a file that is not UTF-8 stay as they are.
+function pwCopies({ h, tmp }, files) {
+  mkdirSync(tmp('copy'), { recursive: true });
+  return files.map((file, i) => {
+    const copy = tmp(`copy/${i}${extname(file)}`);
+    const bytes = readFileSync(join(h.ROOT, file), 'latin1');
+    writeFileSync(copy, bytes.replaceAll(PW_IGNORE, PW_NEUTRAL), 'latin1');
+    return copy;
+  });
+}
+
+// Runs ast-grep with our own config, so the project's sgconfig.yml cannot change what is read.
+// It skips unreadable, non-UTF-8 and very large files and still exits 0, so every file handed to it
+// must be reported as scanned. Returns the matches with `file` set back to the repo path.
+function pwScan(ctx, files) {
+  const { h, tmp } = ctx;
+  const copies = pwCopies(ctx, files);
+  mkdirSync(tmp('rules'), { recursive: true });
+  const docs = ['TypeScript', 'Tsx', 'JavaScript'].flatMap(pwRules);
+  writeFileSync(tmp('rules/playwright.yml'), docs.join('\n---\n'));
+  writeFileSync(tmp('sgconfig.yml'), 'ruleDirs:\n  - rules\n');
+  const cmd = h.bin('ast-grep') ?? h.needBin('sg');
+  const matches = [];
+  for (let i = 0; i < files.length; i += PW_BATCH) {
+    const batch = copies.slice(i, i + PW_BATCH);
+    const r = h.run(cmd, [
+      'scan',
+      '--config',
+      tmp('sgconfig.yml'),
+      '--json=stream',
+      '--inspect',
+      'summary',
+      ...batch,
+    ]);
+    const fail = (why) => {
+      const from = `${batch.length} file(s) from ${files[i]}`;
+      throw new Error(
+        `playwright: ast-grep ${why} (exit ${r.status}) on ${from}:\n${tail(r.stderr)}`,
+      );
+    };
+    if (r.status !== 0 && r.status !== 1) fail('failed');
+    const counts = /scannedFileCount=(\d+),skippedFileCount=(\d+)/.exec(r.stderr);
+    if (/^ERROR:/m.test(r.stderr) || !counts) fail('could not read every file');
+    if (Number(counts[1]) !== batch.length || counts[2] !== '0') {
+      fail('skipped files (not UTF-8, unreadable or too large)');
+    }
+    const found = r.stdout
+      .split('\n')
+      .filter((l) => l.trim() !== '')
+      .map((l) => json('ast-grep', l))
+      .map((m) => ({ ...m, ruleId: m.ruleId.split('_')[0] }))
+      // ast-grep adds its own `unused-suppression` notes.
+      .filter((m) => Object.hasOwn(PW_MESSAGES, m.ruleId) || PW_HELPERS.includes(m.ruleId));
+    if (r.status === 1 && found.length === 0) fail('reported errors it did not print');
+    matches.push(...found);
+  }
+  // Copies are named by their index.
+  return matches.map((m) => ({ ...m, file: files[Number.parseInt(basename(m.file), 10)] }));
+}
+
+// A tag is live through its date (UTC). A date that does not exist is never live.
+function pwLive(date, today) {
+  const time = Date.parse(`${date}T00:00:00Z`);
+  return !Number.isNaN(time) && new Date(time).toISOString().startsWith(date) && date >= today;
+}
+
+const contains = (outer, inner) =>
+  outer.range.byteOffset.start <= inner.range.byteOffset.start &&
+  outer.range.byteOffset.end >= inner.range.byteOffset.end;
+const size = (m) => m.range.byteOffset.end - m.range.byteOffset.start;
+
+// Findings of one file. A skip is accepted when a live quarantine tag sits on its own call or on a
+// test or describe around it.
+function pwFindings(file, matches, today) {
+  const of = (id) => matches.filter((m) => m.ruleId === id);
+  const finding = (rule, line) => ({ rule, file, line, message: PW_MESSAGES[rule] });
+  const quarantined = [];
+  const stale = [];
+  for (const tag of of('tag')) {
+    const dates = [...tag.text.matchAll(/@quarantine\b(?:-(\d{4}-\d{2}-\d{2})(?![\w-]))?/g)];
+    const owner = of('scope')
+      .filter((s) => contains(s, tag))
+      .toSorted((a, b) => size(a) - size(b))[0];
+    for (const [, date] of dates) {
+      if (date && pwLive(date, today)) quarantined.push(owner);
+      else stale.push(finding('stale-quarantine', tag.range.start.line + 1));
+    }
+  }
+  const rules = matches
+    .filter((m) => !PW_HELPERS.includes(m.ruleId))
+    .filter((m) => m.ruleId !== 'suppression' || pwSilences(m.text))
+    .filter((m) => m.ruleId !== 'skip' || !quarantined.some((q) => contains(q, m)))
+    .map((m) => finding(m.ruleId, m.range.start.line + 1));
+  return [...rules, ...stale];
+}
+
+// A suppression comment is a finding when it is bare or names one of these rules. One that names
+// only the project's own ast-grep rules is legitimate.
+function pwSilences(comment) {
+  const [, list = ''] = /ignore\b(?:\s*:([^*\n]*))?/.exec(comment) ?? [];
+  return list
+    .split(',')
+    .map((s) => s.trim().split('_')[0])
+    .some((id) => id === '' || Object.hasOwn(PW_MESSAGES, id));
+}
+
+// Whether a file is, or reaches through relative imports, a module that imports Playwright.
+function pwImportsPlaywright(h) {
+  const specifiers = new Map();
+  const none = new Set();
+  const read = (file) => {
+    if (!specifiers.has(file)) {
+      specifiers.set(
+        file,
+        [...h.read(file).matchAll(PW_IMPORT)].map((m) => m[1]),
+      );
+    }
+    return specifiers.get(file);
+  };
+  const resolve = (from, spec) => {
+    const base = posix.join(posix.dirname(from), spec);
+    return [
+      base,
+      base.replace(/\.([cm]?)js(x?)$/, '.$1ts$2'),
+      ...PW_RESOLVE.map((ext) => `${base}${ext}`),
+      ...PW_RESOLVE.map((ext) => `${base}/index${ext}`),
+    ].find((f) => TS_EXT.test(f) && !f.startsWith('..') && h.exists(f));
+  };
+  return (start) => {
+    const seen = new Set([start]);
+    // A Set is iterated in insertion order, including entries added during the loop.
+    for (const file of seen) {
+      for (const spec of read(file)) {
+        if (PW_PACKAGES.has(spec)) return true;
+        const next = /^\.\.?(\/|$)/.test(spec) ? resolve(file, spec) : undefined;
+        if (next && !none.has(next)) seen.add(next);
+      }
+    }
+    for (const file of seen) none.add(file);
+    return false;
+  };
+}
+
+const playwright = {
+  id: 'playwright',
+  detect: [/(^|\/)playwright\.config\.[cm]?[jt]s$/],
+  tools: [
+    {
+      id: 'playwright',
+      optIn: [PW_CONFIG],
+      exts: TS_EXT,
+      stages: ['edit', 'commit', 'push'],
+      scan: (ctx) => {
+        const { files, h } = ctx;
+        const { include, ignore } = pwConfig(h);
+        const imports = pwImportsPlaywright(h);
+        const e2e = (files ?? h.projectFiles(TS_EXT)).filter(
+          (f) =>
+            !ignore.some((re) => re.test(f)) && (include.some((re) => re.test(f)) || imports(f)),
+        );
+        // A full run that finds nothing means the scope is wrong, not that the suite is clean.
+        if (!files && e2e.length === 0) {
+          throw new Error(
+            `${PW_CONFIG}: no file matches "include" or imports @playwright/test; fix the globs or remove it`,
+          );
+        }
+        // ast-grep reports an empty file as skipped.
+        const sources = e2e.filter((f) => h.read(f) !== '');
+        if (sources.length === 0) return [];
+        const byFile = Map.groupBy(pwScan(ctx, sources), (m) => m.file);
+        const today = new Date().toISOString().slice(0, 10);
+        return sources.flatMap((file) => pwFindings(file, byFile.get(file) ?? [], today));
+      },
+    },
+  ],
+};
+
 export const PACKS = [
   core,
   ts,
@@ -3024,6 +3516,7 @@ export const PACKS = [
   dart,
   cpp,
   security,
+  playwright,
 ];
 ```
 <!-- /tmpl -->
@@ -4894,6 +5387,29 @@ pre-commit:
           pipx install semgrep==1.187.0
           pipx install zizmor==1.33.1
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+```
+<!-- /tmpl -->
+
+#### Playwright
+
+Install `playwright.json` at `guardrails/playwright.json` and merge the devDependency. The rules are part of `guardrails-packs.mjs`; the base hooks and CI job need no change.
+
+<!-- tmpl:templates/packs/playwright/guardrails/playwright.json -->
+```json
+{
+  "include": ["**/e2e/**"],
+  "ignore": []
+}
+```
+<!-- /tmpl -->
+
+<!-- tmpl:templates/packs/playwright/package.json -->
+```json
+{
+  "devDependencies": {
+    "@ast-grep/cli": "^0.51.0"
+  }
+}
 ```
 <!-- /tmpl -->
 

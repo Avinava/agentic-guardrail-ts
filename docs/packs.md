@@ -20,6 +20,7 @@ Everything beyond the original TypeScript stack is **opt-in**. A tool switches o
 | `dart` | `pubspec.yaml`, `*.dart` | dart format, dart or flutter analyze, Flutter coverage floor | opt-in, **experimental** |
 | `cpp` | `platformio.ini`, `.clang-format`, `*.cpp` | clang-format, pio check | opt-in, **experimental** |
 | `security` | lockfiles, `.github/workflows/*.yml`, `.semgrep/` | osv-scanner, semgrep (own rules), zizmor | opt-in |
+| `playwright` | `playwright.config.*` | playwright (e2e hygiene rules on ast-grep) | opt-in |
 
 **Experimental** means no tool of the pack has been run against its real binary: only fake-output unit tests cover it (see [Verified against real tools](#verified-against-real-tools)). The setup skill does not offer experimental packs unless the user asks for them, and they may change without a major version.
 
@@ -299,6 +300,45 @@ Templates: `templates/packs/security/`. Each tool is switched on by its own file
 
 **zizmor** (`brew install zizmor` or `pipx install zizmor`). Audits `.github/workflows/*.yml` offline (`--offline --format json-v1`), so no GitHub token is needed and the online audits are skipped. Exit 10 to 14 means findings (by severity), 0 is clean, 1 is a failure. Findings an ignore rule in the config already accepts are dropped. Overlap with actionlint is intended: actionlint checks syntax and types, zizmor checks for security problems.
 
+## playwright
+
+Templates: `templates/packs/playwright/`. Lint rules for Playwright suites, switched on by `guardrails/playwright.json`. The rules are generated inside `guardrails-packs.mjs` and run by [ast-grep](https://ast-grep.github.io) (npm `@ast-grep/cli`); neither ESLint nor `eslint-plugin-playwright` is used ([decision 0004](./decisions/0004-playwright-pack.md)).
+
+| Tool | Config (switch) | Findings | Stages |
+| --- | --- | --- | --- |
+| playwright | `guardrails/playwright.json` | `playwright:<rule>\|file` | edit, commit, push |
+
+```json
+{ "include": ["**/e2e/**"], "ignore": [] }
+```
+
+Those are also the defaults when a key is left out. A file is checked when it is not ignored and either matches `include` or imports `@playwright/test` (or `playwright/test`), whatever its name. The import may be indirect: through relative imports, for example a local fixtures module. So `tests/checkout.test.ts` is checked and a Vitest `*.spec.ts` is not. Imports are read as `import`, `export ... from`, `require()` and `import()` at the start of a line. Path aliases (`@/fixtures`) and workspace package names are not followed: add those suites to `include`. `testDir` in `playwright.config` is not read. Only JavaScript and TypeScript files (`.js`, `.jsx`, `.ts`, `.tsx` and their `.mjs`, `.cjs`, `.mts`, `.cts` forms) are read.
+
+| Rule | Fails on |
+| --- | --- |
+| `fixed-wait` | `.waitForTimeout()` on any object; `new Promise` that hands its resolve function to `setTimeout` (also `window.`, `global.`, `globalThis.`); importing `setTimeout` from `timers/promises`, or calling it on that whole module; `promisify(setTimeout)` |
+| `focused-test` | `.only` on `test`, `it`, `describe`, `setup`, `teardown` or a `*Test` alias, or on any object called as `.only('title', fn)` |
+| `skip` | `.skip` or `.fixme` (same objects, plus `testInfo`) without a live quarantine tag, unless it is the conditional form |
+| `stale-quarantine` | a `@quarantine` tag that has expired or has no valid date, whether or not the test is skipped (a tag excluded with `grepInvert` is a skip too) |
+| `conditional-in-test` | `if` or `switch` directly in a test or `test.step` body |
+| `suppression` | an `ast-grep-ignore` comment that is bare or names one of these rules |
+
+**Quarantine.** The tag is `@quarantine-YYYY-MM-DD`, in the title or the `tag` option of the test or of a `describe` around it. It is live through that date (UTC) and fails from the next day, with no change to the code. The value must be a literal string: a tag held in a constant is not read. The date has no upper limit, so review new tags.
+
+```ts
+test.fixme('pays by card', { tag: '@quarantine-2027-01-31' }, async ({ page }) => {});
+```
+
+**Conditional skip.** `test.skip(condition, 'reason')` and `test.fixme(condition, 'reason')` need no tag when there are exactly two arguments, the condition reads at least one name (`browserName !== 'chromium'`, `!process.env.API_URL`, `({ isMobile }) => isMobile`; in a callback the body must read it, so `(browserName) => true` fails) and the reason is a string or template literal. `test.skip()`, `test.skip(true, '...')` and a condition without a reason fail. A condition that is always true through a name (`const off = true`) is not detected.
+
+**Conditionals.** Only `if` and `switch` whose nearest function is the test body count. Route handlers, `page.evaluate` callbacks, helpers, hooks and ternaries do not, and neither does a type guard that only throws (`if (!box) throw new Error('no box')`).
+
+**Not covered.** There is no "test without assertions" rule: assertions often live in page objects and helpers, and no pattern tells those from a test that checks nothing. `test['only']` and an alias not named `*Test` used as `alias.skip()` are not matched. A file with a syntax error is read as far as the parser recovers; the typecheck and Playwright report the error.
+
+**Suppression comments do not work here.** ast-grep scans a temporary copy of each file in which `ast-grep-ignore` is renamed, so every rule still reports under such a comment, baselined or not. The comment is also a `suppression` finding when it is bare or names one of these rules.
+
+**Failing closed.** The gate fails on a missing binary, a config that is not valid, a full run that finds no e2e file, an ast-grep error, and any file ast-grep did not scan (unreadable, not UTF-8 or very large). The project's `sgconfig.yml` does not affect this tool. An exception to a rule goes through the baseline, after review.
+
 ## Verified against real tools
 
 Each tool was run through `guardrails.mjs` with the shipped template config where it was installed. Everything else is covered only by the fake-output unit tests in `scripts/packs-*-test.mjs`, which use output copied from real runs where we had it, and from the tool's documentation otherwise.
@@ -307,6 +347,7 @@ Each tool was run through `guardrails.mjs` with the shipped template config wher
 | --- | --- |
 | ast-grep 0.51.0, ls-lint 2.3.2, cspell 10.4.0, jscpd 5.4.2, markdownlint-cli2 0.24.0, lychee 0.24.2, editorconfig-checker 6.2.0 | run for real |
 | osv-scanner 2.7.1 (npm lockfile; needs network), semgrep 1.187.0 (the shipped rules on TypeScript and Python), zizmor 1.33.1 (with the template config) | run for real (`scripts/packs-security-test.mjs`, which skips a tool that is not installed) |
+| playwright rules (ast-grep 0.51.3) | run for real (`scripts/packs-playwright-test.mjs`, which skips those tests when ast-grep is not installed) |
 | vocab-literal, token drift (ast-grep 0.51.3) | run for real (`scripts/packs-vocab-test.mjs`, `scripts/packs-core-test.mjs`) |
 | actionlint | not run against the real tool (not installed); fake output from the documented JSON template |
 | ruff 0.16.9, pyright 1.1.414, tach 0.35.3, deptry 0.25.1, vulture 2.16, pytest-cov through uv 0.12.21 | run for real (ruff format output changed in 0.16, which the parser handles) |
