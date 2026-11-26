@@ -69,6 +69,35 @@ rules:
               - pattern-inside: |
                   const {..., execSync, ...} = require("node:child_process");
                   ...
+      # import { exec as run } from "child_process"; run(cmd)
+      - patterns:
+          - pattern: $RUN(...)
+          - pattern-not: $RUN("...", ...)
+          - pattern-either:
+              - pattern-inside: |
+                  import {..., exec as $RUN, ...} from "child_process";
+                  ...
+              - pattern-inside: |
+                  import {..., execSync as $RUN, ...} from "child_process";
+                  ...
+              - pattern-inside: |
+                  import {..., exec as $RUN, ...} from "node:child_process";
+                  ...
+              - pattern-inside: |
+                  import {..., execSync as $RUN, ...} from "node:child_process";
+                  ...
+              - pattern-inside: |
+                  const {..., exec: $RUN, ...} = require("child_process");
+                  ...
+              - pattern-inside: |
+                  const {..., execSync: $RUN, ...} = require("child_process");
+                  ...
+              - pattern-inside: |
+                  const {..., exec: $RUN, ...} = require("node:child_process");
+                  ...
+              - pattern-inside: |
+                  const {..., execSync: $RUN, ...} = require("node:child_process");
+                  ...
 
   - id: js-html-injection
     languages: [javascript, typescript]
@@ -78,6 +107,9 @@ rules:
       - pattern: $EL.innerHTML = $X
       - pattern: $EL.outerHTML = $X
       - pattern: document.write(...)
+      - patterns:
+          - pattern: $EL.insertAdjacentHTML($WHERE, $HTML)
+          - pattern-not: $EL.insertAdjacentHTML($WHERE, "...")
       - pattern: <$TAG dangerouslySetInnerHTML={...} />
 
   - id: js-tls-verification-off
@@ -111,6 +143,8 @@ rules:
     pattern-either:
       - pattern: subprocess.$FN(..., shell=True, ...)
       - pattern: os.system(...)
+      - pattern: subprocess.getoutput(...)
+      - pattern: subprocess.getstatusoutput(...)
       # semgrep resolves imports, so this also covers `from subprocess import run, PIPE` (any
       # number of names, parenthesised, or aliased with `as`) and `import subprocess as sp`.
 
@@ -136,10 +170,19 @@ rules:
   - id: py-weak-hash
     languages: [python]
     severity: ERROR
-    message: MD5 and SHA-1 are broken for security use. Use SHA-256 or better.
-    pattern-either:
-      - pattern: hashlib.md5(...)
-      - pattern: hashlib.sha1(...)
+    message: MD5 and SHA-1 are broken for security use. Use SHA-256 or better, or pass usedforsecurity=False for a checksum.
+    patterns:
+      - pattern-either:
+          - pattern: hashlib.md5(...)
+          - pattern: hashlib.sha1(...)
+          - patterns:
+              - pattern: hashlib.new("$ALG", ...)
+              - metavariable-regex:
+                  metavariable: $ALG
+                  regex: (?i)^(md5|sha-?1)$
+      - pattern-not: hashlib.md5(..., usedforsecurity=False, ...)
+      - pattern-not: hashlib.sha1(..., usedforsecurity=False, ...)
+      - pattern-not: hashlib.new(..., usedforsecurity=False, ...)
 
   - id: py-tls-verification-off
     languages: [python]

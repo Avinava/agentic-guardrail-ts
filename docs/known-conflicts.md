@@ -410,7 +410,7 @@ Tool interactions that surprise people, and what to do about them.
 
 **Symptom:** a Vitest or Jest file reports `playwright:skip` or `playwright:conditional-in-test`.
 
-**Why:** the rules match `test`, `it` and `describe` by name, and the file is in scope: it matches `include`, or it imports `@playwright/test`, possibly through a relative import.
+**Why:** the rules match `test`, `it` and `describe` by name, and the file is in scope: it matches `include`, or it imports `@playwright/test` (launchers such as `chromium` alone count only in a file that also imports `test` or `expect`, or calls `test(...)`), possibly through a relative import.
 
 **Resolution:** list the file under `ignore` in `guardrails/playwright.json`, or narrow `include`.
 

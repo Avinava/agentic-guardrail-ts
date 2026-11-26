@@ -59,10 +59,11 @@ const targets = (ctx, fallback) => ctx.files ?? fallback;
 
 // ── ts: the TypeScript stack. Each tool is on when its config file exists, which every v3 install has ──
 
-// Every list-valued field of a Knip issue is a finding: unused files, exports, dependencies.
+// Every list-valued field of a Knip issue is a finding: unused files, exports, dependencies. The
+// exception is `owners`, which Knip adds from CODEOWNERS to say who a file belongs to.
 const knipItems = (issue) =>
   Object.entries(issue)
-    .filter(([, items]) => Array.isArray(items))
+    .filter(([type, items]) => type !== 'owners' && Array.isArray(items))
     .flatMap(([type, items]) =>
       items.map((item) => ({
         rule: type,
@@ -216,16 +217,35 @@ const globRegExp = (glob) =>
       .replaceAll('\u0001', '.*')}$`,
   );
 
-// The project's own TypeScript package parses TS and JS files. Missing means a broken install.
-function loadTypescript(h) {
+// TypeScript 7 exports no compiler API; the TS 6 package does, under its alias or its own name.
+const TS_PACKAGES = ['typescript', '@typescript/typescript6'];
+const TS_ALIAS = '"typescript": "npm:@typescript/typescript6@^6"';
+
+// The package as seen from a file, or null when it is not installed there.
+function tryRequire(load, name) {
   try {
-    return createRequire(join(h.ROOT, 'package.json'))('typescript');
+    return load(name);
   } catch (e) {
-    throw new Error(
-      `${VOCAB_CONFIG}: the typescript package is needed to read TypeScript vocab and sources. Install devDependencies first.`,
-      { cause: e },
-    );
+    if (e.code === 'MODULE_NOT_FOUND') return null;
+    throw e;
   }
+}
+
+// The project's own TypeScript package parses TS and JS files. It is looked up from the repo root,
+// then from each vocab module, so a workspace may declare it in a member package only.
+function loadTypescript(h, modules) {
+  const installed = ['package.json', ...modules].flatMap((from) => {
+    const load = createRequire(join(h.ROOT, from));
+    return TS_PACKAGES.map((name) => ({ name, api: tryRequire(load, name) })).filter((p) => p.api);
+  });
+  const usable = installed.find((p) => typeof p.api.createSourceFile === 'function');
+  if (usable) return usable.api;
+  const without = new Set(installed.map((p) => `${p.name} ${p.api.version}`));
+  throw new Error(
+    without.size > 0
+      ? `${VOCAB_CONFIG}: ${[...without].join(', ')} has no compiler API (createSourceFile), which TypeScript 7 does not export. Add the TS 6 alias to the root devDependencies, ${TS_ALIAS}, keep TypeScript 7 as "@typescript/native", and install.`
+      : `${VOCAB_CONFIG}: the typescript package is needed to read TypeScript vocab and sources and was not found from the repo root or a vocab module. Add ${TS_ALIAS} to the root devDependencies and install.`,
+  );
 }
 
 // `as const` and `satisfies` wrappers around the expression.
@@ -295,8 +315,8 @@ const hasExportModifier = (tsApi, node) =>
     (m) => m.kind === tsApi.SyntaxKind.ExportKeyword,
   );
 
-// TypeScript: `export const X = { A: 'a' } as const` and `enum X { A = 'a' }`, at module scope or
-// inside an exported namespace, named the way a caller writes them (`Domain.Status.Active`).
+// TypeScript: `export const X = { A: 'a' } as const`, `export const X = ['a'] as const` and
+// `enum X { A = 'a' }`, at module scope or inside an exported namespace, named the way a caller writes them (`Domain.Status.Active`).
 // Declarations inside functions or blocks, and names that are not exported, are not members.
 function tsVocab(tsApi, file, text) {
   const sf = tsParse(tsApi, file, text);
@@ -322,7 +342,7 @@ function tsVocab(tsApi, file, text) {
     } else if (tsApi.isVariableStatement(st)) {
       for (const d of st.declarationList.declarations) {
         const name = tsApi.isIdentifier(d.name) ? exportedAs(st, d.name.text, top) : null;
-        if (name !== null) found.push(...tsConstObjectMembers(tsApi, d, `${prefix}${name}`));
+        if (name !== null) found.push(...tsConstMembers(tsApi, d, `${prefix}${name}`));
       }
     } else if (tsApi.isModuleDeclaration(st)) {
       collectModule(st, prefix, top);
@@ -347,11 +367,17 @@ function tsEnumMembers(tsApi, node, name) {
   return found;
 }
 
-// Members of `const X = { ... } as const`; nothing for any other declaration.
-function tsConstObjectMembers(tsApi, decl, name) {
+// Members of `const X = { ... } as const` and of `const X = ['a', 'b'] as const` (named `X.a`,
+// marked as list entries); nothing for any other declaration.
+function tsConstMembers(tsApi, decl, name) {
   if (!decl.initializer || !isConstAssertion(tsApi, decl.initializer)) return [];
   const value = unwrap(tsApi, decl.initializer);
-  return tsApi.isObjectLiteralExpression(value) ? tsObjectMembers(tsApi, value, name) : [];
+  if (tsApi.isObjectLiteralExpression(value)) return tsObjectMembers(tsApi, value, name);
+  if (!tsApi.isArrayLiteralExpression(value)) return [];
+  return value.elements
+    .map((e) => unwrap(tsApi, e))
+    .filter((e) => isStringNode(tsApi, e))
+    .map((e) => [`${name}.${e.text}`, e.text, true]);
 }
 
 // A string that names a module (imports, re-exports, require(), import(), `declare module`).
@@ -369,13 +395,48 @@ function isModuleName(tsApi, node) {
   );
 }
 
-// Plain string literals of a TS or JS file. A template contributes only the literals inside its
-// substitutions (its own text is not a plain string unless it has none).
+// Declarations whose `name` is a property name: `{ "a": 1 }`, `interface X { "a": string }`.
+const NAMED_BY_PROPERTY = [
+  'PropertyAssignment',
+  'PropertySignature',
+  'PropertyDeclaration',
+  'MethodDeclaration',
+  'MethodSignature',
+  'GetAccessor',
+  'SetAccessor',
+  'EnumMember',
+];
+
+// The key of an indexed access type, `T["a"]` and `T["a" | "b"]`.
+function isIndexType(tsApi, node) {
+  let type = node.parent;
+  if (!tsApi.isLiteralTypeNode(type)) return false;
+  while (tsApi.isUnionTypeNode(type.parent) || tsApi.isParenthesizedTypeNode(type.parent)) {
+    type = type.parent;
+  }
+  return tsApi.isIndexedAccessTypeNode(type.parent) && type.parent.indexType === type;
+}
+
+// A string that names a property rather than being a value: object and type keys, `obj["a"]`,
+// `T["a"]`, `{ ["a"]: 1 }` and `const { "a": b } = x`.
+function isPropertyKey(tsApi, node) {
+  const p = node.parent;
+  return (
+    (p.name === node && NAMED_BY_PROPERTY.some((kind) => p.kind === tsApi.SyntaxKind[kind])) ||
+    (tsApi.isBindingElement(p) && p.propertyName === node) ||
+    (tsApi.isElementAccessExpression(p) && p.argumentExpression === node) ||
+    tsApi.isComputedPropertyName(p) ||
+    isIndexType(tsApi, node)
+  );
+}
+
+// Plain string literals of a TS or JS file, property names aside. A template contributes only the
+// literals inside its substitutions (its own text is not a plain string unless it has none).
 function tsLiterals(tsApi, file, text) {
   const sf = tsParse(tsApi, file, text);
   const found = [];
   const visit = (node) => {
-    if (isStringNode(tsApi, node) && !isModuleName(tsApi, node)) {
+    if (isStringNode(tsApi, node) && !isModuleName(tsApi, node) && !isPropertyKey(tsApi, node)) {
       found.push({
         value: node.text,
         line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1,
@@ -388,19 +449,28 @@ function tsLiterals(tsApi, file, text) {
 }
 
 // Python is read by its own `ast` module. A member is an assignment directly in the body of a
-// StrEnum (or str + Enum) class; a literal is any str constant except a bare-string statement
-// (a docstring) and the fixed text of an f-string, whose substitutions are walked.
+// StrEnum (or str + Enum) class, `auto()` included for a StrEnum; a literal is any str constant
+// except a bare-string statement (a docstring), a key (`{"a": 1}`, `d["a"]`, `d.get("a")`) and the
+// fixed text of an f-string, whose substitutions are walked.
 const PY_READER = `
 import ast, json, sys
 req = json.load(sys.stdin)
 
-def enum_aliases(tree):
+def imported_from(tree, modules):
     names = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "enum":
+        if isinstance(node, ast.ImportFrom) and node.module in modules:
             for alias in node.names:
                 names[alias.asname or alias.name] = alias.name
     return names
+
+# The names the enum module itself is bound to (\`import enum as e\`).
+def enum_modules(tree):
+    return {
+        alias.asname or alias.name
+        for node in ast.walk(tree) if isinstance(node, ast.Import)
+        for alias in node.names if alias.name == "enum"
+    }
 
 def is_str(node):
     return isinstance(node, ast.Constant) and isinstance(node.value, str)
@@ -413,18 +483,36 @@ def exported_names(tree):
     return None
 
 def members(tree):
-    aliases = enum_aliases(tree)
+    aliases = imported_from(tree, ("enum",))
+    modules = enum_modules(tree)
     public = exported_names(tree)
     out = []
 
-    def is_enum(cls):
+    def base_names(cls):
         names = set()
         for b in cls.bases:
             if isinstance(b, ast.Name):
                 names.add(aliases.get(b.id, b.id))
             elif isinstance(b, ast.Attribute):
                 names.add(b.attr)
+        return names
+
+    def is_enum(cls):
+        names = base_names(cls)
         return "StrEnum" in names or ("str" in names and "Enum" in names)
+
+    # A bare \`auto()\` in a StrEnum is the lower-cased member name, unless the class says otherwise.
+    def lower_auto(cls):
+        custom = any(isinstance(s, ast.FunctionDef) and s.name == "_generate_next_value_" for s in cls.body)
+        return "StrEnum" in base_names(cls) and not custom
+
+    def is_auto(node):
+        if not isinstance(node, ast.Call) or node.args or node.keywords:
+            return False
+        f = node.func
+        if isinstance(f, ast.Name):
+            return aliases.get(f.id) == "auto"
+        return isinstance(f, ast.Attribute) and f.attr == "auto" and getattr(f.value, "id", None) in modules
 
     def walk(body, prefix, top):
         for cls in body:
@@ -441,16 +529,22 @@ def members(tree):
                         target, value = stmt.target, stmt.value
                     else:
                         continue
-                    if isinstance(target, ast.Name) and is_str(value):
+                    if not isinstance(target, ast.Name):
+                        continue
+                    if is_str(value):
                         out.append([name + "." + target.id, value.value])
+                    elif is_auto(value) and lower_auto(cls) and not target.id.startswith("_"):
+                        out.append([name + "." + target.id, target.id.lower()])
             walk(cls.body, name + ".", False)
 
     walk(tree.body, "", True)
     return out
 
 class Literals(ast.NodeVisitor):
-    def __init__(self):
+    def __init__(self, tree):
         self.out = []
+        names = imported_from(tree, ("typing", "typing_extensions"))
+        self.literal = {"Literal"} | {alias for alias, name in names.items() if name == "Literal"}
 
     def visit_Expr(self, node):
         if not is_str(node.value):
@@ -459,6 +553,27 @@ class Literals(ast.NodeVisitor):
     def visit_Constant(self, node):
         if isinstance(node.value, str):
             self.out.append([node.value, node.lineno])
+
+    def visit_Dict(self, node):
+        for key, value in zip(node.keys, node.values):
+            if key is not None and not is_str(key):
+                self.visit(key)
+            self.visit(value)
+
+    # \`d["a"]\` names a key; \`Literal["a"]\` is a value in a type.
+    def visit_Subscript(self, node):
+        self.visit(node.value)
+        owner = getattr(node.value, "id", getattr(node.value, "attr", None))
+        if not is_str(node.slice) or owner in self.literal:
+            self.visit(node.slice)
+
+    def visit_Call(self, node):
+        args = node.args
+        if isinstance(node.func, ast.Attribute) and node.func.attr in ("get", "pop", "setdefault"):
+            if args and is_str(args[0]):
+                args = args[1:]
+        for child in [node.func, *args, *node.keywords]:
+            self.visit(child)
 
     def visit_JoinedStr(self, node):
         fields = [v for v in node.values if isinstance(v, ast.FormattedValue)]
@@ -475,8 +590,9 @@ result = {"vocab": {}, "scan": {}}
 for path in req["vocab"]:
     result["vocab"][path] = members(ast.parse(open(path, encoding="utf-8").read(), path))
 for path in req["scan"]:
-    visitor = Literals()
-    visitor.visit(ast.parse(open(path, encoding="utf-8").read(), path))
+    tree = ast.parse(open(path, encoding="utf-8").read(), path)
+    visitor = Literals(tree)
+    visitor.visit(tree)
     result["scan"][path] = visitor.out
 json.dump(result, sys.stdout)
 `;
@@ -512,27 +628,52 @@ function vocabConfig(h) {
   for (const mod of modules) {
     if (!h.exists(mod)) throw new Error(`${VOCAB_CONFIG}: vocab module ${mod} does not exist`);
   }
-  return { modules, ignore: (config.ignore ?? []).map(globRegExp) };
+  const excludeMembers = config.excludeMembers ?? [];
+  if (!isGlobList(excludeMembers)) {
+    throw new Error(`${VOCAB_CONFIG}: "excludeMembers" is a list of member name globs`);
+  }
+  return {
+    modules,
+    ignore: (config.ignore ?? []).map(globRegExp),
+    excluded: excludeMembers.map(globRegExp),
+  };
 }
 
-// value -> member name, per language, from every vocab module.
-function vocabTables(h, modules, tsApi, pyVocab) {
-  const tables = { ts: new Map(), py: new Map() };
-  for (const mod of modules) {
+// value -> member, per language, from every vocab module. A named member wins over a list entry
+// with the same value; otherwise the first in source order wins. Excluded names do not count.
+function vocabTables(h, { modules, excluded }, tsApi, pyVocab) {
+  const all = modules.flatMap((mod) => {
     const py = PY_EXT.test(mod);
     const parsed = py ? pyVocab[mod] : tsVocab(tsApi, mod, h.read(mod));
     if (parsed.length === 0) {
       throw new Error(
-        `${VOCAB_CONFIG}: no string members found in ${mod} (expected an "as const" object, an enum or a StrEnum)`,
+        `${VOCAB_CONFIG}: no string members found in ${mod} (expected an "as const" object or array, an enum or a StrEnum)`,
       );
     }
-    for (const [name, value] of parsed) {
-      if (value !== '' && !tables[py ? 'py' : 'ts'].has(value)) {
-        tables[py ? 'py' : 'ts'].set(value, name);
-      }
-    }
+    return parsed.map(([name, value, list = false]) => ({ py, name, value, list }));
+  });
+  const tables = { ts: new Map(), py: new Map() };
+  for (const m of all.toSorted((a, b) => Number(a.list) - Number(b.list))) {
+    const table = tables[m.py ? 'py' : 'ts'];
+    if (m.value === '' || table.has(m.value) || excluded.some((re) => re.test(m.name))) continue;
+    table.set(m.value, m);
+  }
+  // Excluding every member of a language would switch its check off and still pass.
+  if (all.some((m) => m.value !== '' && tables[m.py ? 'py' : 'ts'].size === 0)) {
+    throw new Error(
+      `${VOCAB_CONFIG}: "excludeMembers" removes every member of ${tables.ts.size === 0 && all.some((m) => !m.py) ? 'the TypeScript' : 'the Python'} vocab modules, so nothing would be checked. Narrow the globs.`,
+    );
   }
   return tables;
+}
+
+// A list entry has no name a caller can write, so its message names the list.
+function vocabMessage({ name, value, list }) {
+  const raw = JSON.stringify(value);
+  const use = list
+    ? `${raw} is an entry of ${name.slice(0, -value.length - 1)}: use a value taken from that list, not a raw string`
+    : `use ${name}, not the raw string ${raw}`;
+  return `${use}. New values go in the vocab module.`;
 }
 
 const vocabLiteral = {
@@ -542,19 +683,21 @@ const vocabLiteral = {
   exts: VOCAB_EXT,
   stages: ['edit', 'commit', 'push'],
   scan: ({ files, h }) => {
-    const { modules, ignore } = vocabConfig(h);
+    const config = vocabConfig(h);
+    const { modules, ignore } = config;
     const skip = new Set(modules.map((m) => h.rel(m)));
     const candidates = (files ?? h.projectFiles(VOCAB_EXT)).filter(
       (f) => !skip.has(f) && !TEST_FILE.test(f) && !ignore.some((re) => re.test(f)),
     );
     const pyModules = modules.filter((m) => PY_EXT.test(m));
-    const tsApi = pyModules.length < modules.length ? loadTypescript(h) : null;
+    const tsModules = modules.filter((m) => !PY_EXT.test(m));
+    const tsApi = tsModules.length > 0 ? loadTypescript(h, tsModules) : null;
     const py = readPython(
       h,
       pyModules,
       candidates.filter((f) => PY_EXT.test(f)),
     );
-    const tables = vocabTables(h, modules, tsApi, py.vocab);
+    const tables = vocabTables(h, config, tsApi, py.vocab);
     const found = [];
     for (const file of candidates) {
       const isPy = PY_EXT.test(file);
@@ -564,14 +707,9 @@ const vocabLiteral = {
         ? py.scan[file].map(([value, line]) => ({ value, line }))
         : tsLiterals(tsApi, file, h.read(file));
       for (const { value, line } of read) {
-        const name = table.get(value);
-        if (name === undefined) continue;
-        found.push({
-          rule: name,
-          file,
-          line,
-          message: `use ${name}, not the raw string ${JSON.stringify(value)}. New values go in the vocab module.`,
-        });
+        const member = table.get(value);
+        if (member === undefined) continue;
+        found.push({ rule: member.name, file, line, message: vocabMessage(member) });
       }
     }
     return found;
@@ -1775,7 +1913,7 @@ const PW_CONFIG = 'guardrails/playwright.json';
 const PW_DEFAULTS = { include: ['**/e2e/**'], ignore: [] };
 const PW_BATCH = 200;
 // Rules that only feed the quarantine logic.
-const PW_HELPERS = ['scope', 'tag'];
+const PW_HELPERS = ['scope', 'tag', 'condition'];
 // A comment that would silence ast-grep is renamed (same length) in the copy that is scanned, so it
 // hides nothing and can still be reported.
 const PW_IGNORE = 'ast-grep-ignore';
@@ -1783,6 +1921,8 @@ const PW_NEUTRAL = 'ast-grep~ignore';
 // A file outside "include" is an e2e file when it imports one of these, itself or through relative
 // imports (a fixtures module).
 const PW_PACKAGES = new Set(['@playwright/test', 'playwright/test']);
+// Importing only these is a browser script, not a test.
+const PW_LAUNCHERS = new Set(['chromium', 'firefox', 'webkit', 'devices', '_android', '_electron']);
 // Static imports and re-exports, `require()` and `import()`, each starting its own line.
 const PW_IMPORT =
   /^[ \t]*(?:(?:import|export)\b(?:[^'"`;]*?\bfrom)?[ \t]*|(?:(?:const|let|var)\b[^=;]*=[ \t]*)?(?:await[ \t]+)?(?:require|import)\([ \t]*)['"]([^'"\n]+)['"]/gm;
@@ -1836,25 +1976,36 @@ function pwRules(language) {
       },
     ],
   });
+  // A route handler may wait on purpose, to simulate a slow response.
+  const routeHandler = {
+    ...fn,
+    inside: {
+      kind: 'arguments',
+      inside: {
+        kind: 'call_expression',
+        ...pwCallee({
+          kind: 'member_expression',
+          has: { field: 'property', regex: '^route$' },
+        }),
+      },
+    },
+  };
   // `test.skip(condition, 'reason')`: the condition reads something at run time.
   const runtimeValue = {
     kind: 'identifier',
     not: { regex: '^(undefined|NaN|Infinity)$' },
   };
   const readsName = { any: [runtimeValue, { has: { stopBy: 'end', ...runtimeValue } }] };
-  const conditionalSkip = {
-    all: [
-      arg(1, {
-        not: text,
-        // In a callback only the body counts: `(browserName) => true` reads nothing.
-        any: [
-          { all: [{ not: fn }, readsName] },
-          { all: [fn, { has: { field: 'body', ...readsName } }] },
-        ],
-      }),
-      arg(2, text),
-      { not: arg(3, { pattern: '$EXTRA' }) },
+  const condition = arg(1, {
+    not: text,
+    // In a callback only the body counts: `(browserName) => true` reads nothing.
+    any: [
+      { all: [{ not: fn }, readsName] },
+      { all: [fn, { has: { field: 'body', ...readsName } }] },
     ],
+  });
+  const conditionalSkip = {
+    all: [condition, arg(2, text), { not: arg(3, { pattern: '$EXTRA' }) }],
   };
   // `$R` is the resolve parameter of `new Promise(...)`; a sleep hands it to setTimeout.
   const name = { kind: 'identifier', pattern: '$R' };
@@ -1977,36 +2128,43 @@ function pwRules(language) {
     has: { field: 'key', regex: '^["\']?tag["\']?$' },
     inside: { kind: 'object', ...ofCall },
   };
-  const rules = {
-    'fixed-wait': {
-      any: [
-        {
-          kind: 'call_expression',
-          ...pwCallee({
-            kind: 'member_expression',
-            has: { field: 'property', regex: '^waitForTimeout$' },
-          }),
-        },
-        sleep,
-        moduleSleep,
-        {
-          kind: 'import_specifier',
-          has: { field: 'name', regex: '^setTimeout$' },
-          inside: {
-            stopBy: 'end',
-            kind: 'import_statement',
-            has: { field: 'source', ...promises },
-          },
-        },
-        {
-          all: [
-            { kind: 'call_expression' },
-            pwCallee({ regex: '^(util\\.)?promisify$' }),
-            arg(1, { regex: PW_TIMER }),
+  const waits = {
+    any: [
+      {
+        kind: 'call_expression',
+        ...pwCallee({
+          any: [
+            { kind: 'member_expression', has: { field: 'property', regex: '^waitForTimeout$' } },
+            // page['waitForTimeout'](n)
+            {
+              kind: 'subscript_expression',
+              has: { field: 'index', regex: '^.waitForTimeout.$' },
+            },
           ],
+        }),
+      },
+      sleep,
+      moduleSleep,
+      {
+        kind: 'import_specifier',
+        has: { field: 'name', regex: '^setTimeout$' },
+        inside: {
+          stopBy: 'end',
+          kind: 'import_statement',
+          has: { field: 'source', ...promises },
         },
-      ],
-    },
+      },
+      {
+        all: [
+          { kind: 'call_expression' },
+          pwCallee({ regex: '^(util\\.)?promisify$' }),
+          arg(1, { regex: PW_TIMER }),
+        ],
+      },
+    ],
+  };
+  const rules = {
+    'fixed-wait': { all: [waits, { not: { inside: { stopBy: 'end', ...routeHandler } } }] },
     suppression: { kind: 'comment', regex: `^/[/*][\\s]*${PW_NEUTRAL}` },
     'focused-test': modifier('only'),
     skip: { all: [modifier('skip|fixme'), { not: conditionalSkip }] },
@@ -2019,8 +2177,12 @@ function pwRules(language) {
         not: { has: { field: 'alternative', pattern: '$ELSE' } },
       },
     },
-    // Helpers for the quarantine logic, never findings: each Playwright call, and each
-    // `@quarantine` string in the title or `tag` of one.
+    // Helpers for the quarantine logic, never findings: each skip that depends on a condition (not a
+    // `(title, body)` declaration), each Playwright call, and each `@quarantine` string in the title
+    // or `tag` of one.
+    condition: {
+      all: [modifier('skip|fixme'), condition, { not: arg(2, fn) }, { not: arg(3, fn) }],
+    },
     scope: taggedCall,
     tag: {
       all: [
@@ -2045,7 +2207,7 @@ function pwRules(language) {
 const PW_MESSAGES = {
   'fixed-wait': 'wait for a condition (a web-first assertion, waitForURL, expect.poll), not a time',
   'focused-test': '.only hides every other test; remove it',
-  skip: 'a skip needs a live @quarantine-YYYY-MM-DD tag, or the form test.skip(condition, "reason")',
+  skip: 'a static skip never runs, even with a @quarantine tag (drop .skip and let a quarantine job run the tagged test); a conditional one is test.skip(condition, "reason")',
   'conditional-in-test':
     'a test takes one path; split it, or choose by project, fixture or test.skip(condition, "reason")',
   'stale-quarantine':
@@ -2149,8 +2311,8 @@ const contains = (outer, inner) =>
   outer.range.byteOffset.end >= inner.range.byteOffset.end;
 const size = (m) => m.range.byteOffset.end - m.range.byteOffset.start;
 
-// Findings of one file. A skip is accepted when a live quarantine tag sits on its own call or on a
-// test or describe around it.
+// Findings of one file. A conditional skip without a reason is accepted when a live quarantine tag
+// sits on its own call or on a test or describe around it. A static skip is never accepted.
 function pwFindings(file, matches, today) {
   const of = (id) => matches.filter((m) => m.ruleId === id);
   const finding = (rule, line) => ({ rule, file, line, message: PW_MESSAGES[rule] });
@@ -2166,10 +2328,14 @@ function pwFindings(file, matches, today) {
       else stale.push(finding('stale-quarantine', tag.range.start.line + 1));
     }
   }
+  const conditions = of('condition');
+  const excused = (m) =>
+    conditions.some((c) => contains(c, m) && size(c) === size(m)) &&
+    quarantined.some((q) => contains(q, m));
   const rules = matches
     .filter((m) => !PW_HELPERS.includes(m.ruleId))
     .filter((m) => m.ruleId !== 'suppression' || pwSilences(m.text))
-    .filter((m) => m.ruleId !== 'skip' || !quarantined.some((q) => contains(q, m)))
+    .filter((m) => m.ruleId !== 'skip' || !excused(m))
     .map((m) => finding(m.ruleId, m.range.start.line + 1));
   return [...rules, ...stale];
 }
@@ -2184,15 +2350,50 @@ function pwSilences(comment) {
     .some((id) => id === '' || Object.hasOwn(PW_MESSAGES, id));
 }
 
-// Whether a file is, or reaches through relative imports, a module that imports Playwright.
+// The names an import, re-export or require takes from its module, from `{ a, b as c }` or from a
+// default binding; null when it takes the whole module.
+function pwImported(statement) {
+  const head = /^\s*(?:import|export|const|let|var)(?:\s+type\b)?\s*(?:\{([^}]*)\}|([\w$]+))/.exec(
+    statement,
+  );
+  if (!head) return null;
+  return (head[1] ?? head[2])
+    .split(',')
+    .map((s) => s.trim().split(/\s*:\s*|\s+as\s+/)[0])
+    .filter(Boolean);
+}
+
+// A call of `test(...)` or `test.x(...)`, not a method such as `pattern.test(...)`.
+const PW_TEST_CALL = /(?<![.\w$])test(?:\.\w+)*\s*\(/;
+const PW_TEST_NAMES = new Set(['test', 'expect']);
+
+// Whether `import { chromium } from ...` is all that makes a file Playwright's: braces that name
+// only browser launchers, in a file that neither imports `test` or `expect` from anywhere (a path
+// alias included) nor calls `test(...)`. Such a file is a script.
+function pwScriptImports(text, imports) {
+  const isTest =
+    PW_TEST_CALL.test(text) ||
+    imports.some((m) => pwImported(m[0])?.some((name) => PW_TEST_NAMES.has(name)));
+  return (m) => {
+    if (isTest || !PW_PACKAGES.has(m[1]) || !/^[^'"]*\{/.test(m[0])) return false;
+    const names = pwImported(m[0]);
+    return names !== null && names.length > 0 && names.every((name) => PW_LAUNCHERS.has(name));
+  };
+}
+
+// Whether a file is, or reaches through relative imports, a module that imports Playwright's tests
+// (anything but browser launchers alone).
 function pwImportsPlaywright(h) {
   const specifiers = new Map();
   const none = new Set();
   const read = (file) => {
     if (!specifiers.has(file)) {
+      const text = h.read(file);
+      const imports = [...text.matchAll(PW_IMPORT)];
+      const script = pwScriptImports(text, imports);
       specifiers.set(
         file,
-        [...h.read(file).matchAll(PW_IMPORT)].map((m) => m[1]),
+        imports.filter((m) => !script(m)).map((m) => m[1]),
       );
     }
     return specifiers.get(file);

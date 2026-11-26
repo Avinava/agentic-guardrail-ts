@@ -76,6 +76,26 @@ test.skip('not a tag', { annotation: { type: '@quarantine-2099-01-01' } }, async
 test('a neighbour is quarantined', { tag: '@quarantine-2099-01-01' }, async () => {});
 test.skip('and this one is not', async () => {}); // want: skip
 
+// A live quarantine tag does not accept a static skip: the test would never run.
+test.skip('quarantined skip', { tag: '@quarantine-2099-12-31' }, async () => {}); // want: skip
+test.fixme('quarantined in the title @quarantine-2099-12-31', async () => {}); // want: skip
+test.skip(title, { tag: '@quarantine-2099-12-31' }, async () => {}); // want: skip
+test.describe.skip('quarantined skip group @quarantine-2099-12-31', () => {}); // want: skip
+test('quarantined, skipped inside', { tag: '@quarantine-2099-12-31' }, async () => {
+  test.skip(); // want: skip
+  test.fixme(true, 'flaky'); // want: skip
+});
+test.describe('quarantined group', { tag: '@quarantine-2099-12-31' }, () => {
+  test.skip('child', async () => {}); // want: skip
+});
+
+test('computed waits', async ({ page }) => {
+  await page['waitForTimeout'](1); // want: fixed-wait
+  await page["waitForTimeout"](1); // want: fixed-wait
+  await page.route('**/api', (route) => route.continue());
+  await new Promise((resolve) => setTimeout(resolve, 5)); // want: fixed-wait
+});
+
 test('branches', async ({ page }) => {
   if (await page.getByRole('dialog').isVisible()) { // want: conditional-in-test
     await page.keyboard.press('Escape');

@@ -251,7 +251,8 @@ const HELPERS = {
   lintable,
 };
 
-// Runs one tool and returns its findings. `files` is null for a whole-project run.
+// Runs one tool and returns its findings, or null when it had no input to run on. `files` is null
+// for a whole-project run.
 function runTool(tool, files) {
   const dir = mkdtempSync(join(tmpdir(), 'guardrails-tool-'));
   const ctx = {
@@ -261,7 +262,8 @@ function runTool(tool, files) {
     tmp: (name) => join(dir, name),
   };
   try {
-    return toFindings(tool, runRaw(tool, files, ctx));
+    const raw = runRaw(tool, files, ctx);
+    return raw && toFindings(tool, raw);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -292,10 +294,10 @@ function runRaw(tool, files, ctx) {
   const each = tool.perFile
     ? (files ?? projectFiles(tool.exts)).map((f) => ({ ...ctx, files: [f] }))
     : [];
-  const jobs = tool.perFile ? each : [ctx];
-  return jobs.flatMap((job) => {
-    const spec = tool.run(job);
-    if (!spec) return [];
+  const jobs = (tool.perFile ? each : [ctx]).map((job) => ({ job, spec: tool.run(job) }));
+  const runnable = jobs.filter(({ spec }) => spec);
+  if (runnable.length === 0) return null;
+  return runnable.flatMap(({ job, spec }) => {
     const r = run(spec.cmd, dashSafe(spec.args), spec.opts);
     const failed = (why) => {
       const text = (r.stderr || r.stdout).trim().slice(-2000);
@@ -347,18 +349,35 @@ const toolOfKey = (key) => configuredTools().find((t) => key.startsWith(`${t.id}
 const notDue = () => configuredTools().filter((t) => !dueFull(t));
 const isNotDueKey = (key) => notDue().some((t) => key.startsWith(`${t.id}:`));
 
-function collect(files, stage = 'commit') {
+const FULL_ONLY = 'full check only';
+// A plain full check defers these too: only the ci stage runs them.
+const CI_ONLY = 'deferred, CI only';
+const NO_INPUT = 'no input';
+
+// Runs the due tools. An enabled tool that does not run is recorded in `skipped` (id -> why).
+function collect(files, stage = 'commit', skipped = new Map()) {
   const all = files ? scopedFiles(files) : null;
   const found = [];
   for (const tool of activeTools()) {
-    if (tool.metric) continue;
-    if (all ? !tool.stages.includes(stage) : !dueFull(tool)) continue;
+    if (all ? tool.metric || !tool.stages.includes(stage) : tool.metric || !dueFull(tool)) {
+      if (all) skipped.set(tool.id, needsCi(tool) ? CI_ONLY : FULL_ONLY);
+      continue;
+    }
     const own = all ? all.filter((f) => !tool.exts || tool.exts.test(f)) : null;
     // A whole-project tool still skips a scoped run that touches none of its file types.
-    if (own && own.length === 0 && (tool.exts || !tool.whole)) continue;
-    found.push(...runTool(tool, tool.whole ? null : own));
+    const untouched = own && own.length === 0 && (tool.exts || !tool.whole);
+    const result = untouched ? null : runTool(tool, tool.whole ? null : own);
+    if (result) found.push(...result);
+    else skipped.set(tool.id, NO_INPUT);
   }
   return found;
+}
+
+// `a, b (full check only); c (no input)`
+function describeSkipped(skipped) {
+  return [...Map.groupBy(skipped, ([, why]) => why)]
+    .map(([why, entries]) => `${entries.map(([id]) => id).join(', ')} (${why})`)
+    .join('; ');
 }
 
 // ── Metrics: ratchets on a number, not on per-file counts (docs/packs.md#metric-ratchets) ──
@@ -518,7 +537,12 @@ function check(argv) {
     return 1;
   }
   const baseline = readBaseline();
-  const { fresh, stale } = compare(collect(files), baseline, scope);
+  const skipped = new Map();
+  const { fresh, stale } = compare(collect(files, 'commit', skipped), baseline, scope);
+  // A full run never passes over a tool that had nothing to read without saying so.
+  if (!scope && skipped.size > 0) {
+    console.log(`guardrails: not run: ${describeSkipped(skipped)}`);
+  }
   if (fresh.length > 0) {
     console.error(report(fresh, baseline));
     return 1;
@@ -595,7 +619,8 @@ function check(argv) {
     }
     console.log(`guardrails: ${note}`);
   }
-  console.log(`guardrails: clean${scope ? ` (${scope.size} file(s))` : ''}`);
+  const unran = skipped.size > 0 ? `; not run: ${describeSkipped(skipped)}` : '';
+  console.log(`guardrails: clean${scope ? ` (${scope.size} file(s))${unran}` : ''}`);
   if (stale.length > 0) {
     const cmds = [...new Set(stale.map((k) => fixCmd('--tighten', toolOfKey(k))))];
     const msg = `guardrails: ${stale.length} baseline entr(ies) improved. Run: ${cmds.join(' and ')}`;

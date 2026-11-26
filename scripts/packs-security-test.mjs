@@ -310,6 +310,47 @@ describe('real binaries', () => {
     });
   });
 
+  realIt('semgrep', 'semgrep sees aliased exec, HTML sinks, shell helpers and named hashes', () => {
+    useReal('semgrep');
+    cpSync(join(TEMPLATES, '.semgrep'), join(state.dir, '.semgrep'), { recursive: true });
+    rmSync(join(state.dir, 'src/a.ts'));
+    put('src/esm.ts', "import { exec as run } from 'node:child_process';\nrun(cmd);\nrun('ls');\n");
+    put('src/sync.ts', "import { execSync as sh } from 'child_process';\nsh(cmd);\n");
+    put('src/cjs.js', "const { exec: run } = require('child_process');\nrun(cmd);\n");
+    put('src/own.ts', "import { exec as run } from './mine';\nrun(cmd);\n");
+    put(
+      'src/html.ts',
+      "el.insertAdjacentHTML('beforeend', x);\nel.insertAdjacentHTML('beforeend', '<br>');\n",
+    );
+    put(
+      'src/sh.py',
+      'import subprocess\nsubprocess.getoutput(x)\nsubprocess.getstatusoutput(x)\n',
+    );
+    put(
+      'src/weak.py',
+      [
+        'import hashlib',
+        'hashlib.new("md5", x)',
+        'hashlib.new("SHA1", x)',
+        'hashlib.new("sha-1")',
+        'hashlib.sha1(x)',
+        'hashlib.new("sha256", x)',
+        'hashlib.sha1(x, usedforsecurity=False)',
+        'hashlib.md5(usedforsecurity=False)',
+        'hashlib.new("md5", x, usedforsecurity=False)',
+        '',
+      ].join('\n'),
+    );
+    assert.deepEqual(recordedCounts(), {
+      'semgrep:js-child-process-shell|src/cjs.js': 1,
+      'semgrep:js-child-process-shell|src/esm.ts': 1,
+      'semgrep:js-child-process-shell|src/sync.ts': 1,
+      'semgrep:js-html-injection|src/html.ts': 1,
+      'semgrep:py-shell-true|src/sh.py': 2,
+      'semgrep:py-weak-hash|src/weak.py': 4,
+    });
+  });
+
   realIt('zizmor', 'zizmor audits a risky workflow and accepts the template config', () => {
     useReal('zizmor');
     put('.github/zizmor.yml', template('zizmor.yml'));
