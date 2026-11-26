@@ -96,7 +96,7 @@ describe('rules (real ast-grep)', { skip }, () => {
     }
   });
 
-  it('does not let ast-grep-ignore silence its rules', () => {
+  it('reports findings under every form of ast-grep-ignore, and the comment itself', () => {
     put(
       'e2e/a.spec.ts',
       [
@@ -106,11 +106,41 @@ describe('rules (real ast-grep)', { skip }, () => {
         "test.skip('b', async () => {});",
         "test.only('c', async () => {}); /* ast-grep-ignore */",
         '// ast-grep-ignore: no-banned-identifier',
-        'const data = 1;',
+        "test.only('d', async () => {});",
         '',
       ].join('\n'),
     );
-    assert.deepEqual(recordedCounts(), { 'playwright:suppression|e2e/a.spec.ts': 3 });
+    assert.deepEqual(recordedCounts(), {
+      'playwright:focused-test|e2e/a.spec.ts': 3,
+      'playwright:skip|e2e/a.spec.ts': 1,
+      'playwright:suppression|e2e/a.spec.ts': 3,
+    });
+  });
+
+  it('a baselined suppression comment cannot hide a later .only or fixed wait', () => {
+    const spec = (body) => `// ast-grep-ignore\n${body}\n`;
+    put('e2e/a.spec.ts', spec('const legacy = 1;'));
+    assert.deepEqual(recordedCounts(), { 'playwright:suppression|e2e/a.spec.ts': 1 });
+    put(
+      'e2e/a.spec.ts',
+      spec("test.only('pays', async ({ page }) => {\n  await page.waitForTimeout(1000);\n});"),
+    );
+    const r = g(['check']);
+    assert.equal(r.status, 1);
+    assert.deepEqual(reported(r.out, 'e2e/a.spec.ts'), ['2 focused-test', '3 fixed-wait']);
+    assert.equal(postEdit('e2e/a.spec.ts').status, 2);
+  });
+
+  it('reads suppression comments only from real comments, and leaves the source file alone', () => {
+    const text = [
+      "const a = '// ast-grep-ignore';",
+      'const b = `/* ast-grep-ignore */`;',
+      '// see the ast-grep-ignore docs',
+      '',
+    ].join('\n');
+    put('e2e/a.spec.ts', text);
+    assert.equal(g(['check']).status, 0);
+    assert.equal(readFileSync(join(state.dir, 'e2e/a.spec.ts'), 'utf8'), text);
   });
 
   it('keeps a quarantine live through its date and expires it the next day', () => {
@@ -127,18 +157,54 @@ describe('rules (real ast-grep)', { skip }, () => {
 describe('scope (real ast-grep)', { skip }, () => {
   beforeEach(useReal);
 
-  it('defaults to e2e folders and *.spec.* files', () => {
-    for (const file of ['e2e/helper.ts', 'apps/web/e2e/h.ts', 'src/a.spec.ts', 'src/a.ts']) {
-      put(file, BAD);
-    }
-    assert.deepEqual(
-      Object.keys(recordedCounts()).filter((k) => k.startsWith('playwright:fixed-wait')),
-      [
-        'playwright:fixed-wait|apps/web/e2e/h.ts',
-        'playwright:fixed-wait|e2e/helper.ts',
-        'playwright:fixed-wait|src/a.spec.ts',
-      ],
+  const waits = () =>
+    Object.keys(recordedCounts())
+      .filter((k) => k.startsWith('playwright:fixed-wait|'))
+      .map((k) => k.split('|')[1])
+      .toSorted();
+
+  it('defaults to e2e folders and any file that imports Playwright, not unit specs', () => {
+    const using = (line) => `${line}\n${BAD}`;
+    put('e2e/helper.ts', BAD);
+    put('apps/web/e2e/h.ts', BAD);
+    put('tests/checkout.test.ts', using("import { test } from '@playwright/test';"));
+    put('tests/multi.ts', using("import {\n  expect,\n  test,\n} from '@playwright/test';"));
+    put('tests/cjs.js', using("const { test } = require('@playwright/test');"));
+    put('tests/dynamic.mjs', using("const pw = await import('playwright/test');"));
+    // Through a fixtures module, behind a barrel, with an import cycle and a `.js` specifier.
+    put(
+      'support/base.ts',
+      "import { test as base } from '@playwright/test';\nimport './index.js';\n",
     );
+    put('support/index.ts', "export * from './base.js';\n");
+    put('tests/via-fixtures.spec.ts', using("import { test } from '../support';"));
+    // Unit tests, and mentions that are not imports.
+    put('src/unit.spec.ts', using("import { test } from 'vitest';"));
+    put('src/globals.test.ts', BAD);
+    put('src/mention.spec.ts', using("// import { test } from '@playwright/test';"));
+    put('src/text.spec.ts', using("export const pkg = '@playwright/test';"));
+    put('src/cycle-a.ts', using("import './cycle-b';"));
+    put('src/cycle-b.ts', "import './cycle-a';\nimport './missing';\n");
+    assert.deepEqual(waits(), [
+      'apps/web/e2e/h.ts',
+      'e2e/helper.ts',
+      'tests/checkout.test.ts',
+      'tests/cjs.js',
+      'tests/dynamic.mjs',
+      'tests/multi.ts',
+      'tests/via-fixtures.spec.ts',
+    ]);
+    // A scoped run follows the imports of a file that did not change.
+    assert.equal(g(['baseline', '--reset']).status, 0);
+    put('tests/new.test.ts', using("import { test } from '../support';"));
+    assert.equal(postEdit('tests/new.test.ts').status, 2);
+  });
+
+  it('ignore beats an import of Playwright', () => {
+    put(CONFIG, '{ "ignore": ["tools/**"] }\n');
+    put('tools/scrape.ts', `import { test } from '@playwright/test';\n${BAD}`);
+    put('e2e/a.ts', BAD);
+    assert.deepEqual(waits(), ['e2e/a.ts']);
   });
 
   it('follows include and ignore from the config', () => {
@@ -157,7 +223,7 @@ describe('scope (real ast-grep)', { skip }, () => {
     put('e2e/ignored.spec.ts', BAD);
     spawnSync('git', ['add', '-f', 'e2e/ignored.spec.ts'], { cwd: state.dir });
     put('.hidden/e2e/h.spec.ts', BAD);
-    put('-x.spec.ts', BAD);
+    put('-x.spec.ts', `import '@playwright/test';\n${BAD}`);
     const counts = recordedCounts();
     for (const file of ['e2e/ignored.spec.ts', '.hidden/e2e/h.spec.ts', '-x.spec.ts']) {
       assert.equal(counts[`playwright:focused-test|${file}`], 1, file);
@@ -220,7 +286,10 @@ describe('fail closed', () => {
     assert.equal(g(['check']).status, 0);
     const args = calls('ast-grep').at(-1);
     assert.deepEqual(args.slice(0, 2), ['scan', '--config']);
-    assert.deepEqual(args.slice(3), ['--json=stream', '--inspect', 'summary', 'e2e/a.spec.ts']);
+    assert.deepEqual(args.slice(3, 6), ['--json=stream', '--inspect', 'summary']);
+    // The scanned file is a copy outside the repo.
+    assert.equal(args.length, 7);
+    assert.match(args[6], /\/copy\/0\.ts$/);
   });
 
   it('fails on a tool error', () => {

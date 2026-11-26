@@ -406,10 +406,18 @@ Tool interactions that surprise people, and what to do about them.
 
 **Resolution:** update the dependency, or accept the advisory with a reason and an `ignoreUntil` date in `osv-scanner.toml`. A dependency bot opens the update PR; the gate only reports.
 
-## playwright pack and unit tests named *.spec.*
+## playwright pack and unit tests
 
 **Symptom:** a Vitest or Jest file reports `playwright:skip` or `playwright:conditional-in-test`.
 
-**Why:** the default `include` takes every `*.spec.*` file, and the rules match `test`, `it` and `describe` by name.
+**Why:** the rules match `test`, `it` and `describe` by name, and the file is in scope: it matches `include`, or it imports `@playwright/test`, possibly through a relative import.
 
-**Resolution:** narrow `include` in `guardrails/playwright.json` to the e2e folders. An `ast-grep-ignore` comment does not work here: bare ones, and ones naming a playwright rule, are findings. Comments that name only the project's own ast-grep rules keep working.
+**Resolution:** list the file under `ignore` in `guardrails/playwright.json`, or narrow `include`.
+
+## playwright pack and ast-grep-ignore
+
+**Symptom:** a finding stays under an `ast-grep-ignore` comment.
+
+**Why:** a suppression must not hide a `.only` or a fixed wait, so the playwright tool neutralises the comment in the copy it scans.
+
+**Resolution:** fix the code. The core `ast-grep` tool still honours the comment: name only your own rules in it (`// ast-grep-ignore: no-banned-identifier`), which is not a playwright finding.

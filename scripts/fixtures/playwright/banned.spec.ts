@@ -5,6 +5,23 @@ import { setTimeout as pause } from 'node:timers/promises'; // want: fixed-wait
 import { promisify } from 'node:util';
 
 const nap = promisify(setTimeout); // want: fixed-wait
+const globalNap = promisify(global.setTimeout); // want: fixed-wait
+
+import * as timers from 'node:timers/promises';
+import clock from 'timers/promises';
+const cjsTimers = require('node:timers/promises');
+
+test('module sleeps', async () => {
+  await timers.setTimeout(5); // want: fixed-wait
+  await clock.setTimeout(5); // want: fixed-wait
+  await cjsTimers.setTimeout(5); // want: fixed-wait
+  await require('timers/promises').setTimeout(5); // want: fixed-wait
+  await new Promise((resolve) => global.setTimeout(resolve, 1000)); // want: fixed-wait
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 1000)); // want: fixed-wait
+  test.skip((browserName) => true, 'always'); // want: skip
+  test.skip(browserName => true, 'always'); // want: skip
+  test.fixme(function (page) { return true; }, 'always'); // want: skip
+});
 
 test('fixed waits', async ({ page }) => {
   await page.waitForTimeout(1000); // want: fixed-wait

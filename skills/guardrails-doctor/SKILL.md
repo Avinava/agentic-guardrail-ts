@@ -53,7 +53,8 @@ you to apply the suggested wave.
   tool on (for example `mule: detected` with every tool `off`) as an offer, not a defect: packs
   are opt-in. Report a tool that is `on` but whose binary is missing.
 - **Playwright pack.** A repo with `playwright.config.*` and no `guardrails/playwright.json`: offer the
-  pack. With it on, report: `include` globs that miss the config's `testDir`; `@ast-grep/cli` missing
+  pack. With it on, report: a `testDir` outside `include` whose specs reach `@playwright/test`
+  only through a path alias or workspace package (they are not checked); `@ast-grep/cli` missing
   from `devDependencies`; `playwright:skip`, `playwright:focused-test` and
   `playwright:stale-quarantine` counts in the baseline (a baselined `.only` still hides tests); and
   `@quarantine-` dates that expire within 14 days or lie more than 90 days ahead

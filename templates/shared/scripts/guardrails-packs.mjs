@@ -18,9 +18,9 @@
 //   scan(ctx) replaces run+parse for checks done in JS
 //   metric + measure(ctx)  a number ratchet instead of findings: { name, direction, unit, advice }
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { basename, extname, join, posix } from 'node:path';
 
 const TS_EXT = /\.[cm]?[jt]sx?$/;
 const MD_EXT = /\.mdx?$/;
@@ -1772,15 +1772,28 @@ const security = {
 // is done in JS. See docs/decisions/0004-playwright-pack.md for why not eslint-plugin-playwright.
 
 const PW_CONFIG = 'guardrails/playwright.json';
-const PW_DEFAULTS = { include: ['**/e2e/**', '**/*.spec.*'], ignore: [] };
+const PW_DEFAULTS = { include: ['**/e2e/**'], ignore: [] };
 const PW_BATCH = 200;
 // Rules that only feed the quarantine logic.
 const PW_HELPERS = ['scope', 'tag'];
+// A comment that would silence ast-grep is renamed (same length) in the copy that is scanned, so it
+// hides nothing and can still be reported.
+const PW_IGNORE = 'ast-grep-ignore';
+const PW_NEUTRAL = 'ast-grep~ignore';
+// A file outside "include" is an e2e file when it imports one of these, itself or through relative
+// imports (a fixtures module).
+const PW_PACKAGES = new Set(['@playwright/test', 'playwright/test']);
+// Static imports and re-exports, `require()` and `import()`, each starting its own line.
+const PW_IMPORT =
+  /^[ \t]*(?:(?:import|export)\b(?:[^'"`;]*?\bfrom)?[ \t]*|(?:(?:const|let|var)\b[^=;]*=[ \t]*)?(?:await[ \t]+)?(?:require|import)\([ \t]*)['"]([^'"\n]+)['"]/gm;
+const PW_RESOLVE = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
 
 // A call chain that starts at a Playwright test object: test, test.describe.serial, test.info(),
 // and fixture aliases named like one (authTest).
 const PW_TEST = '(test|it|setup|teardown|[A-Za-z0-9_]*Test)';
 const PW_CHAIN = `^(${PW_TEST}|describe|testInfo)(\\.[A-Za-z]+(\\(\\))?)*$`;
+
+const PW_TIMER = '^((window|globalThis|global)\\.)?setTimeout$';
 
 // The n-th named child, not counting comments: an argument or a statement.
 const pwNth = (position) => ({ position, ofRule: { not: { kind: 'comment' } } });
@@ -1828,11 +1841,16 @@ function pwRules(language) {
     kind: 'identifier',
     not: { regex: '^(undefined|NaN|Infinity)$' },
   };
+  const readsName = { any: [runtimeValue, { has: { stopBy: 'end', ...runtimeValue } }] };
   const conditionalSkip = {
     all: [
       arg(1, {
         not: text,
-        any: [runtimeValue, { has: { stopBy: 'end', ...runtimeValue } }],
+        // In a callback only the body counts: `(browserName) => true` reads nothing.
+        any: [
+          { all: [{ not: fn }, readsName] },
+          { all: [fn, { has: { field: 'body', ...readsName } }] },
+        ],
       }),
       arg(2, text),
       { not: arg(3, { pattern: '$EXTRA' }) },
@@ -1859,7 +1877,7 @@ function pwRules(language) {
               stopBy: 'end',
               all: [
                 { kind: 'call_expression' },
-                pwCallee({ regex: '^((window|globalThis)\\.)?setTimeout$' }),
+                pwCallee({ regex: PW_TIMER }),
                 arg(1, {
                   any: [
                     name,
@@ -1882,6 +1900,53 @@ function pwRules(language) {
           },
         ],
       }),
+    ],
+  };
+  const promises = { regex: '^.(node:)?timers/promises.$' };
+  const required = {
+    kind: 'call_expression',
+    all: [pwCallee({ regex: '^require$' }), arg(1, promises)],
+  };
+  const ns = { kind: 'identifier', pattern: '$NS' };
+  // `timers.setTimeout()` where `timers` is the whole timers/promises module.
+  const moduleSleep = {
+    all: [
+      { kind: 'call_expression' },
+      pwCallee({
+        kind: 'member_expression',
+        all: [
+          { has: { field: 'object', pattern: '$NS' } },
+          { has: { field: 'property', regex: '^setTimeout$' } },
+        ],
+      }),
+      {
+        any: [
+          pwCallee({ has: { field: 'object', ...required } }),
+          {
+            inside: {
+              stopBy: 'end',
+              kind: 'program',
+              has: {
+                stopBy: 'end',
+                any: [
+                  {
+                    kind: 'import_clause',
+                    any: [{ has: ns }, { has: { kind: 'namespace_import', has: ns } }],
+                    inside: { kind: 'import_statement', has: { field: 'source', ...promises } },
+                  },
+                  {
+                    kind: 'variable_declarator',
+                    all: [
+                      { has: { field: 'name', ...ns } },
+                      { has: { field: 'value', ...required } },
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
     ],
   };
   const testCall = {
@@ -1923,24 +1988,26 @@ function pwRules(language) {
           }),
         },
         sleep,
+        moduleSleep,
         {
           kind: 'import_specifier',
           has: { field: 'name', regex: '^setTimeout$' },
           inside: {
             stopBy: 'end',
             kind: 'import_statement',
-            has: { field: 'source', regex: '^.(node:)?timers/promises.$' },
+            has: { field: 'source', ...promises },
           },
         },
         {
           all: [
             { kind: 'call_expression' },
             pwCallee({ regex: '^(util\\.)?promisify$' }),
-            arg(1, { regex: '^((window|globalThis)\\.)?setTimeout$' }),
+            arg(1, { regex: PW_TIMER }),
           ],
         },
       ],
     },
+    suppression: { kind: 'comment', regex: `^/[/*][\\s]*${PW_NEUTRAL}` },
     'focused-test': modifier('only'),
     skip: { all: [modifier('skip|fixme'), { not: conditionalSkip }] },
     'conditional-in-test': {
@@ -2010,11 +2077,24 @@ function pwConfig(h) {
   return { include: include.map(globRegExp), ignore: ignore.map(globRegExp) };
 }
 
+// Copies each file with suppression comments neutralised. Read and written byte for byte, so lines,
+// offsets and a file that is not UTF-8 stay as they are.
+function pwCopies({ h, tmp }, files) {
+  mkdirSync(tmp('copy'), { recursive: true });
+  return files.map((file, i) => {
+    const copy = tmp(`copy/${i}${extname(file)}`);
+    const bytes = readFileSync(join(h.ROOT, file), 'latin1');
+    writeFileSync(copy, bytes.replaceAll(PW_IGNORE, PW_NEUTRAL), 'latin1');
+    return copy;
+  });
+}
+
 // Runs ast-grep with our own config, so the project's sgconfig.yml cannot change what is read.
 // It skips unreadable, non-UTF-8 and very large files and still exits 0, so every file handed to it
-// must be reported as scanned.
+// must be reported as scanned. Returns the matches with `file` set back to the repo path.
 function pwScan(ctx, files) {
   const { h, tmp } = ctx;
+  const copies = pwCopies(ctx, files);
   mkdirSync(tmp('rules'), { recursive: true });
   const docs = ['TypeScript', 'Tsx', 'JavaScript'].flatMap(pwRules);
   writeFileSync(tmp('rules/playwright.yml'), docs.join('\n---\n'));
@@ -2022,7 +2102,7 @@ function pwScan(ctx, files) {
   const cmd = h.bin('ast-grep') ?? h.needBin('sg');
   const matches = [];
   for (let i = 0; i < files.length; i += PW_BATCH) {
-    const batch = files.slice(i, i + PW_BATCH);
+    const batch = copies.slice(i, i + PW_BATCH);
     const r = h.run(cmd, [
       'scan',
       '--config',
@@ -2030,10 +2110,13 @@ function pwScan(ctx, files) {
       '--json=stream',
       '--inspect',
       'summary',
-      ...batch.map(h.safe),
+      ...batch,
     ]);
     const fail = (why) => {
-      throw new Error(`playwright: ast-grep ${why} (exit ${r.status}):\n${tail(r.stderr)}`);
+      const from = `${batch.length} file(s) from ${files[i]}`;
+      throw new Error(
+        `playwright: ast-grep ${why} (exit ${r.status}) on ${from}:\n${tail(r.stderr)}`,
+      );
     };
     if (r.status !== 0 && r.status !== 1) fail('failed');
     const counts = /scannedFileCount=(\d+),skippedFileCount=(\d+)/.exec(r.stderr);
@@ -2051,7 +2134,8 @@ function pwScan(ctx, files) {
     if (r.status === 1 && found.length === 0) fail('reported errors it did not print');
     matches.push(...found);
   }
-  return matches;
+  // Copies are named by their index.
+  return matches.map((m) => ({ ...m, file: files[Number.parseInt(basename(m.file), 10)] }));
 }
 
 // A tag is live through its date (UTC). A date that does not exist is never live.
@@ -2084,23 +2168,57 @@ function pwFindings(file, matches, today) {
   }
   const rules = matches
     .filter((m) => !PW_HELPERS.includes(m.ruleId))
+    .filter((m) => m.ruleId !== 'suppression' || pwSilences(m.text))
     .filter((m) => m.ruleId !== 'skip' || !quarantined.some((q) => contains(q, m)))
     .map((m) => finding(m.ruleId, m.range.start.line + 1));
   return [...rules, ...stale];
 }
 
-// `// ast-grep-ignore` would silence these rules too, so a bare one, or one that names no other
-// tool's rule, is itself a finding.
-function pwSuppressions(file, text) {
-  return text.split('\n').flatMap((line, i) => {
-    const m = /\/[/*]\s*ast-grep-ignore\b(?:\s*:([^*\n]*))?/.exec(line);
-    if (!m) return [];
-    const ids = (m[1] ?? '').split(',').map((s) => s.trim().split('_')[0]);
-    const hides = ids.some((id) => id === '' || Object.hasOwn(PW_MESSAGES, id));
-    return hides
-      ? [{ rule: 'suppression', file, line: i + 1, message: PW_MESSAGES.suppression }]
-      : [];
-  });
+// A suppression comment is a finding when it is bare or names one of these rules. One that names
+// only the project's own ast-grep rules is legitimate.
+function pwSilences(comment) {
+  const [, list = ''] = /ignore\b(?:\s*:([^*\n]*))?/.exec(comment) ?? [];
+  return list
+    .split(',')
+    .map((s) => s.trim().split('_')[0])
+    .some((id) => id === '' || Object.hasOwn(PW_MESSAGES, id));
+}
+
+// Whether a file is, or reaches through relative imports, a module that imports Playwright.
+function pwImportsPlaywright(h) {
+  const specifiers = new Map();
+  const none = new Set();
+  const read = (file) => {
+    if (!specifiers.has(file)) {
+      specifiers.set(
+        file,
+        [...h.read(file).matchAll(PW_IMPORT)].map((m) => m[1]),
+      );
+    }
+    return specifiers.get(file);
+  };
+  const resolve = (from, spec) => {
+    const base = posix.join(posix.dirname(from), spec);
+    return [
+      base,
+      base.replace(/\.([cm]?)js(x?)$/, '.$1ts$2'),
+      ...PW_RESOLVE.map((ext) => `${base}${ext}`),
+      ...PW_RESOLVE.map((ext) => `${base}/index${ext}`),
+    ].find((f) => TS_EXT.test(f) && !f.startsWith('..') && h.exists(f));
+  };
+  return (start) => {
+    const seen = new Set([start]);
+    // A Set is iterated in insertion order, including entries added during the loop.
+    for (const file of seen) {
+      for (const spec of read(file)) {
+        if (PW_PACKAGES.has(spec)) return true;
+        const next = /^\.\.?(\/|$)/.test(spec) ? resolve(file, spec) : undefined;
+        if (next && !none.has(next)) seen.add(next);
+      }
+    }
+    for (const file of seen) none.add(file);
+    return false;
+  };
 }
 
 const playwright = {
@@ -2115,28 +2233,23 @@ const playwright = {
       scan: (ctx) => {
         const { files, h } = ctx;
         const { include, ignore } = pwConfig(h);
+        const imports = pwImportsPlaywright(h);
         const e2e = (files ?? h.projectFiles(TS_EXT)).filter(
-          (f) => include.some((re) => re.test(f)) && !ignore.some((re) => re.test(f)),
+          (f) =>
+            !ignore.some((re) => re.test(f)) && (include.some((re) => re.test(f)) || imports(f)),
         );
-        // A full run that matches nothing means the globs are wrong, not that the suite is clean.
+        // A full run that finds nothing means the scope is wrong, not that the suite is clean.
         if (!files && e2e.length === 0) {
-          throw new Error(`${PW_CONFIG}: no file matches "include"; fix the globs or remove it`);
+          throw new Error(
+            `${PW_CONFIG}: no file matches "include" or imports @playwright/test; fix the globs or remove it`,
+          );
         }
         // ast-grep reports an empty file as skipped.
-        const sources = e2e.map((f) => [f, h.read(f)]).filter(([, text]) => text !== '');
+        const sources = e2e.filter((f) => h.read(f) !== '');
         if (sources.length === 0) return [];
-        const byFile = Map.groupBy(
-          pwScan(
-            ctx,
-            sources.map(([f]) => f),
-          ),
-          (m) => h.rel(m.file),
-        );
+        const byFile = Map.groupBy(pwScan(ctx, sources), (m) => m.file);
         const today = new Date().toISOString().slice(0, 10);
-        return sources.flatMap(([file, text]) => [
-          ...pwFindings(file, byFile.get(h.rel(file)) ?? [], today),
-          ...pwSuppressions(file, text),
-        ]);
+        return sources.flatMap((file) => pwFindings(file, byFile.get(file) ?? [], today));
       },
     },
   ],

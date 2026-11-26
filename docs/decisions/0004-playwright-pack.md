@@ -30,11 +30,13 @@ Oxlint 1.95.0 and 1.90.0 with `eslint-plugin-playwright` 2.12.2, on scratch spec
 4. An expired or undated tag fails even without a `.skip`, because suites exclude quarantined tests with `grepInvert`.
 5. Conditionals are limited to `if` and `switch` directly in a test or step body, without throw-only guards. Wider forms (ternaries, callbacks, hooks) were mostly legitimate.
 6. No "test without assertions" rule. Assertions live in page objects, helpers and implicit waits, and no syntax pattern separates those from an empty test.
-7. `ast-grep-ignore` comments that would silence these rules are findings. Exceptions go through the reviewed baseline.
+7. `ast-grep-ignore` cannot silence these rules. ast-grep has no flag to ignore suppression comments, so it scans temporary copies in which the comment is renamed (same length, so lines hold). A comment that tries is also a finding. Exceptions go through the reviewed baseline.
+8. A file is in scope when it matches `include` (default `**/e2e/**`) or imports `@playwright/test`, directly or through relative imports. A `*.spec.*` default pulled in Vitest and Jest files and missed Playwright `*.test.ts`. Reading `testDir` from `playwright.config` was dropped: the config is code.
 
 ## Consequences
 
 - Adding the pack needs `@ast-grep/cli` only.
+- Suites that import Playwright only through a path alias or a workspace package need an `include` glob.
 - The rules match syntax, not types: aliases of the test object not named `*Test`, computed members and a constant used as a tag are not resolved.
 - A quarantine expiry turns a green branch red on its date. That is the point; fix the test or renew the tag in review.
 - ast-grep skips files it cannot read, non-UTF-8 files and very large files while exiting 0, so the tool reads its `--inspect summary` counts and fails if any file was skipped. A new ast-grep release that changes that output fails the gate.

@@ -1,4 +1,4 @@
 {
-  "include": ["**/e2e/**", "**/*.spec.*"],
+  "include": ["**/e2e/**"],
   "ignore": []
 }

@@ -2,6 +2,18 @@
 import { expect, test } from '@playwright/test';
 import { setInterval } from 'node:timers/promises';
 import { checkoutPage } from './checkout-page';
+import * as fsp from 'node:fs/promises';
+
+// `setTimeout` on anything but the timers module is not a sleep.
+test.setTimeout(60_000);
+page.setTimeout(5);
+fsp.setTimeout(5);
+test.skip((info) => info.project.name === 'mobile', 'desktop layout only');
+test.skip((browserName) => {
+  return browserName === 'webkit';
+}, 'not supported on webkit');
+// A string that quotes a suppression comment is not one.
+const sample = '// ast-grep-ignore';
 
 // page.waitForTimeout(1000), test.only('x') and test.skip() in a comment are not code.
 const note = "page.waitForTimeout(1000); test.only('x'); test.skip(); if (a) {}";

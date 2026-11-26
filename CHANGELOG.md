@@ -9,7 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 An opt-in Playwright lint pack. Nothing changes for an existing install until `guardrails/playwright.json` exists. See [docs/packs.md](docs/packs.md#playwright) and [decision 0004](docs/decisions/0004-playwright-pack.md).
 
 ### Added
-- `playwright` pack, switched on by `guardrails/playwright.json` (pre-commit and up, plus the edit and stop hooks): `fixed-wait`, `focused-test`, `skip` (a skip needs a live `@quarantine-YYYY-MM-DD` tag or the form `test.skip(condition, 'reason')`), `stale-quarantine`, `conditional-in-test` and `suppression`. Findings are keyed `playwright:<rule>|file`, so the baseline ratchet takes in a legacy suite. It runs `@ast-grep/cli`; ESLint is not added. There is no "test without assertions" rule: it could not be made reliable.
+- `playwright` pack, switched on by `guardrails/playwright.json` (pre-commit and up, plus the edit and stop hooks). It checks `**/e2e/**` and any file that imports `@playwright/test`, directly or through relative imports, and `ast-grep-ignore` cannot hide a finding. Rules: `fixed-wait`, `focused-test`, `skip` (a skip needs a live `@quarantine-YYYY-MM-DD` tag or the form `test.skip(condition, 'reason')`), `stale-quarantine`, `conditional-in-test` and `suppression`. Findings are keyed `playwright:<rule>|file`, so the baseline ratchet takes in a legacy suite. It runs `@ast-grep/cli`; ESLint is not added. There is no "test without assertions" rule: it could not be made reliable.
 - `scripts/packs-playwright-test.mjs` with banned and allowed fixtures, run against the real ast-grep binary (installed in CI).
 
 ## [4.0.0] - 2026-11-25
