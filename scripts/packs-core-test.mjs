@@ -79,6 +79,71 @@ describe('ts pack', () => {
     g(['check', '--files', 'src/a.ts']);
     assert.deepEqual(calls('knip'), []);
   });
+
+  it('does not count the CODEOWNERS owners Knip adds to an issue', () => {
+    put('knip.json', '{}\n');
+    // The shape Knip 6 prints when .github/CODEOWNERS exists.
+    const issue = {
+      file: 'src/a.ts',
+      owners: [{ name: '@acme/team' }],
+      files: [{ name: 'src/a.ts' }],
+    };
+    fake('knip', { stdout: JSON.stringify({ issues: [issue] }), status: 1 });
+    assert.deepEqual(recordedCounts(), { 'knip:files|src/a.ts': 1 });
+  });
+});
+
+describe('tools a run did not execute are named', () => {
+  beforeEach(() => {
+    put('knip.json', '{}\n');
+    put('.jscpd.json', '{}\n');
+    put('cspell.json', '{}\n');
+    put('.github/zizmor.yml', 'rules: {}\n');
+    put('.semgrep/rules.yml', 'rules: []\n');
+    fake('knip', { stdout: '{"issues":[]}' });
+    fake('cspell', { stdout: '' });
+    fake('semgrep', { stdout: '{"results":[]}' });
+    fake('jscpd', {
+      writes: [
+        {
+          flag: '--output',
+          join: 'jscpd-report.json',
+          content: { statistics: { total: { sources: 1, percentage: 0 } }, duplicates: [] },
+        },
+      ],
+    });
+  });
+
+  it('a scoped clean line names them, and why', () => {
+    const r = g(['check', '--files', 'src/a.ts']);
+    assert.equal(r.status, 0, r.out);
+    assert.match(
+      r.out,
+      /guardrails: clean \(1 file\(s\)\); not run: jscpd, knip, semgrep \(full check only\); zizmor \(no input\)$/m,
+    );
+  });
+
+  it('a scoped run with nothing changed names every enabled tool', () => {
+    spawnSync('git', ['add', '-A'], { cwd: state.dir });
+    spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'x'], {
+      cwd: state.dir,
+    });
+    const r = g(['check', '--changed'], {});
+    const line = r.out.split('\n').find((l) => l.startsWith('guardrails: clean (0 file(s))'));
+    for (const tool of ['oxlint', 'cspell', 'jscpd', 'knip', 'semgrep', 'zizmor']) {
+      assert.match(line ?? r.out, new RegExp(`\\b${tool}\\b`));
+    }
+  });
+
+  it('a full run says which enabled tool had no input', () => {
+    const r = g(['check']);
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /^guardrails: not run: zizmor \(no input\)$/m);
+    assert.deepEqual(calls('zizmor'), []);
+    put('.github/workflows/ci.yml', 'name: ci\n');
+    fake('zizmor', { stdout: '[]' });
+    assert.doesNotMatch(g(['check']).out, /not run/);
+  });
 });
 
 describe('ast-grep', () => {

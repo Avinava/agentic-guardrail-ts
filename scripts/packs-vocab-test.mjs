@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import {
@@ -107,6 +107,8 @@ describe('vocab-literal, TypeScript', { skip: NO_TS }, () => {
     assert.match(g(['check']).out, /needs "modules"/);
     config(['src/missing.ts']);
     assert.match(g(['check']).out, /does not exist/);
+    config(['src/vocab.ts'], { excludeMembers: 'Status.*' });
+    assert.match(g(['check']).out, /"excludeMembers" is a list/);
     put('src/empty.ts', 'export const X = 1;\n');
     config(['src/empty.ts']);
     assert.match(g(['check']).out, /no string members found/);
@@ -445,6 +447,166 @@ describe('vocab-literal, Python', { skip: NO_PY || NO_TS }, () => {
   it('keeps TypeScript and Python tables apart', () => {
     put('src/a.ts', "export const a = 'active';\n");
     assert.equal(g(['check']).status, 0);
+  });
+});
+
+describe('vocab-literal, property names and keys', { skip: NO_TS || NO_PY }, () => {
+  beforeEach(() => put('src/a.ts', ''));
+
+  it('TypeScript: a key is not a value', () => {
+    put('src/vocab.ts', 'export const Status = { Ready: "ready" } as const;\n');
+    config(['src/vocab.ts']);
+    put(
+      'src/keys.ts',
+      [
+        'export type U = T["ready"] | T[("ready" | "other")];',
+        'export const o = { "ready": 1, ["ready"]: 2 };',
+        'export interface I { "ready": string; "ready"(): void }',
+        'export class C { "ready" = 1 }',
+        'export enum E { "ready" = 1 }',
+        'export const a = obj["ready"];',
+        'const { "ready": renamed } = obj;',
+        '',
+      ].join('\n'),
+    );
+    assert.equal(g(['check']).status, 0);
+    put(
+      'src/values.ts',
+      'export const v = { key: "ready" };\nexport type V = "ready";\nexport const w = f(["ready"])[0];\n',
+    );
+    assert.deepEqual(recordedCounts(), { 'vocab-literal:Status.Ready|src/values.ts': 3 });
+  });
+
+  it('Python: a key is not a value', () => {
+    put('app/vocab.py', 'from enum import StrEnum\nclass S(StrEnum):\n    READY = "ready"\n');
+    config(['app/vocab.py']);
+    put(
+      'app/keys.py',
+      'a = {"ready": 1}\nb = d["ready"]\nc = d.get("ready")\ne = d.pop("ready", None)\nd["ready"] = 2\n',
+    );
+    assert.equal(g(['check']).status, 0);
+    put(
+      'app/values.py',
+      'a = {"k": "ready"}\nb = d.get("k", "ready")\nc: Literal["ready"]\ne = d[f("ready")]\nget("ready")\n',
+    );
+    assert.deepEqual(recordedCounts(), { 'vocab-literal:S.READY|app/values.py': 5 });
+  });
+});
+
+describe('vocab-literal, lists, auto() and excluded members', { skip: NO_TS || NO_PY }, () => {
+  beforeEach(() => put('src/a.ts', ''));
+
+  it('reads as const string arrays; a named member wins over a list entry', () => {
+    put(
+      'src/vocab.ts',
+      [
+        'export const ALL = ["alpha", "open"] as const;',
+        'export const Status = { Open: "open" } as const;',
+        'export const KINDS = ["beta"] as const satisfies readonly string[];',
+        'export const Loose = ["loose"];',
+        '',
+      ].join('\n'),
+    );
+    config(['src/vocab.ts']);
+    put('src/svc.ts', 'export const v = ["alpha", "open", "beta", "loose"];\n');
+    assert.match(g(['check']).out, /"alpha" is an entry of ALL/);
+    assert.deepEqual(recordedCounts(), {
+      'vocab-literal:ALL.alpha|src/svc.ts': 1,
+      'vocab-literal:Status.Open|src/svc.ts': 1,
+      'vocab-literal:KINDS.beta|src/svc.ts': 1,
+    });
+  });
+
+  it('accepts a module that holds only arrays', () => {
+    put('src/vocab.ts', 'export const KINDS = ["alpha"] as const;\n');
+    config(['src/vocab.ts']);
+    put('src/svc.ts', 'export const y = "alpha";\n');
+    assert.deepEqual(recordedCounts(), { 'vocab-literal:KINDS.alpha|src/svc.ts': 1 });
+  });
+
+  it('Python: auto() in a StrEnum is the lower-cased name', () => {
+    put(
+      'app/vocab.py',
+      [
+        'import enum',
+        'from enum import Enum, StrEnum, auto as a',
+        'class S(StrEnum):',
+        '    Alpha = a()',
+        '    BETA = enum.auto()',
+        'class Custom(StrEnum):',
+        '    def _generate_next_value_(name, start, count, last_values):',
+        '        return name',
+        '    GAMMA = a()',
+        'class N(str, Enum):',
+        '    DELTA = a()',
+        '    E = "e"',
+        '',
+      ].join('\n'),
+    );
+    config(['app/vocab.py']);
+    put('app/svc.py', 'v = ["alpha", "beta", "gamma", "delta"]\n');
+    assert.deepEqual(recordedCounts(), {
+      'vocab-literal:S.Alpha|app/svc.py': 1,
+      'vocab-literal:S.BETA|app/svc.py': 1,
+    });
+  });
+
+  it('excludeMembers drops members by name, nested ones too', () => {
+    put(
+      'src/vocab.ts',
+      [
+        'export const words = { item: "item", deep: { title: "Title" } } as const;',
+        'export const Status = { Open: "open", Item: "item" } as const;',
+        '',
+      ].join('\n'),
+    );
+    config(['src/vocab.ts'], { excludeMembers: ['words.*'] });
+    put('src/svc.ts', 'export const v = ["item", "Title", "open"];\n');
+    assert.deepEqual(recordedCounts(), {
+      'vocab-literal:Status.Item|src/svc.ts': 1,
+      'vocab-literal:Status.Open|src/svc.ts': 1,
+    });
+  });
+});
+
+describe('vocab-literal, which TypeScript parses', () => {
+  const modern = 'exports.version = "7.0.2";\n';
+  const vocab = 'export const S = { A: "ready" } as const;\n';
+
+  beforeEach(() => {
+    put('src/a.ts', '');
+    rmSync(join(state.dir, 'node_modules/typescript'), { force: true });
+    put('src/vocab.ts', vocab);
+    config(['src/vocab.ts']);
+    put('src/svc.ts', 'export const a = "ready";\n');
+  });
+
+  it('names the TS 6 alias when typescript has no compiler API', () => {
+    put('node_modules/typescript/package.json', '{"name":"typescript","version":"7.0.2"}');
+    put('node_modules/typescript/index.js', modern);
+    const r = g(['check']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /typescript 7\.0\.2 has no compiler API/);
+    assert.match(r.out, /npm:@typescript\/typescript6/);
+  });
+
+  it('names the alias when there is no typescript at all', () => {
+    assert.match(g(['check']).out, /was not found.*npm:@typescript\/typescript6/);
+  });
+
+  it('falls back to @typescript/typescript6', { skip: NO_TS }, () => {
+    put('node_modules/typescript/index.js', modern);
+    mkdirSync(join(state.dir, 'node_modules/@typescript'), { recursive: true });
+    symlinkSync(TYPESCRIPT, join(state.dir, 'node_modules/@typescript/typescript6'));
+    assert.match(g(['check']).out, /vocab-literal S\.A/);
+  });
+
+  it('finds typescript declared by a workspace member only', { skip: NO_TS }, () => {
+    put('packages/core/src/vocab.ts', vocab);
+    config(['packages/core/src/vocab.ts']);
+    mkdirSync(join(state.dir, 'packages/core/node_modules'), { recursive: true });
+    symlinkSync(TYPESCRIPT, join(state.dir, 'packages/core/node_modules/typescript'));
+    assert.match(g(['check']).out, /vocab-literal S\.A/);
   });
 });
 

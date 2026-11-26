@@ -144,7 +144,8 @@ describe('rules (real ast-grep)', { skip }, () => {
   });
 
   it('keeps a quarantine live through its date and expires it the next day', () => {
-    const spec = (date) => `test.skip('x', { tag: '@quarantine-${date}' }, async () => {});\n`;
+    const spec = (date) =>
+      `test('x', { tag: '@quarantine-${date}' }, async ({ isMobile }) => {\n  test.skip(isMobile);\n});\n`;
     put('e2e/today.spec.ts', spec(day(0)));
     put('e2e/past.spec.ts', spec(day(-1)));
     assert.deepEqual(recordedCounts(), {
@@ -198,6 +199,21 @@ describe('scope (real ast-grep)', { skip }, () => {
     assert.equal(g(['baseline', '--reset']).status, 0);
     put('tests/new.test.ts', using("import { test } from '../support';"));
     assert.equal(postEdit('tests/new.test.ts').status, 2);
+  });
+
+  it('leaves a script that imports only browser launchers alone, outside include', () => {
+    const using = (line) => `${line}\n${BAD}`;
+    put('scripts/shots.mjs', using("import { chromium, devices } from '@playwright/test';"));
+    put('scripts/cjs.js', using("const { chromium: browser } = require('@playwright/test');"));
+    put(
+      'scripts/dynamic.mjs',
+      using("const { webkit } = await import('playwright/test');"),
+    );
+    put('e2e/shots.ts', using("import { chromium } from '@playwright/test';"));
+    put('tests/both.ts', using("import { chromium, test } from '@playwright/test';"));
+    put('tests/page.ts', using("import type { Page } from '@playwright/test';"));
+    put('tests/two.ts', using("import { chromium } from '@playwright/test';\nimport './page';"));
+    assert.deepEqual(waits(), ['e2e/shots.ts', 'tests/both.ts', 'tests/page.ts', 'tests/two.ts']);
   });
 
   it('ignore beats an import of Playwright', () => {

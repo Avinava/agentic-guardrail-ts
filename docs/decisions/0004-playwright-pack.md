@@ -26,12 +26,12 @@ Oxlint 1.95.0 and 1.90.0 with `eslint-plugin-playwright` 2.12.2, on scratch spec
 
 1. The pack is one `scan` tool, `playwright`. ast-grep finds the code shapes; JavaScript does the date check of the quarantine tag. The plugin loads, but it cannot express two of the required bans (sleep promises, dated quarantine) and misses `fixme`, so a second engine would be needed anyway. ESLint stays out.
 2. The rules are generated in `guardrails-packs.mjs`, once per ast-grep language, not shipped as files in the target's `rules/`. So they cannot drift or be edited, they do not run through the project's `sgconfig.yml`, and the target configures only `include` and `ignore`.
-3. A skip is accepted with a live `@quarantine-YYYY-MM-DD` tag, or as `test.skip(condition, 'reason')` with a condition that reads a name. This keeps Playwright's normal way of limiting a test to a browser or device, with the reason written down. No environment-only or allow-list form: it would need a list to maintain.
+3. A skip is accepted only when it depends on a condition that reads a name: as `test.skip(condition, 'reason')`, or without a reason under a live `@quarantine-YYYY-MM-DD` tag. This keeps Playwright's normal way of limiting a test to a browser or device, with the reason written down. A static skip is a finding even under a live tag (changed in 4.2.0): quarantine means the test runs in a quarantine job, and a static skip never runs. No environment-only or allow-list form: it would need a list to maintain.
 4. An expired or undated tag fails even without a `.skip`, because suites exclude quarantined tests with `grepInvert`.
 5. Conditionals are limited to `if` and `switch` directly in a test or step body, without throw-only guards. Wider forms (ternaries, callbacks, hooks) were mostly legitimate.
 6. No "test without assertions" rule. Assertions live in page objects, helpers and implicit waits, and no syntax pattern separates those from an empty test.
 7. `ast-grep-ignore` cannot silence these rules. ast-grep has no flag to ignore suppression comments, so it scans temporary copies in which the comment is renamed (same length, so lines hold). A comment that tries is also a finding. Exceptions go through the reviewed baseline.
-8. A file is in scope when it matches `include` (default `**/e2e/**`) or imports `@playwright/test`, directly or through relative imports. A `*.spec.*` default pulled in Vitest and Jest files and missed Playwright `*.test.ts`. Reading `testDir` from `playwright.config` was dropped: the config is code.
+8. A file is in scope when it matches `include` (default `**/e2e/**`) or imports `@playwright/test`, directly or through relative imports. Since 4.2.0 an import of browser launchers alone does not count: those files are scripts. A `*.spec.*` default pulled in Vitest and Jest files and missed Playwright `*.test.ts`. Reading `testDir` from `playwright.config` was dropped: the config is code.
 
 ## Consequences
 

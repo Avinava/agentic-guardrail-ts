@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [4.2.0] - 2026-11-27
+
+Fixes for defects found on real repositories. Copy the new scripts (and `.semgrep/rules.yml`), run a full `check`, review, and update the baseline: see [Upgrading to 4.2.0](docs/packs.md#upgrading-to-420).
+
+### Changed
+- playwright: a static `test.skip` or `test.fixme` is a finding even under a live `@quarantine` tag. Conditional skips are unchanged. Drop `.skip`, keep the tag and run the tagged tests in a quarantine job.
+- playwright: an import of browser launchers alone (`chromium`, ...) no longer puts a file outside `include` in scope; waits inside a `.route()` handler are accepted.
+- vocab-literal: property names and keys are no longer flagged; `as const` string arrays and `StrEnum` `auto()` members are now read, so new findings can appear.
+
+### Added
+- `excludeMembers` in `guardrails/vocab.json` (member name globs).
+- The clean line of a scoped run names the enabled tools it did not run; a full run names an enabled tool that had no input.
+- Setup and package manager docs: the pnpm `allowBuilds` entry for `@ast-grep/cli`.
+
+### Fixed
+- vocab-literal no longer crashes with TypeScript 7: it falls back to `@typescript/typescript6`, resolves from vocab modules in workspaces, and names the alias when no compiler API is found. A module that holds only arrays no longer fails the gate.
+- Knip's CODEOWNERS `owners` are not findings.
+- Semgrep rules: aliased `exec`, `insertAdjacentHTML`, `subprocess.getoutput` and `getstatusoutput`, `hashlib.new("md5")` are matched; `usedforsecurity=False` is not reported.
+- playwright: `page['waitForTimeout']()` is matched.
+
 ## [4.1.0] - 2026-11-27
 
 An opt-in Playwright lint pack. Nothing changes for an existing install until `guardrails/playwright.json` exists. See [docs/packs.md](docs/packs.md#playwright) and [decision 0004](docs/decisions/0004-playwright-pack.md).

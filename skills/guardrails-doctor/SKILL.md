@@ -55,7 +55,8 @@ you to apply the suggested wave.
 - **Playwright pack.** A repo with `playwright.config.*` and no `guardrails/playwright.json`: offer the
   pack. With it on, report: a `testDir` outside `include` whose specs reach `@playwright/test`
   only through a path alias or workspace package (they are not checked); `@ast-grep/cli` missing
-  from `devDependencies`; `playwright:skip`, `playwright:focused-test` and
+  from `devDependencies` (with pnpm, also missing under `allowBuilds` in `pnpm-workspace.yaml`);
+  `@quarantine-` tags with no CI job that runs them; `playwright:skip`, `playwright:focused-test` and
   `playwright:stale-quarantine` counts in the baseline (a baselined `.only` still hides tests); and
   `@quarantine-` dates that expire within 14 days or lie more than 90 days ahead
   (`rg -n '@quarantine'`).

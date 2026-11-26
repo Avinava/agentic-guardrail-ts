@@ -26,6 +26,12 @@ The default. npm 7+ installs peer dependencies, so `vite` would arrive anyway, b
 - Internal dependencies use `workspace:*`, which is the template default for syncpack.
 - pnpm's strict layout makes undeclared imports fail at runtime. dependency-cruiser's `no-non-package-json` catches them earlier.
 - CI needs the `pnpm/action-setup` step, which the CI template includes.
+- pnpm 10 and later do not run a dependency's build script unless it is allowed, and pnpm 12 fails the install (`ERR_PNPM_IGNORED_BUILDS`). The ast-grep and playwright tools need `@ast-grep/cli`'s script, so allow it in `pnpm-workspace.yaml` (pnpm 10.26 and later) before adding it:
+
+```yaml
+allowBuilds:
+  '@ast-grep/cli': true
+```
 
 ### Catalogs
 

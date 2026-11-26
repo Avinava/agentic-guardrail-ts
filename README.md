@@ -76,7 +76,7 @@ The engine is language-agnostic. Each stack is a pack of tools that switch on wh
 | `dart` | `pubspec.yaml`, `*.dart` | dart format, dart or flutter analyze, Flutter coverage floor | opt-in, **experimental** |
 | `cpp` | `platformio.ini`, `.clang-format`, `*.cpp` | clang-format, pio check | opt-in, **experimental** |
 | `security` | lockfiles, `.github/workflows/*.yml`, `.semgrep/` | osv-scanner, semgrep (own rules), zizmor | opt-in |
-| `playwright` | `playwright.config.*` | e2e rules on ast-grep: fixed waits, `.only`, undated skips, conditionals | opt-in |
+| `playwright` | `playwright.config.*` | e2e rules on ast-grep: fixed waits, `.only`, static skips, expired quarantines, conditionals | opt-in |
 
 ## How the loop works
 

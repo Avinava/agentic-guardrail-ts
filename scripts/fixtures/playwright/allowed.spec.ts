@@ -43,19 +43,29 @@ test.describe('group', () => {
   });
 });
 
-test.skip('quarantined skip', { tag: '@quarantine-2099-12-31' }, async () => {});
-test.fixme('quarantined in the title @quarantine-2099-12-31', async () => {});
-test.fixme('quarantined in a list', { tag: ['@smoke', '@quarantine-2099-12-31'] }, async () => {});
-test('quarantined, skipped inside', { tag: '@quarantine-2099-12-31' }, async () => {
-  test.skip();
+// A quarantined test still runs, in a quarantine job. Under a live tag a skip may rest on a
+// condition without a reason.
+test('quarantined', { tag: '@quarantine-2099-12-31' }, async () => {});
+test('quarantined in the title @quarantine-2099-12-31', async () => {});
+test('quarantined in a list', { tag: ['@smoke', '@quarantine-2099-12-31'] }, async () => {});
+test('quarantined, skipped on one browser', { tag: '@quarantine-2099-12-31' }, async ({ browserName }) => {
+  test.skip(browserName === 'webkit');
 });
-test.describe('quarantined group', { tag: '@quarantine-2099-12-31' }, () => {
-  test.skip('child', async () => {});
-  test('child skipped inside', async () => {
-    test.fixme();
+test.describe(/* why: flaky */ 'quarantined group @quarantine-2099-12-31', () => {
+  test.fixme(({ isMobile }) => isMobile);
+});
+
+// Delaying a response inside a route handler simulates a slow network.
+test('slow response', async ({ page, context }) => {
+  await page.route('**/api', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await route.continue();
+  });
+  await context.route('**/img', async function (route) {
+    await page.waitForTimeout(500);
+    await route.abort();
   });
 });
-test.describe.skip(/* why: flaky */ 'quarantined skip group @quarantine-2099-12-31', () => {});
 
 test('conditionals outside the test body', async ({ page }) => {
   await page.route('**/api', async (route) => {
