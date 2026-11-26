@@ -52,6 +52,12 @@ you to apply the suggested wave.
 - **Packs.** Run `node scripts/guardrails.mjs packs`. Report stacks that are detected but have no
   tool on (for example `mule: detected` with every tool `off`) as an offer, not a defect: packs
   are opt-in. Report a tool that is `on` but whose binary is missing.
+- **Playwright pack.** A repo with `playwright.config.*` and no `guardrails/playwright.json`: offer the
+  pack. With it on, report: `include` globs that miss the config's `testDir`; `@ast-grep/cli` missing
+  from `devDependencies`; `playwright:skip`, `playwright:focused-test` and
+  `playwright:stale-quarantine` counts in the baseline (a baselined `.only` still hides tests); and
+  `@quarantine-` dates that expire within 14 days or lie more than 90 days ahead
+  (`rg -n '@quarantine'`).
 - **Old vocab rule (4.0.0 migration).** If `rules/no-vocab-literal.yml` exists, the repo still has
   the v3 hand-filled ast-grep rule, which 4.0.0 replaced with the `vocab-literal` tool. Offer the
   migration and apply it only with approval: write `guardrails/vocab.json` with the vocab module's

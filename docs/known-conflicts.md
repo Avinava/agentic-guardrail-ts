@@ -405,3 +405,11 @@ Tool interactions that surprise people, and what to do about them.
 **Why:** osv-scanner reads the live OSV database, so new advisories fail old lockfiles.
 
 **Resolution:** update the dependency, or accept the advisory with a reason and an `ignoreUntil` date in `osv-scanner.toml`. A dependency bot opens the update PR; the gate only reports.
+
+## playwright pack and unit tests named *.spec.*
+
+**Symptom:** a Vitest or Jest file reports `playwright:skip` or `playwright:conditional-in-test`.
+
+**Why:** the default `include` takes every `*.spec.*` file, and the rules match `test`, `it` and `describe` by name.
+
+**Resolution:** narrow `include` in `guardrails/playwright.json` to the e2e folders. An `ast-grep-ignore` comment does not work here: bare ones, and ones naming a playwright rule, are findings. Comments that name only the project's own ast-grep rules keep working.

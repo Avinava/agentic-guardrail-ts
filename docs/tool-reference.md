@@ -24,6 +24,7 @@ What each tool does, where it is configured, and when it runs. Why these tools: 
 | tach, deptry, vulture (Python pack) | | | | full check only |
 | zizmor (security pack, opt-in) | | changed workflows | staged workflows | all |
 | osv-scanner, semgrep (security pack, opt-in) | | | | full check only |
+| playwright (playwright pack, opt-in) | edited file | changed files | staged files | all |
 
 ## guardrails.mjs
 
@@ -125,4 +126,4 @@ See [Agent loop](./agent-loop.md).
 
 ## Packs
 
-Everything above is the `ts` pack. Other stacks (Python, Mule, Salesforce, shell, Docker, SQL, GitHub Actions, Rust, Dart, C++, security) and the language-agnostic core tools (cspell, jscpd, ast-grep, vocab-literal, ls-lint, markdownlint, lychee, editorconfig-checker) are packs: see [Packs](./packs.md) for the contract, the detect rules, what is default-on and what is opt-in.
+Everything above is the `ts` pack. Other stacks (Python, Mule, Salesforce, shell, Docker, SQL, GitHub Actions, Rust, Dart, C++, security, Playwright) and the language-agnostic core tools (cspell, jscpd, ast-grep, vocab-literal, ls-lint, markdownlint, lychee, editorconfig-checker) are packs: see [Packs](./packs.md) for the contract, the detect rules, what is default-on and what is opt-in.
